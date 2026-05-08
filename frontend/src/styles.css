@@ -1,0 +1,2705 @@
+:root {
+  /* Foundational tokens. The spirit is Tufte-inspired: high data-ink ratio,
+     restrained chrome, typography first. Palette is intentionally low-
+     saturation so categorical encodings don't fight the data. */
+
+  /* Surfaces */
+  --bg: #fff;
+  --surface: #fafafa;        /* sidebar bg, filters row */
+  --surface-2: #f6f6f6;      /* form bg, action-bar bg */
+
+  /* Text + accent */
+  --fg: #1a1a1a;
+  --muted: #666;
+  /* Accent is iron-gall ink — the desaturated blue-black of historical
+     scientific notebooks. Replaces a previous Material-blue (#2962ff),
+     which read as generic SaaS chrome. Used for focus rings, links,
+     active-tab indicators, and the decorations chip. */
+  --accent: #2a3f6b;
+  --accent-strong: #1d2d4d;
+  --accent-bg: #e8ebf2;
+
+  /* Lines */
+  --line: #d8d8d8;
+  --line-soft: #ececec;      /* lighter row separators inside dense tables */
+
+  /* Semantic colors */
+  --error: #c62828;
+  --warn: #8a6d1c;
+  --warn-bg: #fff4d6;
+  --ok: #2e7d32;
+  --ok-bg: #e8f3e8;
+
+  /* Soma-dot semantic encoding (orphan / single / multi). Hoisted from
+     hex literals so the encoding can be styled consistently elsewhere. */
+  --soma-orphan: #cccccc;
+  --soma-single: #4caf50;
+  --soma-multi:  #e53935;
+
+  /* Categorical palette = matplotlib's tab10. Mirrored on the backend in
+     `services/categorical.py::TAB10`; theme.ts injects these as plotly's
+     `colorway`, so the SPA-side colorway and the backend's explicit
+     `marker.color` produce identical hexes for ≤10 distinct values. Keep
+     these two lists in sync — they're the canonical 10-slot palette. */
+  --cat-1:  #1f77b4;
+  --cat-2:  #ff7f0e;
+  --cat-3:  #2ca02c;
+  --cat-4:  #d62728;
+  --cat-5:  #9467bd;
+  --cat-6:  #8c564b;
+  --cat-7:  #e377c2;
+  --cat-8:  #7f7f7f;
+  --cat-9:  #bcbd22;
+  --cat-10: #17becf;
+
+  /* Standalone pale tints used for the column-band header backgrounds
+     (synapse / cell_type / soma / table / spatial). Independent of the
+     categorical palette above — these need to be light and readable
+     against the table foreground regardless of which data palette is
+     active, so they don't get re-derived when --cat-* changes. */
+  --cat-1-bg:  #eef3f7;
+  --cat-2-bg:  #f3eef7;
+  --cat-3-bg:  #eef5ee;
+  --cat-4-bg:  #f7f1ec;
+  --cat-5-bg:  #f5ecee;
+  --cat-6-bg:  #eef2f3;
+
+  /* Sequential palette — 10 stops, perceptually-uniform-ish, for continuous
+     hue / colorscale work. Plotly resolves built-in scales by name; this
+     exists so the SPA can also generate gradients in HTML/SVG when needed. */
+  --seq-0: #fde725;
+  --seq-1: #c2df23;
+  --seq-2: #86d549;
+  --seq-3: #52c569;
+  --seq-4: #2bb07f;
+  --seq-5: #1f9a8a;
+  --seq-6: #25858e;
+  --seq-7: #2d708e;
+  --seq-8: #38598c;
+  --seq-9: #443a83;
+
+  /* Border-radius scale — collapse the previous 2/3/4/14px scatter into
+     four named steps. */
+  --r-sm: 2px;
+  --r-md: 4px;
+  --r-lg: 8px;
+  --r-pill: 999px;
+
+  /* Font weights */
+  --fw-body: 400;
+  --fw-label: 500;
+  --fw-title: 600;
+
+  /* Type stack — IBM Plex (Sans / Serif / Mono), loaded from Google Fonts
+     in index.html. The Plex family was designed as a coherent system, so
+     mixing all three (sans body, serif headings, mono for IDs/coords)
+     reads as one voice rather than three. System fallbacks keep the page
+     legible if the network blocks Google Fonts. */
+  --font-sans: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  --font-serif: "IBM Plex Serif", "Iowan Old Style", "Palatino", Georgia, serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  font-family: var(--font-sans);
+  font-size: 13px;
+  color: var(--fg);
+  background: var(--bg);
+}
+
+body, html, #root { margin: 0; padding: 0; height: 100%; }
+
+/* Headings use the serif. Per-component rules below set size/margin but
+   not family, so this single rule retypes every h1–h6 in one shot. The
+   landing hero, sidebar app title, table-meta titles, and section labels
+   pick this up automatically. */
+h1, h2, h3, h4, h5, h6 {
+  font-family: var(--font-serif);
+  font-weight: var(--fw-title);
+  letter-spacing: -0.005em;
+}
+
+.workspace {
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr);
+  height: 100vh;
+  transition: grid-template-columns 120ms ease;
+}
+
+/* Collapsed mode: shrink the sidebar to a thin vertical strip with just an
+   expand affordance. Lets the workbench claim the freed width without
+   sacrificing access to datastack / nav controls. Persisted to localStorage.
+   The 36px width gives enough hit-target for the toggle button without
+   feeling chunky. */
+.workspace.sidebar-collapsed {
+  grid-template-columns: 36px minmax(0, 1fr);
+}
+
+.sidebar {
+  border-right: 1px solid var(--line);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow-y: auto;
+  background: var(--surface);
+}
+
+.workspace.sidebar-collapsed .sidebar {
+  /* Zero horizontal padding so the vertical-label toggle button can
+     claim the full 36px strip — every pixel of the collapsed sidebar
+     is the click target / branding surface. Only one child renders
+     in collapsed mode, so we don't need flex spacing either. */
+  padding: 0;
+  align-items: stretch;
+}
+
+.sidebar h1 {
+  font-size: 16px;
+  font-weight: var(--fw-title);
+  margin: 0 0 8px;
+}
+
+.sidebar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.sidebar-toggle {
+  background: transparent;
+  border: 1px solid transparent;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  font-size: 16px;
+  line-height: 1;
+  color: var(--muted);
+  border-radius: var(--r-md);
+}
+.sidebar-toggle:hover { color: var(--accent); border-color: var(--line); background: var(--bg); }
+/* When the sidebar is collapsed, the toggle button claims the whole
+   strip via the `.vertical` modifier (see below). The narrow plain-
+   chevron style is kept only for any non-vertical use sites. */
+.workspace.sidebar-collapsed .sidebar-toggle:not(.vertical) {
+  width: 28px;
+  height: 32px;
+}
+/* Vertical-label variant used by both the collapsed sidebar and the
+   collapsed analytics rail. The button fills the strip and shows the
+   label rotated 90° (writing-mode: vertical-rl, with `text-orientation:
+   mixed` so latin chars stay upright when read top-to-bottom — actually
+   `mixed` rotates Latin to be read bottom-up, which matches the chevron
+   direction at the bottom of the column). The whole button is the
+   click target so users can land anywhere along the strip. */
+.sidebar-toggle.vertical,
+.rail-toggle.vertical {
+  width: 100%;
+  height: 100%;
+  min-height: 200px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 0;
+  gap: 8px;
+}
+.sidebar-toggle.vertical .vertical-label,
+.rail-toggle.vertical .vertical-label {
+  /* Same vertical-text recipe as PartnersTable's collapsed group
+     headers (`.partners .group-row th.collapsed`) — text flows
+     top-to-bottom, characters rotated right. Keeping the convention
+     consistent across all the SPA's collapsed strips means once a
+     user learns to read one, they can read the others. Serif family
+     so the rotated label reads as a continuation of the panel's
+     heading rather than as UI chrome — matches the h1 ("CAVE Data
+     Viewer") and h-rail title ("Plots") it stands in for. */
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+  font-family: var(--font-serif);
+  font-size: 14px;
+  font-weight: var(--fw-title);
+  color: var(--muted);
+  user-select: none;
+}
+.sidebar-toggle.vertical .vertical-chevron,
+.rail-toggle.vertical .vertical-chevron {
+  font-size: 14px;
+  line-height: 1;
+  color: var(--muted);
+}
+.sidebar-toggle.vertical:hover .vertical-label,
+.sidebar-toggle.vertical:hover .vertical-chevron,
+.rail-toggle.vertical:hover .vertical-label,
+.rail-toggle.vertical:hover .vertical-chevron {
+  color: var(--accent);
+}
+
+.sidebar label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.sidebar select, .sidebar input {
+  font-size: 13px;
+  padding: 4px 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--bg);
+}
+
+.sidebar .info { font-size: 12px; color: var(--muted); }
+.sidebar .info p { margin: 4px 0; }
+
+/* "Open in Neuroglancer" affordance under the datastack picker. Sits
+   outside the collapsible info block so it's always visible (the button
+   is the most important sidebar action besides nav) but is rendered as
+   a link (.link-button) for visual quiet — the sidebar's tone is
+   "metadata," not "primary action," so a chip-button would be too loud. */
+.sidebar .ngl-link-row {
+  margin: 6px 0 8px;
+  font-size: 12px;
+  color: var(--muted);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.sidebar .error-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--error);
+  margin-top: 2px;
+}
+.sidebar .error-row span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sidebar .error-row button {
+  font-size: 11px;
+  padding: 2px 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--bg);
+  cursor: pointer;
+}
+.sidebar .error-row button:disabled { opacity: 0.6; cursor: default; }
+
+.sidebar .nav {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+
+.main {
+  padding: 16px 24px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.breadcrumb {
+  font-size: 12px;
+  margin-bottom: 12px;
+}
+
+.breadcrumb a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.breadcrumb a:hover {
+  text-decoration: underline;
+}
+
+/* Root/Cell ID inputs always editable; the decoration picker collapses to a
+   chip showing the active count. The chip click toggles a fieldset below. */
+.root-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+}
+
+.root-form-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+/* Decoration-count chip. Closed = compact pill with count + collapsed chevron;
+   open = same pill with the picker fieldset rendered below the form row. */
+.decorations-chip {
+  align-self: flex-end;
+  font-size: 12px;
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--muted);
+  border-radius: var(--r-pill);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+}
+.decorations-chip:hover {
+  background: var(--surface);
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.decorations-chip.open {
+  background: var(--accent-bg);
+  color: var(--accent-strong);
+  border-color: var(--accent);
+}
+.decorations-chip .chevron { font-size: 10px; }
+
+.root-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.decorations-picker {
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  padding: 4px 8px 6px;
+  margin: 0;
+  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  /* `align-items: flex-start` so the rows + add button don't stretch to
+     fill the fieldset width — keeps the picker visually compact and
+     keeps the popover anchored next to its × button rather than across
+     a wide empty input. */
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.decorations-picker legend {
+  color: var(--muted);
+  padding: 0 4px;
+}
+
+.decorations-picker .decoration-row {
+  display: flex;
+  /* Larger gap so the × button doesn't visually abut the input pill —
+     gives the eye a clear separation between "the value" and "remove
+     it". Matches the visual breathing room used in the analytics rail's
+     header buttons. */
+  gap: 12px;
+  align-items: center;
+}
+
+.decorations-picker .decoration-row select {
+  flex: 1;
+}
+
+.decorations-picker .decoration-row .decoration-combobox {
+  /* Match the popover's `max-width` so the closed input is as wide as
+     the open dropdown — typical decoration-table names (e.g.
+     `cell_type_multifeature_combo`, `proofreading_status_and_strategy`)
+     fit without truncation, and the popover never extends past the
+     input's right edge to overlap the × button.
+     Explicit `width` wins over the base `.combobox { display: inline-block }`
+     intrinsic sizing — flex-basis alone wasn't enough because inline-block
+     elements size to their content first; using `display: block` with a
+     concrete width keeps the input at 480px regardless of selected text
+     length. `max-width: 100%` lets it shrink on narrow viewports. */
+  display: block;
+  width: 480px;
+  max-width: 100%;
+  flex: 0 0 auto;
+  min-width: 0;
+}
+
+/* Square remove button — pinned to a fixed footprint so it can't be squeezed
+   by the combobox's flex:1, and given a generous × glyph so the affordance
+   reads cleanly next to the search input. */
+.decorations-picker .decoration-row .decoration-remove {
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  line-height: 1;
+  color: var(--muted);
+}
+.decorations-picker .decoration-row .decoration-remove:hover:not(:disabled) {
+  color: var(--error);
+  border-color: var(--error);
+  background: var(--bg);
+}
+
+/* Searchable dropdown — used for the decoration-table picker, ready to
+   reuse anywhere a long string list needs filtering. Visual language
+   mirrors `.columns-menu-popover` / `.add-plot-popover` so all three
+   dropdowns in the app read consistently. */
+.combobox {
+  position: relative;
+  display: inline-block;
+}
+.combobox.disabled {
+  opacity: 0.55;
+  pointer-events: none;
+}
+.combobox-input {
+  width: 100%;
+  font-size: 12px;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--bg);
+  color: var(--fg);
+  font-family: inherit;
+}
+.combobox-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+/* Popover sizing rules:
+   - `width: max-content` so the popover sizes to its longest option
+     row — table names like `cell_type_multifeature_combo` shouldn't
+     get truncated when there's room to show them in full.
+   - `min-width: 100%` keeps the popover at least as wide as its
+     anchor input, so a short list doesn't render as a narrow strip
+     floating below a wider field.
+   - `max-width: min(480px, calc(100vw - 32px))` caps absurdly wide
+     content (a pathological 200-char table name would otherwise
+     blow the layout out) and stays inside the viewport on narrow
+     screens, with 32px of margin so the popover doesn't touch the
+     edge.
+   - No `right: 0` because that conflicts with `max-content` width;
+     the popover anchors at the input's left and grows rightward. */
+.combobox-popover {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 2px);
+  left: 0;
+  width: max-content;
+  min-width: 100%;
+  max-width: min(480px, calc(100vw - 32px));
+  max-height: 280px;
+  overflow-y: auto;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+  padding: 4px 0;
+}
+.combobox-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  font-family: var(--font-mono);
+}
+.combobox-option.highlight {
+  background: var(--accent-bg);
+  color: var(--accent-strong);
+}
+.combobox-option.selected .combobox-option-label::before {
+  content: "✓ ";
+  color: var(--accent);
+}
+.combobox-option-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.combobox-option-hint {
+  font-size: 10px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  flex-shrink: 0;
+}
+.combobox-empty {
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--muted);
+  font-style: italic;
+}
+
+/* Inline form-row summary — replaces the standalone `.summary` block.
+   Sits right of the Load button; pushed to the right edge via
+   `margin-left: auto` so the form's primary inputs claim the left.
+   Compact font + muted color so it reads as context, not a heading. */
+.summary-inline {
+  margin-left: auto;
+  /* Stack the decorations line on top of the counts/version line. Each
+     child is laid out as a horizontal row of inline-flex items. */
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  font-size: 12px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+}
+.summary-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.summary-decorations {
+  /* Decoration table names sit just above the counts. Long lists are allowed
+     to wrap onto multiple lines rather than truncate — the names are the
+     useful information. Title attribute still mirrors the full list for hover. */
+  white-space: normal;
+  text-align: right;
+  color: var(--muted);
+}
+.summary-inline strong {
+  color: var(--fg);
+  font-weight: var(--fw-label);
+}
+.summary-counts {
+  /* Allow shrinkage on narrow viewports — counts truncate before the
+     row wraps, since the version chip is the most important piece. */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* SWR revalidation status. `pending` = some decoration cells may still flip
+   in-place when the background refresh lands. `done` = data is final. */
+.reval-badge {
+  display: inline-block;
+  margin-left: 12px;
+  padding: 1px 8px;
+  font-size: 11px;
+  border-radius: var(--r-pill);
+  vertical-align: middle;
+  font-family: var(--font-sans);
+}
+.reval-badge.pending {
+  background: var(--warn-bg);
+  color: var(--warn);
+  border: 1px solid #f0d784;
+}
+.reval-badge.done {
+  color: var(--ok);
+  background: var(--ok-bg);
+  border: 1px solid #c5dec5;
+}
+.reval-badge .spin {
+  display: inline-block;
+  animation: cdv-spin 1.4s linear infinite;
+}
+@keyframes cdv-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+/* `.neuron-view` is the route container holding (in order) the root-id form,
+   the summary line, and the two-pane workbench. Setting it to a flex column
+   that fills the height of `.main` lets `.workbench` claim the remaining
+   vertical space below the form/summary; without this rule the workbench's
+   own `flex: 1` has no flex parent to operate on and the rail+table panes
+   collapse to their content height (= the whole page scrolls together). */
+.neuron-view {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+/* Form and summary sit above the workbench at their natural height; both
+   stay pinned (no shrinking) so resizing the viewport eats into the
+   workbench rather than into the controls. */
+.neuron-view > .root-form,
+.neuron-view > .summary {
+  flex-shrink: 0;
+}
+
+/* Two-pane workbench: analytics rail (plots + summary metrics) on the left,
+   data tables on the right. Both columns scroll their own overflow so the
+   user can browse the partners table without losing the plots from view, and
+   vice-versa. */
+.workbench {
+  display: grid;
+  /* `minmax(0, 1fr)` lets the second column shrink below its content width;
+     without it, a wide partner table would push the whole grid past the
+     viewport edge instead of scrolling within its pane. */
+  grid-template-columns: minmax(380px, 440px) minmax(0, 1fr);
+  gap: 16px;
+  flex: 1;        /* claim remaining height of .main so panes can scroll independently */
+  min-height: 0;  /* let the grid children's overflow:auto actually take effect */
+  transition: grid-template-columns 120ms ease;
+}
+
+/* Rail collapsed — the analytics-rail column shrinks to a thin strip
+   with just an expand button, letting the partners table claim almost
+   the whole horizontal space. State lives in localStorage on the
+   NeuronView side, so the user's preference persists across reloads
+   and cross-nav. Mirrors the sidebar collapse pattern in `.workspace`. */
+.workbench.rail-collapsed {
+  grid-template-columns: 36px minmax(0, 1fr);
+}
+.analytics-rail.collapsed {
+  display: flex;
+  align-items: stretch;
+  padding: 0;
+  overflow: hidden;
+}
+.rail-toggle {
+  width: 24px;
+  height: 24px;
+  font-size: 16px;
+  line-height: 1;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--muted);
+  border-radius: var(--r-md);
+  cursor: pointer;
+}
+.rail-toggle:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.rail-toggle-row {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 4px;
+}
+
+.analytics-rail,
+.tables-pane {
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 4px;  /* breathing room before the scrollbar */
+}
+
+/* Below ~960px the two-pane grid switches to a flex column with a tab
+   bar that lets the user pick which pane is visible — the analytics
+   rail and partners table both want full width to be usable, so showing
+   one at a time beats squeezing both into a half-viewport each. The
+   `.narrow` class flips on once the JS-tracked media query matches;
+   `useMediaQuery` and the `.workbench-tabs` render path in NeuronView
+   are the JS half of this layout switch. */
+@media (max-width: 960px) {
+  .workbench.narrow {
+    display: flex;
+    flex-direction: column;
+  }
+  .workbench.narrow .analytics-rail,
+  .workbench.narrow .tables-pane {
+    /* Each pane keeps its independent scroll within the workbench's
+       remaining vertical height — same affordance as wide mode. */
+    flex: 1;
+    min-height: 0;
+  }
+}
+
+/* Empty-state placeholder rendered when no cell is loaded. Mirrors the
+   workbench's rail-plus-tables shape (rail on the left with cell-filter +
+   plots stacked, partners pane on the right) so the user sees where each
+   region will fill in. Dashed borders + muted text make the placeholders
+   read as "preview, not real data" without dominating the page. */
+.empty-workbench {
+  margin-top: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.empty-message {
+  max-width: 70ch;
+}
+.empty-message h3 {
+  margin: 0 0 6px;
+  font-size: 15px;
+  font-weight: var(--fw-title);
+  color: var(--fg);
+}
+.empty-message p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.empty-shape {
+  display: flex;
+  gap: 12px;
+  align-items: stretch;
+}
+.empty-shape-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  flex: 0 0 280px;
+}
+.empty-shape-tables {
+  flex: 1;
+  display: flex;
+}
+.empty-card {
+  flex: 1;
+  border: 1px dashed var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  color: var(--muted);
+  padding: 20px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 90px;
+  justify-content: center;
+}
+.empty-card-tables {
+  /* Wider pane on the right gets a deeper minimum so the proportions
+     read like the loaded layout rather than three equal-height boxes. */
+  min-height: 240px;
+}
+.empty-card-label {
+  font-size: 11px;
+  font-weight: var(--fw-label);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg);
+}
+.empty-card-hint {
+  font-size: 12px;
+  line-height: 1.45;
+}
+@media (max-width: 720px) {
+  .empty-shape {
+    flex-direction: column;
+  }
+  .empty-shape-rail {
+    flex: 0 0 auto;
+  }
+}
+
+/* Workbench tab bar — sits above the active pane in narrow mode.
+   Visual language mirrors `.partners-tabs` so the SPA's two
+   tab-bars (workbench-level and partners-pane-level) read alike. */
+.workbench-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+}
+.workbench-tabs button {
+  font-size: 13px;
+  padding: 6px 14px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: var(--r-md) var(--r-md) 0 0;
+  color: var(--muted);
+  cursor: pointer;
+  position: relative;
+  top: 1px;
+}
+.workbench-tabs button:hover {
+  color: var(--accent);
+}
+.workbench-tabs button.active {
+  color: var(--accent-strong);
+  border-color: var(--line);
+  background: var(--bg);
+  border-bottom-color: var(--bg);
+}
+
+.plots {
+  display: grid;
+  grid-template-columns: 1fr;  /* single column inside the rail; auto-fits to rail width */
+  gap: 16px;
+  margin: 0 0 16px;
+}
+
+.plot-panel {
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--bg);
+  padding: 8px;
+  min-height: 280px;
+}
+
+/* Match-count badge surfaces under the plot title when a global cell filter
+   is active. Empty-match state turns the badge red so a typo'd filter doesn't
+   render as a silently empty plot. */
+.plot-filter-badge {
+  font-size: 11px;
+  color: var(--muted);
+  padding: 2px 6px;
+  margin: 0 4px 4px;
+  border-radius: var(--r-md);
+  background: var(--surface);
+  display: inline-block;
+  border: 1px solid transparent;
+  font-family: inherit;
+}
+.plot-filter-badge.empty {
+  color: var(--error);
+  background: #fdecec;
+}
+/* Clickable variant — when the badge is a `<button>` (per-panel
+   filter toggle on dynamic plots), give it a subtle hover state so
+   users discover that it's interactive. The "✕"/"↻" glyph in the
+   label is the primary discoverability signal; the hover affordance
+   is supplementary. */
+.plot-filter-badge.clickable {
+  cursor: pointer;
+}
+.plot-filter-badge.clickable:hover {
+  border-color: var(--accent);
+  color: var(--accent-strong);
+}
+/* "filter off" state — this panel has opted out of the global cell
+   filter via `?unfilter=`. Visually de-emphasised vs. the active
+   filter pill (dashed border, muted text) so the user can scan the
+   rail and immediately see which panels are bypassing the filter. */
+.plot-filter-badge.off {
+  background: transparent;
+  border: 1px dashed var(--line);
+  color: var(--muted);
+  cursor: pointer;
+  font-family: inherit;
+}
+.plot-filter-badge.off:hover {
+  border-color: var(--accent);
+  color: var(--accent-strong);
+  border-style: solid;
+}
+
+/* Cell filter sits above the plot rail. Chip per active predicate, builder
+   form expands below the header when "+" is clicked. Layout matches the
+   decoration-picker chip style used elsewhere in the workspace. */
+.cell-filter-panel {
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--bg);
+  padding: 6px 8px;
+  margin-bottom: 8px;
+  font-size: 12px;
+}
+.cell-filter-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-weight: 500;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+.cell-filter-add {
+  font-size: 14px;
+  line-height: 1;
+  width: 22px; height: 22px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--bg);
+  cursor: pointer;
+}
+.cell-filter-add:disabled { opacity: 0.5; cursor: default; }
+.cell-filter-empty { color: var(--muted); font-style: italic; }
+.cell-filter-chips {
+  display: flex; flex-wrap: wrap; gap: 4px;
+}
+.cell-filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px 2px 2px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+/* Disabled state: muted text + dashed border so the chip is clearly toggled
+   off but still visually present (the whole point — keep it around so the
+   user can flip it back on without rebuilding). */
+.cell-filter-chip.disabled {
+  border-style: dashed;
+  opacity: 0.55;
+}
+.cell-filter-chip.disabled .chip-text { text-decoration: line-through; }
+/* Chip body is now a click-target for toggle. Strip default button chrome
+   so it reads as text inside the chip. */
+.cell-filter-chip .chip-text {
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+  padding: 2px 4px;
+  text-align: left;
+}
+.cell-filter-chip .chip-text:hover { color: var(--accent); }
+.cell-filter-chip > button:last-child {
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+  color: var(--muted);
+}
+.cell-filter-chip > button:last-child:hover { color: var(--error); }
+.cell-filter-builder {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+.cell-filter-builder select,
+.cell-filter-builder input {
+  font-size: 11px;
+  padding: 2px 4px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--bg);
+}
+.cell-filter-builder button {
+  font-size: 11px;
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--bg);
+  cursor: pointer;
+}
+
+/* In-panel header: title left, column picker right. Used by column-bound
+   plots so each plot's binding has its own UI rather than the old global
+   Visualize strip. */
+.plot-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+  padding: 0 4px;
+}
+
+.plot-panel-title {
+  font-size: 12px;
+  font-weight: var(--fw-label);
+  color: var(--muted);
+}
+
+.plot-panel-header select {
+  margin-left: auto;
+  font-size: 11px;
+  padding: 2px 4px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--bg);
+  max-width: 60%;
+}
+
+/* Dynamic plot panel header: a click-to-expand summary chip on the left,
+   the close button on the right, and (when expanded) the full picker grid
+   below. Mirrors the `decorations-chip` pattern in NeuronView's top bar so
+   "configured thing with a hidden editor" reads the same throughout. */
+.plot-panel-header.dynamic {
+  flex-wrap: wrap;
+}
+
+/* Summary chip — collapsed default for any panel with bindings, expanded
+   for fresh "+ Add plot" panels. Matches `.decorations-chip` in shape and
+   color tokens. The text region grows to fill horizontal space, pushing
+   the chevron to the right edge so the chip's hit-target is wide. */
+.dynamic-summary {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12px;
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--muted);
+  border-radius: var(--r-pill);
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  cursor: pointer;
+  text-align: left;
+}
+.dynamic-summary:hover {
+  background: var(--surface);
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.dynamic-summary.open {
+  background: var(--accent-bg);
+  color: var(--accent-strong);
+  border-color: var(--accent);
+}
+/* Long binding strings truncate cleanly rather than forcing the chip to
+   wrap onto multiple lines. The full text stays in the chip's title. */
+.dynamic-summary-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.dynamic-summary .chevron { font-size: 10px; flex-shrink: 0; }
+
+.dynamic-pickers {
+  /* Wraps onto its own row below the summary chip. `flex-basis: 100%`
+     forces the wrap so the chip + close button get a clean line above,
+     and `margin-left: 0` left-aligns the pickers under the chip rather
+     than right-edge-hugging like the legacy single-row layout. */
+  flex-basis: 100%;
+  margin-left: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.dynamic-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 10px;
+  color: var(--muted);
+}
+.dynamic-picker.disabled { opacity: 0.45; }
+.dynamic-picker-label {
+  font-family: var(--font-mono);
+  font-weight: var(--fw-label);
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.dynamic-picker select {
+  font-size: 11px;
+  padding: 2px 4px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--bg);
+  max-width: 130px;
+}
+
+/* Group an axis picker with its scope select; same row, no extra gap. */
+.dynamic-picker-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+/* Per-axis scope select. Compact pill-shaped dropdown; quietly default to
+   "both" (no visual emphasis) and switch to an accent ring when the user
+   restricts to pre / post so it's obvious a row filter is active. */
+.dynamic-scope {
+  font-size: 10px;
+  padding: 1px 3px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  background: var(--bg);
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.dynamic-scope.active {
+  color: var(--accent-strong);
+  border-color: var(--accent);
+  background: var(--accent-bg);
+}
+
+.dynamic-close,
+.dynamic-expand,
+.dynamic-move,
+.dynamic-cell-depth,
+.dynamic-scale {
+  margin-left: 2px;
+  font-size: 11px;
+  padding: 1px 6px;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--r-md);
+  cursor: pointer;
+}
+
+/* Scale toggle pill in the SynapseDepthProfile header — visually
+   distinct from the other utility buttons because it carries state
+   (count vs fraction) rather than triggering an action. Outlined when
+   in "fraction" mode so the user can scan and immediately see
+   whether what they're looking at is normalized. */
+.dynamic-scale {
+  font-family: var(--font-mono);
+  letter-spacing: 0.04em;
+  border-color: var(--line);
+}
+.dynamic-scale:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.dynamic-scale.active {
+  color: var(--accent-strong);
+  border-color: var(--accent);
+  background: var(--accent-bg);
+}
+.dynamic-expand:hover,
+.dynamic-move:hover:not(:disabled),
+.dynamic-cell-depth:hover {
+  color: var(--accent);
+  border-color: var(--line);
+  background: var(--bg);
+}
+
+/* Cell-depth toggle. Stateful (active = marker visible), styled like
+   `.dynamic-scope.active` so the user can scan the header and see at a
+   glance whether the marker is currently shown. */
+.dynamic-cell-depth.active {
+  color: var(--accent-strong);
+  border-color: var(--accent);
+  background: var(--accent-bg);
+}
+.dynamic-close:hover {
+  color: var(--error);
+  border-color: var(--line);
+  background: var(--bg);
+}
+.dynamic-move:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+/* Expanded-plot modal. The dynamic-plot panel's ⤢ button mounts a portal
+   that paints a fixed-position overlay on top of the whole app. The
+   backdrop swallows clicks (closes the modal); the inner card stops
+   propagation so clicks inside the chart don't dismiss it. ESC also
+   closes (handled in `DynamicPlotPanel`). The chart itself is just a
+   reused `<PlotPanel>` at viewport-scale dimensions, so it shares
+   react-query data with the inline copy — no extra fetches. */
+.plot-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 18, 25, 0.55);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+.plot-modal {
+  position: relative;
+  width: min(1200px, 92vw);
+  max-height: 90vh;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.25);
+  padding: 28px 20px 16px;
+  overflow: auto;
+}
+.plot-modal-close {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 28px;
+  height: 28px;
+  font-size: 14px;
+  line-height: 1;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--muted);
+  border-radius: var(--r-md);
+  cursor: pointer;
+}
+.plot-modal-close:hover {
+  color: var(--error);
+  border-color: var(--accent);
+}
+
+/* Rail header — sits above the plot panels with always-visible global
+   actions (currently just "clear all brushes"). Stays in the layout
+   even when the button is disabled so the affordance doesn't appear
+   and disappear as the user brushes / unbrushes. */
+.rail-header {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 4px;
+}
+.rail-clear-brushes {
+  font-size: 11px;
+  padding: 3px 10px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--muted);
+  border-radius: var(--r-pill);
+  cursor: pointer;
+}
+.rail-clear-brushes:hover:not(:disabled) {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--surface);
+}
+.rail-clear-brushes:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+/* "+ Add plot" affordance at the bottom of the analytics rail. The button
+   is a regular `<button>`; clicking toggles a portal-rendered popover
+   listing presets plus a "Custom plot…" entry. The portal escapes
+   `.analytics-rail`'s `overflow-y: auto`, so the popover never gets
+   clipped by the rail's scroll bounds — and React positions it with
+   `position: fixed` from the trigger's rect. Visual language mirrors
+   `.columns-menu` in PartnersTable so dropdowns read consistently
+   across the app. */
+.add-plot-row {
+  display: flex;
+  justify-content: center;
+}
+.add-plot-button {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  font-size: 12px;
+  padding: 8px 12px;
+  background: transparent;
+  color: var(--muted);
+  border: 1px dashed var(--line);
+  border-radius: var(--r-md);
+  cursor: pointer;
+}
+.add-plot-button:hover,
+.add-plot-button.open {
+  color: var(--accent-strong);
+  border-color: var(--accent);
+  border-style: solid;
+  background: var(--bg);
+}
+.add-plot-button .chevron { font-size: 10px; }
+
+/* Portal-rendered popover. Layout (position/top/left/maxHeight) is set
+   inline by AnalyticsRail; the rules here only style appearance. */
+.add-plot-popover {
+  z-index: 1000;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+  padding: 6px 0;
+  overflow-y: auto;
+}
+
+.add-plot-divider {
+  padding: 4px 10px;
+  font-size: 10px;
+  font-weight: var(--fw-label);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  background: var(--surface);
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  margin-top: 4px;
+}
+
+.add-plot-option {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  text-align: left;
+  padding: 6px 12px;
+  font-size: 12px;
+  background: transparent;
+  border: none;
+  color: var(--fg);
+  cursor: pointer;
+}
+.add-plot-option:hover:not(:disabled) {
+  background: var(--accent-bg);
+  color: var(--accent-strong);
+}
+.add-plot-option:disabled {
+  color: var(--muted);
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+/* Drill-in row — pushes the chevron to the right edge so it reads as
+   "this opens a deeper menu". Same hover affordance as a leaf row. */
+.add-plot-option.drill .chevron {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--muted);
+}
+.add-plot-option.drill:hover:not(:disabled) .chevron {
+  color: var(--accent-strong);
+}
+
+/* Breadcrumb row at the top of every non-root level. ← button on the
+   left, the path string after it. Sticky so a long column list still
+   shows the breadcrumb when the user scrolls inside the popover. */
+.add-plot-crumb {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px 4px 6px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+.add-plot-back {
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1;
+  padding: 2px 8px;
+  border-radius: var(--r-md);
+  cursor: pointer;
+}
+.add-plot-back:hover {
+  border-color: var(--accent);
+  color: var(--accent-strong);
+}
+.add-plot-crumb-path {
+  font-size: 11px;
+  color: var(--muted);
+  font-weight: var(--fw-label);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Empty-state row at the root level when no decoration tables are
+   loaded — keeps the "Categorical bar charts" section from looking
+   broken. */
+.add-plot-empty {
+  padding: 6px 12px;
+  font-size: 11px;
+  color: var(--muted);
+  font-style: italic;
+}
+
+.plot-panel.loading, .plot-panel .loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  font-style: italic;
+  height: 280px;
+}
+
+.plot-panel.error {
+  color: var(--error);
+  padding: 16px;
+}
+
+.partner-tables {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 24px;
+}
+
+/* Tab bar at the top of the partners pane. Output / Input / Both. */
+.partners-tabs {
+  display: flex;
+  gap: 2px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 8px;
+}
+
+.partners-tabs button {
+  background: transparent;
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: var(--r-md) var(--r-md) 0 0;
+  padding: 6px 12px;
+  font-size: 13px;
+  color: var(--muted);
+  margin-bottom: -1px;  /* overlap the border-bottom of .partners-tabs */
+}
+
+.partners-tabs button:hover {
+  color: var(--accent);
+  border-color: transparent;
+}
+
+.partners-tabs button.active {
+  color: var(--fg);
+  background: var(--bg);
+  border-color: var(--line);
+  font-weight: var(--fw-title);
+}
+
+.partners-tabs button.active:hover {
+  color: var(--fg);
+  border-color: var(--line);
+}
+
+.actions .scope {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* Plot-brush selection indicator. Lives between the tab bar and the action
+   bar so the user always knows whether something other than column filters
+   is gating the visible rows. */
+.brush-pill {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  margin-bottom: 6px;
+  font-size: 12px;
+  background: var(--accent-bg);
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  color: var(--fg);
+}
+.brush-pill strong { font-weight: var(--fw-title); }
+.brush-pill-clear {
+  margin-left: auto;
+  font-size: 11px;
+  padding: 1px 8px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--muted);
+  border-radius: var(--r-pill);
+}
+.brush-pill-clear:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.partners h2 { font-size: 14px; margin: 4px 0 8px; }
+
+.actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  /* Subtle card framing so the action bar reads as a control surface
+     distinct from the table headers below. */
+  background: var(--surface);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r-md);
+  padding: 6px 8px;
+  margin-bottom: 6px;
+}
+
+.actions .page { color: var(--muted); margin-left: auto; font-size: 12px; }
+
+/* Pagination cluster — `‹ N/M ›` lives in its own flex group with a tight
+   gap so the chevrons don't end up at opposite ends of the action bar.
+   Without this, the inner `.page` would inherit the action bar's
+   `margin-left: auto` and push the next chevron all the way right. */
+.pagination {
+  display: flex;
+  gap: 2px;
+  align-items: center;
+}
+.pagination .page {
+  margin-left: 0;
+  min-width: 36px;
+  text-align: center;
+}
+.pagination button {
+  padding: 2px 6px;
+  min-width: 0;
+}
+
+/* Horizontal-scroll wrapper around the partners table. Wide column sets
+   (cell_type + many decorations + spatial group) frequently exceed pane
+   width — this lets the table scroll horizontally without disturbing the
+   action bar / tabs above it. */
+.partners-scroll {
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+.partners table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 12px;
+  font-family: var(--font-mono);
+}
+
+.partners th, .partners td {
+  border-bottom: 1px solid var(--line-soft);
+  padding: 4px 8px;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.partners th { background: #f0f0f0; font-weight: var(--fw-label); color: var(--muted); padding: 4px 8px; }
+
+.partners .group-row th {
+  background: #e8e8e8;
+  border-bottom: 1px solid var(--line);
+  font-size: 11px;
+  text-transform: lowercase;
+  letter-spacing: 0.02em;
+  padding: 3px 8px;
+  text-align: center;
+  font-weight: var(--fw-label);
+  color: #444;
+  /* Anchor every group label to the top of the cell. Without this, expanded
+     groups whose row is taller (because a sibling collapsed cell needs ~65px
+     of vertical space for its rotated label) float their text mid-row,
+     which makes the labels jitter as different groups collapse / expand. */
+  vertical-align: top;
+}
+
+/* Collapsible group headers: clickable to toggle a thin "rail" mode where
+   all leaf columns under that group are replaced by a single placeholder
+   column. The collapsed header rotates its label to read top-to-bottom in
+   the narrow strip. */
+.partners .group-row th.collapsible {
+  cursor: pointer;
+  user-select: none;
+}
+.partners .group-row th.collapsible:hover {
+  background: #dcdcdc;
+  color: var(--accent-strong);
+}
+/* Truncate long expanded-group labels — avoids "long table name pushes
+   its narrow data column wider" pathology (e.g. a 30-char table name
+   with a single 12-char boolean leaf below). The 220px cap is generous
+   enough that most names fit unaltered, tight enough that a runaway
+   name doesn't blow the column open. Full name stays in the `<th>`'s
+   `title` attribute so the user can recover it on hover. */
+.partners .group-label {
+  display: inline-block;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+.partners .group-row th.collapsed {
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+  padding: 4px 2px;
+  white-space: nowrap;
+  vertical-align: top;
+  min-width: 0;
+  /* Match the natural height of horizontal group headers ("synapse" /
+     "spatial") so collapsing a group doesn't grow the header row at all.
+     Combined with the JS-side label truncation (5 chars + ellipsis), even
+     long table names fit cleanly. The full name is still in the tooltip. */
+  height: 65px;
+  max-height: 65px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.partners th.collapsed-placeholder {
+  width: 18px;
+  min-width: 18px;
+  max-width: 18px;
+  padding: 0;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line-soft);
+}
+
+/* Per-row action columns (view-partner arrow + open-in-NGL). Live alongside
+   root_id in the intrinsic group so they sit immediately after the id and
+   don't fall under any collapsible group's machinery. */
+.partners .row-action-col {
+  width: 26px;
+  min-width: 26px;
+  max-width: 26px;
+  padding: 2px;
+  text-align: center;
+}
+/* `.row-action` matches both `<button>` (open in NGL) and `<a>` (cross-nav
+   link to the partner). The Link variant inherits these styles so a row
+   has a consistent visual language whether the action is imperative or
+   navigational. */
+.partners .row-action {
+  display: inline-block;
+  font-size: 11px;
+  line-height: 1;
+  padding: 2px 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  text-decoration: none;
+  cursor: pointer;
+}
+.partners .row-action:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--bg);
+}
+
+/* Group-band tints. Each kind reads as a distinct family without dominating
+   the data; keys map onto the categorical palette tints. */
+.partners .group-row .group-table     { background: var(--cat-1-bg); color: #2e5b86; }
+.partners .group-row .group-cell_type { background: var(--cat-2-bg); color: #6a3a8a; }
+.partners .group-row .group-soma      { background: var(--cat-3-bg); color: #2e6b3a; }
+.partners .group-row .group-spatial   { background: var(--cat-6-bg); color: #2e6b6b; }
+
+/* Per-table-view buckets (column-order.ts): segments / supervoxels / positions
+   share the structural-id family; metrics / labels / flags share the
+   categorical-data family; bookkeeping is muted because it's collapsed by
+   default and rarely interesting. */
+.partners .group-row .group-id          { background: var(--surface-2); color: var(--muted); }
+.partners .group-row .group-root_id     { background: var(--cat-1-bg); color: #2e5b86; }
+.partners .group-row .group-supervoxel  { background: var(--cat-1-bg); color: #2e5b86; }
+.partners .group-row .group-position    { background: var(--cat-3-bg); color: #2e6b3a; }
+.partners .group-row .group-number      { background: var(--cat-2-bg); color: #6a3a8a; }
+.partners .group-row .group-string      { background: var(--cat-4-bg); color: #6e3a2a; }
+.partners .group-row .group-boolean     { background: var(--cat-5-bg); color: #6a3a4a; }
+.partners .group-row .group-demoted     { background: var(--surface-2); color: var(--muted); }
+
+.partners th button.sortable {
+  background: transparent;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.partners th button.sortable:hover { color: var(--accent); border: 0; }
+
+.partners .filters-row th {
+  background: var(--surface);
+  padding: 2px 6px;
+  font-weight: normal;
+}
+
+.partners .filters-row input,
+.partners .filters-row select {
+  width: 100%;
+  font-size: 11px;
+  padding: 2px 4px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  box-sizing: border-box;
+}
+
+.partners tr.selected td {
+  background: var(--accent-bg);
+}
+
+.columns-menu {
+  position: relative;
+}
+
+.columns-menu > summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--bg);
+  font-size: 12px;
+}
+.columns-menu > summary::-webkit-details-marker { display: none; }
+.columns-menu > summary:hover { border-color: var(--accent); color: var(--accent); }
+
+.columns-menu-popover {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 4px);
+  right: 0;
+  min-width: 240px;
+  max-height: 60vh;
+  overflow-y: auto;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+  padding: 6px 0;
+}
+
+.columns-menu-actions {
+  padding: 4px 10px 6px;
+  border-bottom: 1px solid var(--line);
+}
+
+.columns-menu-actions button {
+  font-size: 11px;
+  padding: 2px 8px;
+}
+
+.columns-menu-group {
+  padding: 4px 0 6px;
+}
+
+.columns-menu-group-header {
+  padding: 4px 10px;
+  font-size: 10px;
+  font-weight: var(--fw-label);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  background: var(--surface-2);
+}
+
+.columns-menu-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.columns-menu-row:hover { background: var(--accent-bg); }
+.columns-menu-row input[type="checkbox"] { margin: 0; }
+
+/* Inline root_id cell: id text + two compact action buttons (→ neuron view,
+   ↗ open NGL). Keeps the actions adjacent to the id without growing the
+   column to a separate action sub-column for every root_id present. */
+.rootid-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.rootid-cell .row-action {
+  font-size: 11px;
+  line-height: 1;
+  padding: 1px 4px;
+  min-width: 0;
+}
+
+.copyable-id {
+  cursor: copy;
+  border-bottom: 1px dotted transparent;
+  transition: border-color 80ms ease, color 80ms ease;
+}
+.copyable-id:hover { border-bottom-color: var(--accent); color: var(--accent); }
+.copyable-id:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; border-radius: var(--r-sm); }
+.copyable-id.copied { color: var(--ok); border-bottom-color: transparent; font-style: italic; }
+
+.soma-dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  border: 1px solid rgba(0, 0, 0, 0.15);
+  vertical-align: middle;
+}
+.soma-dot-orphan { background: var(--soma-orphan); }
+.soma-dot-single { background: var(--soma-single); }
+.soma-dot-multi  { background: var(--soma-multi); }
+
+button {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  padding: 4px 10px;
+  border-radius: var(--r-md);
+  cursor: pointer;
+  font-size: 12px;
+  transition: background 100ms ease, border-color 100ms ease, color 100ms ease;
+}
+
+button:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--surface);
+}
+
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.error { color: var(--error); }
+
+/* ------- table browser cards ------- */
+
+/* Auto-fit grid: cards fill the available width with a min track of ~360px,
+   so on a wide monitor the user gets two or three columns of cards while a
+   narrow viewport falls back to a single column without media queries. */
+.tables-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.tables-grid .empty {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-style: italic;
+  margin: 16px 0;
+}
+
+/* The card itself uses a left-edge accent stripe to distinguish tables from
+   views at a glance — the kind chip in the header repeats the signal but
+   the stripe is what catches the eye when scanning the grid. */
+.table-card {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--line);
+  border-radius: 6px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 96px;
+  transition: border-color 0.12s ease, box-shadow 0.12s ease;
+}
+
+.table-card:hover {
+  border-color: var(--accent);
+  box-shadow: 0 1px 4px rgba(41, 98, 255, 0.08);
+}
+
+.table-card.kind-table { border-left-color: var(--accent); }
+.table-card.kind-view  { border-left-color: var(--ok); }
+
+.table-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.table-card-title {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+  text-decoration: none;
+  flex: 1 1 auto;
+  min-width: 0;
+  word-break: break-all;
+}
+
+.table-card-title:hover { color: var(--accent); text-decoration: underline; }
+
+/* Chips: kind (table/view), schema_type. Same shape, different palettes so
+   the eye reads them as a row of metadata, not a row of buttons. */
+.chip {
+  display: inline-block;
+  padding: 1px 6px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  border-radius: 3px;
+  border: 1px solid transparent;
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+
+.chip-kind-table { background: var(--accent-bg); color: var(--accent-strong); }
+.chip-kind-view  { background: var(--ok-bg);     color: var(--ok); }
+
+/* schema_type doubles as a quick-filter button. We render it as a button
+   element for keyboard access; styled as a chip with a lighter palette so
+   it doesn't compete with the kind chip. */
+.chip-schema {
+  background: var(--surface-2);
+  color: var(--muted);
+  border-color: var(--line);
+  cursor: pointer;
+  font-family: var(--font-mono);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.chip-schema:hover {
+  background: var(--surface);
+  color: var(--fg);
+  border-color: var(--accent);
+}
+
+.table-card-desc {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.4;
+  color: var(--fg);
+}
+
+.table-card-desc.empty { color: var(--muted); font-style: italic; }
+
+/* Inline "more / less" toggle inside the description. Looks like a link;
+   keeps reading flow uninterrupted compared to a separate button below. */
+.link-button {
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0 0 0 2px;
+  font: inherit;
+  color: var(--accent);
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.link-button:hover { color: var(--accent-strong); }
+
+.table-card-footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: auto;
+  padding-top: 4px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.table-card-footer .meta { white-space: nowrap; }
+
+/* ------- per-table view: completeness disclosure ------- */
+
+/* The pill is the first thing visible in the action bar — green when every
+   matching row is present, amber when the response was capped. Sized and
+   colored to read as a status, not an action; tooltips carry the precise
+   "narrow further" remedy. */
+.completeness-pill {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border-radius: 10px;
+  white-space: nowrap;
+  cursor: default;
+}
+
+.completeness-pill.completeness-complete {
+  background: var(--ok-bg);
+  color: var(--ok);
+  border: 1px solid var(--ok);
+}
+
+.completeness-pill.completeness-partial-unfiltered,
+.completeness-pill.completeness-partial-filtered {
+  background: var(--warn-bg);
+  color: var(--warn);
+  border: 1px solid var(--warn);
+}
+
+/* Small "partial" annotation appended to the action-bar "all loaded" button
+   when it would only act on the truncated slice. The wrapping `<button>`
+   already gets the tooltip; this gives the visual hint. */
+.partial-flag {
+  font-style: italic;
+  color: var(--warn);
+  font-weight: normal;
+}
+
+/* Single warning glyph rendered next to substring filter inputs in
+   server mode — the genuinely-misleading case where the filter narrows
+   only the loaded slice while the user might assume it queries the
+   whole table. Tooltip carries the full explanation; the glyph is the
+   minimum visible signal. */
+.filter-local-warning {
+  display: inline-block;
+  margin-left: 4px;
+  font-size: 12px;
+  color: var(--warn);
+  cursor: help;
+  vertical-align: middle;
+  user-select: none;
+}
+
+/* "Run query" button in the action bar (server mode only). Highlighted
+   when pending changes exist so the user knows there's something to
+   commit; muted/disabled when the draft matches the applied state. */
+.actions button.run-query:not(:disabled) {
+  background: var(--accent);
+  color: white;
+  border-color: var(--accent);
+}
+
+.actions button.run-query:not(:disabled):hover {
+  background: var(--accent-strong);
+  border-color: var(--accent-strong);
+  color: white;
+}
+
+/* "Load up to 200k" cap-override button. Tinted to match the amber
+   completeness pill it sits next to so the visual pair reads as
+   "partial state — opt into a bigger pull." Subdued vs the accent-blue
+   Run-query button: this isn't the primary commit action, just an
+   acknowledged-cost escape hatch. */
+.actions button.load-more {
+  background: var(--warn-bg);
+  color: var(--warn);
+  border-color: #f0d784;
+}
+.actions button.load-more:not(:disabled):hover {
+  background: var(--warn);
+  color: white;
+  border-color: var(--warn);
+}
+
+/* ------- per-table view: breadcrumb + metadata banner ------- */
+
+.table-rows-breadcrumb {
+  font-size: 12px;
+  margin-bottom: 6px;
+}
+
+.table-rows-breadcrumb a {
+  color: var(--muted);
+  text-decoration: none;
+}
+
+.table-rows-breadcrumb a:hover { color: var(--accent); text-decoration: underline; }
+
+/* Banner sits above the rows table — same visual language as the list cards
+   (left-edge accent, kind/schema chips, footer meta) but laid out as a page
+   header rather than a tile. Description gets more horizontal space and a
+   bigger preview cap so it usually reads in full without expand. */
+.table-meta-banner {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+  padding: 12px 16px;
+  margin-bottom: 12px;
+}
+
+.table-meta-banner.kind-view { border-left-color: var(--ok); }
+
+.table-meta-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+
+.table-meta-title h2 {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--fg);
+  word-break: break-all;
+}
+
+.table-meta-desc {
+  margin: 4px 0 0 0;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--fg);
+  max-width: 80ch;
+}
+
+.table-meta-desc.empty { color: var(--muted); font-style: italic; }
+
+.table-meta-footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.table-meta-footer .meta { white-space: nowrap; }
+
+.hint { color: var(--muted); font-style: italic; font-size: 12px; }
+
+/* Stale-root translation notice. Sits above the workbench when the
+   backend swapped a root_id via chunkedgraph.suggest_latest_root.
+   Visual weight: subtle accent-bg (matches the other banner-style
+   surfaces in the app) so the user notices without it feeling
+   alarming. Dismissable via the × in the corner. */
+.root-swap-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 8px 12px;
+  margin: 0 0 12px;
+  background: var(--accent-bg);
+  border: 1px solid var(--accent);
+  border-radius: var(--r-md);
+  color: var(--accent-strong);
+  font-size: 13px;
+}
+.root-swap-text {
+  flex: 1;
+  line-height: 1.4;
+}
+.root-swap-text code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: var(--bg);
+  padding: 1px 5px;
+  border-radius: var(--r-sm);
+  color: var(--fg);
+}
+.root-swap-dismiss {
+  flex: 0 0 auto;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--r-md);
+  color: var(--accent-strong);
+  font-size: 14px;
+  line-height: 1;
+  padding: 2px 6px;
+  cursor: pointer;
+}
+.root-swap-dismiss:hover {
+  background: var(--bg);
+  border-color: var(--accent);
+}
+
+/* 404 view — rendered inside the Workspace shell so the sidebar +
+   breadcrumb context stay visible around the not-found message.
+   Keeps the visual weight low; the failure state shouldn't feel
+   alarming when the recovery is "type a different URL". */
+.not-found {
+  padding: 32px 24px;
+  max-width: 520px;
+}
+.not-found h1 {
+  font-size: 48px;
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+.not-found-detail {
+  font-size: 14px;
+  margin: 0 0 16px;
+  color: var(--fg);
+}
+.not-found-detail code,
+.not-found-hint code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: var(--surface-2);
+  padding: 1px 6px;
+  border-radius: var(--r-sm);
+  color: var(--fg);
+}
+.not-found-hint {
+  font-size: 13px;
+  color: var(--muted);
+  margin: 0 0 24px;
+  line-height: 1.5;
+}
+.not-found-links {
+  display: flex;
+  gap: 16px;
+}
+.not-found-links a {
+  color: var(--accent);
+  text-decoration: none;
+  font-size: 14px;
+}
+.not-found-links a:hover {
+  text-decoration: underline;
+}
+
+/* ---- Landing page (operator-curated tours) ------------------------------ */
+
+.landing {
+  padding: 24px 32px 48px;
+  max-width: 1100px;
+}
+.landing-header h2 {
+  margin: 0 0 8px;
+  font-weight: var(--fw-title);
+  font-size: 22px;
+}
+.landing-header p {
+  margin: 0 0 24px;
+  color: var(--muted);
+  font-size: 13px;
+  max-width: 70ch;
+  line-height: 1.5;
+}
+.landing-header p strong {
+  color: var(--fg);
+  font-weight: var(--fw-label);
+}
+.landing .muted { color: var(--muted); font-size: 13px; }
+
+/* Datastack tab strip — the primary nav on the landing page. Replaces
+   the previous "stack of vertical sections, one per datastack" layout
+   so the user's preferred datastack isn't gated by API list order. */
+.landing-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 24px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.landing-tab {
+  padding: 6px 14px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--fg);
+  border-radius: var(--r-sm);
+  font-size: 13px;
+  font-family: var(--font-mono);
+  cursor: pointer;
+}
+.landing-tab:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.landing-tab.is-active {
+  background: var(--accent);
+  color: white;
+  border-color: var(--accent);
+}
+.landing-tab.is-active:hover {
+  background: var(--accent-strong);
+  border-color: var(--accent-strong);
+  color: white;
+}
+
+.landing-datastack {
+  margin-bottom: 32px;
+}
+
+.tour-section { margin-top: 16px; }
+.tour-section h4 {
+  margin: 0 0 8px;
+  font-weight: var(--fw-label);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.tour-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 12px;
+}
+
+.tour-card {
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  padding: 14px;
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+}
+.tour-card h5 {
+  margin: 0 0 6px;
+  font-weight: var(--fw-title);
+  font-size: 14px;
+}
+.tour-card .tour-desc {
+  margin: 0 0 8px;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--fg);
+}
+.tour-card .tour-meta {
+  margin: 0 0 10px;
+  font-size: 12px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+}
+.tour-card .tour-cta {
+  align-self: flex-start;
+  padding: 4px 12px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: white;
+  border-radius: var(--r-sm);
+  font-size: 13px;
+  cursor: pointer;
+}
+.tour-card .tour-cta:hover:not(:disabled) {
+  background: var(--accent-strong);
+  border-color: var(--accent-strong);
+}
+.tour-card .tour-cta:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  background: var(--surface-2);
+  color: var(--muted);
+  border-color: var(--line);
+}
+.tour-card.is-personal {
+  border-style: dashed;
+}
+.tour-card-actions {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  /* Push to bottom of the flex column so action rows align across cards
+     in the same grid row regardless of varying description heights. */
+  margin-top: auto;
+}
+/* Same alignment for ExampleCard, which uses a bare .tour-cta button as
+   its direct child (no actions wrapper). */
+.tour-card > .tour-cta {
+  margin-top: auto;
+}
+.tour-secondary {
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--muted);
+  border-radius: var(--r-sm);
+  font-size: 12px;
+  cursor: pointer;
+}
+.tour-secondary:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.tour-subgroup {
+  margin: 12px 0 6px;
+  font-size: 11px;
+  font-weight: var(--fw-label);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+/* ---- Recipe YAML uploader (LandingPage) -------------------------------- */
+
+.recipe-uploader {
+  margin-top: 24px;
+  padding-top: 16px;
+  border-top: 1px dashed var(--line);
+}
+.recipe-uploader h4 {
+  margin: 0 0 4px;
+  font-size: 13px;
+  font-weight: var(--fw-label);
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.recipe-uploader p.muted {
+  margin: 0 0 8px;
+  font-size: 12px;
+}
+.recipe-uploader-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.recipe-uploader-actions > button {
+  padding: 4px 12px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--fg);
+  border-radius: var(--r-sm);
+  font-size: 12px;
+  cursor: pointer;
+}
+.recipe-uploader-actions > button:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.recipe-uploader-paste {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+.recipe-uploader-paste textarea {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--fg);
+  border-radius: var(--r-sm);
+  padding: 8px;
+  resize: vertical;
+}
+.recipe-uploader-paste button[type="submit"] {
+  align-self: flex-start;
+  padding: 4px 16px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: white;
+  border-radius: var(--r-sm);
+  font-size: 13px;
+  cursor: pointer;
+}
+.recipe-uploader-paste button[type="submit"]:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.recipe-uploader-result {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: var(--r-sm);
+  font-size: 12px;
+  border: 1px solid var(--line);
+  background: var(--surface-1);
+}
+.recipe-uploader-result.is-error { border-color: var(--danger, #c54); }
+.recipe-uploader-result.is-success { border-color: var(--accent); }
+.recipe-uploader-result-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.recipe-uploader-result-header > span:first-child { flex: 1; }
+.recipe-uploader-result ul {
+  margin: 8px 0 0;
+  padding-left: 18px;
+}
+.recipe-uploader-result details summary {
+  cursor: pointer;
+  margin-top: 6px;
+  color: var(--muted);
+}
+
+.sidebar-recipes-empty {
+  font-size: 12px;
+  margin: 6px 0 0;
+}
+
+/* Reset-view affordance — small, low-chrome button that appears in the
+   sidebar only when the current cell has an active overlay. Sits between
+   the share menu and the recipes widget so it's near-but-not-noise. */
+.sidebar-reset-view {
+  margin-top: 8px;
+  text-align: right;
+}
+.sidebar-reset-view button {
+  padding: 2px 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  cursor: pointer;
+  border-radius: var(--r-sm);
+}
+.sidebar-reset-view button:hover {
+  color: var(--accent);
+  border-color: var(--line);
+}
+.recipes-group {
+  margin-top: 8px;
+}
+
+/* ---- Sidebar Recipes widget --------------------------------------------- */
+
+.sidebar-recipes {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line-soft);
+}
+.sidebar-recipes summary {
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: var(--fw-label);
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.sidebar-recipes summary::-webkit-details-marker { display: none; }
+/* Chevron — right-pointing when collapsed, rotates 90° on open. Pseudo-
+   element rather than an inline icon so the markup stays clean and the
+   transition is purely CSS. */
+.sidebar-recipes summary::before {
+  content: "›";
+  display: inline-block;
+  font-size: 14px;
+  line-height: 1;
+  width: 10px;
+  transition: transform 0.15s ease;
+}
+.sidebar-recipes[open] summary::before {
+  transform: rotate(90deg);
+}
+.sidebar-recipes ul {
+  list-style: none;
+  padding: 0;
+  margin: 8px 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.sidebar-recipes button {
+  width: 100%;
+  text-align: left;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  padding: 6px 8px;
+  border-radius: var(--r-sm);
+  font-size: 12px;
+  cursor: pointer;
+  color: var(--fg);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.sidebar-recipes-cta {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+.sidebar-recipes button:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.sidebar-recipes button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.sidebar-recipes-group {
+  margin: 10px 0 4px;
+  padding: 0;
+  font-size: 10px;
+  font-weight: var(--fw-label);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+.sidebar-recipes-personal {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+}
+.sidebar-recipes-personal > button:first-child {
+  flex: 1;
+  min-width: 0;
+}
+.sidebar-recipes-row-actions {
+  display: flex;
+  flex-direction: row;
+  gap: 2px;
+  flex-shrink: 0;
+}
+.sidebar-recipes-row-actions button {
+  width: auto;
+  padding: 6px 6px;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+.sidebar-recipes-row-actions button:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* ---- Sidebar Share / Save widget ---------------------------------------- */
+
+.sidebar-share {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line-soft);
+}
+.sidebar-share summary {
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: var(--fw-label);
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.sidebar-share summary::-webkit-details-marker { display: none; }
+/* Chevron mirrors the recipes widget — right when collapsed, rotates
+   90° when the section is open. */
+.sidebar-share summary::before {
+  content: "›";
+  display: inline-block;
+  font-size: 14px;
+  line-height: 1;
+  width: 10px;
+  transition: transform 0.15s ease;
+}
+.sidebar-share[open] summary::before {
+  transform: rotate(90deg);
+}
+.sidebar-share-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+}
+.sidebar-share-actions > button {
+  width: 100%;
+  text-align: left;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  padding: 6px 8px;
+  border-radius: var(--r-sm);
+  font-size: 12px;
+  cursor: pointer;
+  color: var(--fg);
+}
+.sidebar-share-actions > button:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.sidebar-share-actions > button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.sidebar-share-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  margin-top: 4px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--surface-1);
+}
+.sidebar-share-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.sidebar-share-form input,
+.sidebar-share-form textarea {
+  font: inherit;
+  font-size: 12px;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  padding: 4px 6px;
+  resize: vertical;
+}
+.sidebar-share-form button[type="submit"] {
+  align-self: flex-end;
+  border: 1px solid var(--accent);
+  background: var(--bg);
+  color: var(--accent);
+  padding: 4px 12px;
+  border-radius: var(--r-sm);
+  font-size: 12px;
+  cursor: pointer;
+}
+.sidebar-share-form button[type="submit"]:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}

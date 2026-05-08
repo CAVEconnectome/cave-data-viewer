@@ -1,0 +1,7 @@
+name: inputs
+description: Show input synapses to the focal neuron from all partners (or selected_partner_ids)
+direction: inputs
+inputs:
+  name: syns_in
+  color: turquoise
+shorten: if_long

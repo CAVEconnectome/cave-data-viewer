@@ -1,0 +1,9 @@
+name: dynamic
+description: Runtime-configurable plot over the unified partners frame (one row per unique partner; both _in and _out columns available)
+kind: scatter
+dynamic: true
+data_query:
+  source: partners_both
+bins: 30
+layout:
+  showlegend: true

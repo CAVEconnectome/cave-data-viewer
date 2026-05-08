@@ -1,0 +1,7 @@
+name: outputs
+description: Show output synapses from the focal neuron to all partners (or selected_partner_ids)
+direction: outputs
+outputs:
+  name: syns_out
+  color: tomato
+shorten: if_long

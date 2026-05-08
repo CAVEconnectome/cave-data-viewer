@@ -1,0 +1,9 @@
+name: partners_out_histogram
+description: Histogram of a numeric column over output partners
+kind: histogram
+data_query:
+  source: partners_out
+bins: 30
+layout:
+  title: Output partners
+  yaxis_title: Number of partners

@@ -1,0 +1,10 @@
+name: partners_out_bar
+description: Bar chart counting output partners grouped by a chosen column
+kind: bar
+data_query:
+  source: partners_out
+# `x` is intentionally omitted — the request body must supply `column` to
+# pick the visualization grouping (e.g. an active decoration table column).
+layout:
+  title: Output partners
+  yaxis_title: Partner count

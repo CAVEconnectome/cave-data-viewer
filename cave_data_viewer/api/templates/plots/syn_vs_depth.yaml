@@ -1,0 +1,12 @@
+name: out_syn_depth_vs_soma_depth
+description: Output partners — median synapse depth vs. partner soma depth, colored by cell type, sized by net_size
+kind: scatter
+data_query:
+  source: partners_out
+x: soma_depth          # partner soma depth (intrinsic spatial feature)
+y: median_syn_depth    # median depth of the ddsynapses this neuron makes onto the partner
+size: net_size         # synapse_aggregation_rules column → scaled to marker size 4–20 px
+layout:
+  title: Output synapse depth vs. partner soma depth
+  height: 420
+  showlegend: true

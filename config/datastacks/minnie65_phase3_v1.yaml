@@ -1,0 +1,145 @@
+# minnie65_public is a release datastack — only the published mat versions are
+# meaningful to users; live mode would drift from what's officially released.
+live_mode: true
+
+# Cell-id lookup. Pattern lifted from ceesem/cortical-tools (microns_public.py):
+# the lookup view maps cell_id (== row id in the nucleus table) to a stable
+# supervoxel + root, and the main / alt tables answer the reverse direction
+# for every persistent id in the dataset, including ones broken across edits.
+cell_id_lookup_view: nucleus_detection_lookup_v1
+root_id_lookup_main_table: nucleus_detection_v0
+root_id_lookup_alt_tables:
+  - nucleus_alternative_points
+
+# Spatial config (transform, depth_range, layer_boundaries) AND synapse-table
+# conventions (column projection, aggregation rules) for this datastack live
+# in `config/aligned_volumes/minnie65_phase3.yaml` — keyed by aligned_volume
+# rather than datastack so every proofreading version of the same volume
+# (public release, internal v1, future versions) shares one coordinate system
+# and one set of synapse columns. To override a synapse field for this
+# specific datastack, drop a `synapse:` block here; field-level overrides
+# inherit unspecified fields from the aligned_volume defaults.
+
+# Periodic decoration-cache warming. Off by default (`enabled: false`).
+# Each fire resolves "latest valid mat_version" against CAVE and writes the
+# refreshed table into the SwrCache keyed by that version.
+#
+# In production set CDV_WARMUP_AUTH_TOKEN to a CAVE service token; locally
+# CAVEclient falls back to ~/.cloudvolume/secrets/cave-secret.json.
+#
+# `startup_delay_seconds` matters in autoscaling deployments: when K8s spins
+# up new pods the warmer should NOT immediately hit CAVE — wait a few minutes
+# so a scaling burst doesn't multiplex into a thundering herd.
+decoration_warmup:
+  enabled: false
+  tables:
+    - aibs_metamodel_celltypes_v661
+  warm_soma_table: true
+  interval_seconds: 3600       # one hour
+  startup_delay_seconds: 180   # three minutes
+
+# Operator-curated tours for the landing page. Examples are full workspace
+# states (CTA "Open"); recipes are configuration overlays applied onto the
+# user's current cell (CTA "Apply"). Both are optional. See the schema in
+# services/datastack_config.py.
+examples:
+  - id: l23-pyr-deep-dive
+    title: "L2/3 pyramidal — depth + cell-type deep dive"
+    description: >
+      A canonical L2/3 excitatory cell with cortical-depth and cell-type
+      decorations loaded. Demonstrates the synapse-depth profile and a
+      partner cell-type breakdown. A good starting point for understanding
+      the workspace's depth-aware analytics.
+    mat_version: 1718
+    root: "864691135492749415"
+    decoration_tables:
+      - proofreading_status_and_strategy
+      - cell_type_multifeature_combo
+    plots:
+      - id: depth-profile
+        summary_kind: synapse_depth_profile
+      - id: connectivity-spatial
+        bindings:
+          x: soma_x
+          y: soma_depth
+          hue: cell_type_multifeature_combo.cell_type
+          size: net_size_out
+      - id: output-histo
+        bindings:
+          x: cell_type_multifeature_combo.cell_type
+          weight: net_size_out
+        unfiltered: true
+      - id: input-histo
+        bindings:
+          x: cell_type_multifeature_combo.cell_type
+          weight: net_size_in
+    cells: "proofreading_status_and_strategy.status_axon:eq:true"
+
+recipes:
+  - id: comprehensive-microns-v0
+    title: Comprehensive View
+    description: Cell type plus proofreading and comprehensive cell type and connectivity plots.
+    decoration_tables:
+      - proofreading_status_and_strategy
+      - cell_type_multifeature_combo
+    plots:
+    - id: plot-1
+      summary_kind: synapse_depth_profile
+    - id: plot-2
+      bindings:
+        x: soma_depth
+        y: median_syn_depth_out
+        hue: cell_type_multifeature_combo.cell_type
+        size: net_size_out
+      unfiltered: true
+    - id: plot-3
+      bindings:
+        x: cell_type_multifeature_combo.cell_type
+        weight: net_size_out
+      unfiltered: true
+    - id: plot-4
+      bindings:
+        x: cell_type_multifeature_combo.cell_type
+        weight: net_size_in
+    - id: plot-5
+      bindings:
+        x: median_dist_to_target_soma_out
+        x_scope: post
+      unfiltered: true
+    - id: plot-6
+      bindings:
+        x: radial_dist_root_soma
+        y: soma_depth
+        hue: cell_type_multifeature_combo.cell_type
+        size: net_size_out
+      unfiltered: true
+    - id: plot-7
+      bindings:
+        x: net_size_in
+        y: soma_depth
+        hue: cell_type_multifeature_combo.cell_type
+        size: mean_size_in
+        y_scope: pre
+    cells: "proofreading_status_and_strategy.status_axon:eq:true"
+  - id: classic-microns-v0
+    title: Classic View
+    description: Cell type plus proofreading and simple output cell type and connectivity plots equivalent to the prior version.
+    decoration_tables:
+      - proofreading_status_and_strategy
+      - cell_type_multifeature_combo
+    plots:
+    - id: plot-1
+      summary_kind: synapse_depth_profile
+    - id: plot-2
+      bindings:
+        x: soma_depth
+        y: median_syn_depth_out
+        hue: cell_type_multifeature_combo.cell_type
+        size: net_size_out
+      unfiltered: true
+    - id: plot-3
+      bindings:
+        x: cell_type_multifeature_combo.cell_type
+        weight: net_size_out
+      unfiltered: true
+    cells: "proofreading_status_and_strategy.status_axon:eq:true"

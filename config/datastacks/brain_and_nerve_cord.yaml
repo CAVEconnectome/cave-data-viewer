@@ -1,0 +1,41 @@
+# Brain-and-nerve-cord (BANC) datastack — fly central nervous system, an
+# entirely different aligned volume from minnie. Used here as a stress test
+# for the assumption that the SPA still renders cleanly when the dataset has
+# no cortical-orientation transform, no layer boundaries, and likely no
+# nucleus-table-based cell-id lookup.
+#
+# No `aligned_volumes/<volume>.yaml` is shipped for the BANC volume on
+# purpose — without a `standard_transform` calibrated for fly anatomy,
+# pretending we have a "depth" axis would invent geometry that isn't there.
+# The connectivity bundle simply omits soma_depth / median_syn_depth /
+# radial_dist_root_soma in this case; `median_dist_to_target_soma` is plain
+# 3D Euclidean and still flows.
+live_mode: true
+
+# Synapse-table conventions: we override here because the BANC volume has
+# no aligned_volume YAML to inherit from (so the schema-level SynapseConfig
+# defaults — minimal columns, no aggregation rules — would otherwise apply,
+# and the SPA's "Both" tab would show only num_syn). In practice BANC's
+# synapse table uses the same conventions as minnie's; if it diverges later
+# (e.g. anchor_pt instead of ctr_pt, no `size` column, etc.) edit this block
+# field-by-field rather than dropping it.
+synapse:
+  position_prefix: ctr_pt
+  columns:
+    - id
+    - pre_pt_root_id
+    - post_pt_root_id
+    - size
+    - ctr_pt_position
+  aggregation_rules:
+    mean_size:
+      column: size
+      agg: mean
+    net_size:
+      column: size
+      agg: sum
+
+# No cell-id lookup configured — the SPA hides the cell-id input box when
+# both `cell_id_lookup_view` and `root_id_lookup_main_table` are absent.
+# If BANC publishes an analogous nucleus / cell-body lookup table family
+# later, drop them in here.

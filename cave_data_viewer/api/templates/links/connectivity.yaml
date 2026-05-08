@@ -1,0 +1,10 @@
+name: connectivity
+description: Show input and output synapses for the focal neuron
+direction: both
+inputs:
+  name: syns_in
+  color: turquoise
+outputs:
+  name: syns_out
+  color: tomato
+shorten: if_long

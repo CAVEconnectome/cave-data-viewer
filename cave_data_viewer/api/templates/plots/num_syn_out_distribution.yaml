@@ -1,0 +1,11 @@
+name: num_syn_out_distribution
+description: Histogram of synapses-per-output-partner counts
+kind: histogram
+data_query:
+  source: partners_out
+x: num_syn
+bins: 30
+layout:
+  title: Output synapses per partner
+  xaxis_title: Synapses per partner
+  yaxis_title: Number of partners

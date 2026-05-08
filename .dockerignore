@@ -1,0 +1,50 @@
+# Build context exclusions — keep the image small and the layer cache
+# tight. The Dockerfile uses two-stage copies, so a bloated context
+# (e.g. accidental copy of a 3GB local .venv) doesn't just slow the
+# build — it can blow up the cache on every layer.
+
+# Python build/run artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.ruff_cache/
+.venv/
+dist/
+build/
+*.egg-info/
+
+# Frontend build/install artifacts — `frontend/dist/` is rebuilt fresh
+# by the frontend stage; `node_modules/` is recreated by `npm ci`.
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# VCS + tooling
+.git/
+.gitignore
+.github/
+.vscode/
+.idea/
+
+# Claude Code worktrees, scratch files
+.claude/
+
+# Local env / secrets — never bake into the image
+.env
+.env.*
+*.local
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Documentation that doesn't ship in the runtime
+docs/
+*.md
+!README.md

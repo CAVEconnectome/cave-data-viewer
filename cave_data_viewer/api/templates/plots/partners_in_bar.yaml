@@ -1,0 +1,8 @@
+name: partners_in_bar
+description: Bar chart counting input partners grouped by a chosen column
+kind: bar
+data_query:
+  source: partners_in
+layout:
+  title: Input partners
+  yaxis_title: Partner count
