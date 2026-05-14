@@ -118,21 +118,28 @@ export function FeatureFilters({
     })),
   });
 
+  // Stable digest of the per-clause data references. Spreading
+  // `filteredColumnsByClause.map(r => r.data)` into the deps array
+  // would change the deps length whenever clauses count changes,
+  // which violates the rules-of-hooks. Hash to a string instead so
+  // deps stay length-3 across all clause counts.
+  const dataDigest = filteredColumnsByClause
+    .map((r) => (r.data ? "1" : "0"))
+    .join(",");
+
   // Recompute the mask whenever the underlying column data changes.
   // Effect rather than useMemo so we can emit upward via callback.
   useEffect(() => {
     if (totalCellCount === 0) return;
     const passing = new Array<boolean>(totalCellCount).fill(true);
-    let allLoaded = true;
     for (let ci = 0; ci < clauses.length; ci++) {
       const clause = clauses[ci];
       const result = filteredColumnsByClause[ci];
-      if (!result.data) {
-        allLoaded = false;
+      if (!result?.data) {
+        // Clause not yet loaded — contribute "all passing" so the
+        // scatter doesn't flicker into "everything hidden" during load.
         continue;
       }
-      // Apply the clause's mask. A failing test ANDs to false; passing
-      // tests leave the entry as-is.
       const values = result.data.values;
       const match = clauseMatcher(clause, result.data);
       for (let i = 0; i < passing.length; i++) {
@@ -141,19 +148,10 @@ export function FeatureFilters({
     }
     const count = passing.reduce((a, b) => a + (b ? 1 : 0), 0);
     onMaskChange({ passing, count });
-    // Silence the loading-but-not-yet-applied warning: we deliberately
-    // emit the partial mask so the scatter doesn't flicker on each
-    // clause's load. `allLoaded` is read only to keep the dep array
-    // stable (it doesn't conditionally short-circuit the loop).
-    void allLoaded;
+    // `filteredColumnsByClause` is read via `dataDigest`; that's the
+    // stable-length dep that triggers re-runs on column loads.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    totalCellCount,
-    clauses,
-    // Re-run whenever any column response updates. Using the data
-    // reference array as a coarse but correct dep.
-    ...filteredColumnsByClause.map((r) => r.data),
-  ]);
+  }, [totalCellCount, clauses, dataDigest]);
 
   const handleClauseEdit = (index: number, patch: Partial<FilterClause>) => {
     const next = clauses.map((c, i) => (i === index ? { ...c, ...patch } : c));

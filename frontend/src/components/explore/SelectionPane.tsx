@@ -53,16 +53,11 @@ export function SelectionPane({
   onClearNeighbors,
   onClearBrush,
 }: Props) {
-  const empty =
-    !focusCellId && neighborCellIds.length === 0 && brushCellIds.length === 0;
-  if (empty) {
-    return (
-      <aside className="explore-selection explore-selection-empty">
-        Click a point, lasso a region, or use the kNN controls to start a selection.
-      </aside>
-    );
-  }
-
+  // All hooks must run on every render — never early-return before a
+  // hook. (Previously, an early-return-when-empty guard short-circuited
+  // before `useSearchParams` + `useMemo`, so the hook count changed
+  // between renders the moment any selection populated and React
+  // threw "rendered more hooks than during the previous render".)
   const [searchParams] = useSearchParams();
 
   // Build the neuron-href factory once per render. Inputs: a resolved
@@ -88,6 +83,16 @@ export function SelectionPane({
       return `/neuron?${next.toString()}`;
     };
   }, [searchParams, ds, matVersion, embeddingId]);
+
+  const empty =
+    !focusCellId && neighborCellIds.length === 0 && brushCellIds.length === 0;
+  if (empty) {
+    return (
+      <aside className="explore-selection explore-selection-empty">
+        Click a point, lasso a region, or use the kNN controls to start a selection.
+      </aside>
+    );
+  }
 
   return (
     <aside className="explore-selection">
