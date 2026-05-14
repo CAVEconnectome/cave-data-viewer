@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { Link, useSearchParams } from "react-router-dom";
+import { Link } from "react-router-dom";
 import { useResolveRoots } from "../../api/embeddings";
 import type { CellRootResolution } from "../../api/types";
 
@@ -22,6 +22,9 @@ interface Props {
    *  corresponding URL state. */
   onClearNeighbors: () => void;
   onClearBrush: () => void;
+  /** Single source of truth for /neuron href construction (lives in
+   *  FeatureExplorer so the rules are shared with ExplorerTable). */
+  buildNeuronHref: (rootId: string) => string;
 }
 
 /**
@@ -52,38 +55,8 @@ export function SelectionPane({
   onCellClick,
   onClearNeighbors,
   onClearBrush,
+  buildNeuronHref,
 }: Props) {
-  // All hooks must run on every render — never early-return before a
-  // hook. (Previously, an early-return-when-empty guard short-circuited
-  // before `useSearchParams` + `useMemo`, so the hook count changed
-  // between renders the moment any selection populated and React
-  // threw "rendered more hooks than during the previous render".)
-  const [searchParams] = useSearchParams();
-
-  // Build the neuron-href factory once per render. Inputs: a resolved
-  // root_id + the current URL state. Mirrors partnerHref from
-  // PartnersTable but writes `?from=explore:<emb>` and drops sel_*
-  // brush keys (those reference the previous root's partners).
-  const buildNeuronHref = useMemo(() => {
-    return (rootId: string) => {
-      const next = new URLSearchParams(searchParams);
-      // Strip explorer-specific URL keys that don't make sense in the
-      // neuron view. ?dec / ?cells survive because they share semantics
-      // across views; ?sel-style per-plot keys also exist on /neuron
-      // but those are sel_<panel-id>, distinct from our top-level ?sel.
-      for (const key of [
-        "emb", "color", "cell", "neighbors", "k", "sel", "hide",
-      ]) {
-        next.delete(key);
-      }
-      next.set("root", rootId);
-      next.set("from", `explore:${embeddingId}`);
-      next.set("ds", ds);
-      next.set("mv", matVersion === "live" ? "live" : String(matVersion));
-      return `/neuron?${next.toString()}`;
-    };
-  }, [searchParams, ds, matVersion, embeddingId]);
-
   const empty =
     !focusCellId && neighborCellIds.length === 0 && brushCellIds.length === 0;
   if (empty) {

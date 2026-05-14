@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import {
   useDecorationCategoricalColumns,
   useEmbeddingList,
@@ -9,6 +10,7 @@ import { ChannelPicker, type ChannelDecorationColumn } from "./ChannelPicker";
 import { DecorationPicker } from "./DecorationPicker";
 import { EmbeddingPicker } from "./EmbeddingPicker";
 import { EmbeddingScatter } from "./EmbeddingScatter";
+import { ExplorerTable } from "./ExplorerTable";
 import { FeatureFilters, type FilterMask } from "./FeatureFilters";
 import { KnnControls } from "./KnnControls";
 import { SelectionPane } from "./SelectionPane";
@@ -136,6 +138,28 @@ export function FeatureExplorer() {
     [setUrl],
   );
 
+  // /neuron href factory used by both SelectionPane and ExplorerTable —
+  // the URL shape is identical (preserve ds/mv/dec/cells/plots/viz_*;
+  // set ?root + ?from=explore:<emb>; strip explorer-only keys).
+  // Lifted here so the two consumers stay in sync if the rules evolve.
+  const [searchParams] = useSearchParams();
+  const buildNeuronHref = useCallback(
+    (rootId: string) => {
+      const next = new URLSearchParams(searchParams);
+      for (const key of [
+        "emb", "color", "cell", "neighbors", "k", "sel", "hide", "x", "y", "size",
+      ]) {
+        next.delete(key);
+      }
+      next.set("root", rootId);
+      if (selected) next.set("from", `explore:${selected.id}`);
+      if (ds) next.set("ds", ds);
+      next.set("mv", matVersion === "live" ? "live" : String(matVersion));
+      return `/neuron?${next.toString()}`;
+    },
+    [searchParams, ds, matVersion, selected],
+  );
+
   const points = useEmbeddingPoints(
     ds && selected
       ? {
@@ -257,23 +281,38 @@ export function FeatureExplorer() {
         />
       </aside>
       <section className="explore-canvas">
-        {points.isPending && <div className="explore-loading">Loading points…</div>}
-        {points.isError && (
-          <div className="explore-error">
-            Failed to load points: {(points.error as Error).message}
-          </div>
-        )}
-        {points.data && (
-          <EmbeddingScatter
+        <div className="explore-canvas-plot">
+          {points.isPending && <div className="explore-loading">Loading points…</div>}
+          {points.isError && (
+            <div className="explore-error">
+              Failed to load points: {(points.error as Error).message}
+            </div>
+          )}
+          {points.data && (
+            <EmbeddingScatter
+              data={points.data}
+              focusCellId={cell}
+              neighborCellIds={neighborCellIds}
+              brushCellIds={brushCellIds}
+              filterMask={filterMask?.passing ?? null}
+              onCellClick={(cellId) => setCell(cellId)}
+              onSelected={handleLasso}
+            />
+          )}
+        </div>
+        <div className="explore-canvas-table">
+          <ExplorerTable
             data={points.data}
+            ds={ds}
+            matVersion={matVersion}
+            embeddingId={selected.id}
             focusCellId={cell}
-            neighborCellIds={neighborCellIds}
             brushCellIds={brushCellIds}
-            filterMask={filterMask?.passing ?? null}
             onCellClick={(cellId) => setCell(cellId)}
-            onSelected={handleLasso}
+            onClearBrush={() => setUrl({ sel: null })}
+            buildNeuronHref={buildNeuronHref}
           />
-        )}
+        </div>
       </section>
       <SelectionPane
         ds={ds}
@@ -285,6 +324,7 @@ export function FeatureExplorer() {
         onCellClick={(cellId) => setCell(cellId)}
         onClearNeighbors={() => setUrl({ neighbors: null })}
         onClearBrush={() => setUrl({ sel: null })}
+        buildNeuronHref={buildNeuronHref}
       />
     </div>
   );
