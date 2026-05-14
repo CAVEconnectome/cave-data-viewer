@@ -27,14 +27,29 @@ const CATEGORICAL_PALETTE = [
 const NULL_COLOR = "#bdbdbd";
 const NUMERIC_COLORSCALE = "Viridis";
 
+// Overlay colors. Reserved for the focus / neighbors / brush states so a
+// user instantly reads "this is the cell I'm focused on" vs the (typically
+// muted) base coloring. Sizes also bump up so the overlay reads at a glance.
+const FOCUS_COLOR = "#E76F51";       // warm orange
+const NEIGHBOR_COLOR = "#2A9D8F";    // teal
+const BRUSH_COLOR = "#9D4EDD";       // purple
+const OVERLAY_BASE_SIZE = 8;
+const FOCUS_MARKER_SIZE = 14;
+
 interface Props {
   /** /points response. Caller passes `null`/`undefined` while loading or
    *  before a datastack is chosen; the component renders an empty plot. */
   data: EmbeddingPointsResponse | null | undefined;
-  /** Currently-focused cell_id (the `?cell=` URL param). Just stored
-   *  here so a future EmbeddingScatter task (#9) can add a focus trace
-   *  without reshaping the API — v1 single-trace doesn't render it. */
+  /** Currently-focused cell_id (the `?cell=` URL param). Drawn as a
+   *  larger, opaque, distinctively-colored marker on top of the base. */
   focusCellId?: string | null;
+  /** kNN result cell_ids (the `?neighbors=` URL param). Rendered as a
+   *  separate overlay between the base and the focus. */
+  neighborCellIds?: string[];
+  /** Lasso/box-selected cell_ids (the `?sel=` URL param). Same overlay
+   *  treatment, different color so the three highlight kinds read
+   *  distinctly. */
+  brushCellIds?: string[];
   /** Click on a point — receives that point's cell_id. */
   onCellClick?: (cellId: string) => void;
   /** Lasso/box selection — receives the deduped selected cell_ids. */
@@ -77,14 +92,19 @@ interface PlotlySelectionEvent {
  */
 export function EmbeddingScatter({
   data,
-  focusCellId: _focusCellId,
+  focusCellId,
+  neighborCellIds,
+  brushCellIds,
   onCellClick,
   onSelected,
   xLabel,
   yLabel,
   height = 600,
 }: Props) {
-  const traces = useMemo(() => buildTraces(data), [data]);
+  const traces = useMemo(
+    () => buildTraces(data, { focusCellId, neighborCellIds, brushCellIds }),
+    [data, focusCellId, neighborCellIds, brushCellIds],
+  );
 
   const layout = useMemo(
     () => ({
@@ -156,8 +176,23 @@ export function EmbeddingScatter({
 
 // ---- trace construction ---------------------------------------------------
 
-function buildTraces(data: EmbeddingPointsResponse | null | undefined): unknown[] {
+interface OverlayInputs {
+  focusCellId?: string | null;
+  neighborCellIds?: string[];
+  brushCellIds?: string[];
+}
+
+function buildTraces(
+  data: EmbeddingPointsResponse | null | undefined,
+  overlay: OverlayInputs,
+): unknown[] {
   if (!data) return [];
+  const baseTraces = buildBaseTraces(data);
+  const overlayTraces = buildOverlayTraces(data.cell_ids, data.x, data.y, overlay);
+  return [...baseTraces, ...overlayTraces];
+}
+
+function buildBaseTraces(data: EmbeddingPointsResponse): unknown[] {
   const { cell_ids, x, y, color } = data;
 
   if (!color) {
@@ -227,4 +262,96 @@ function buildTraces(data: EmbeddingPointsResponse | null | undefined): unknown[
       showlegend: true,
     };
   });
+}
+
+/**
+ * Build overlay traces (brush → neighbors → focus, declared in that order
+ * so plotly draws focus on top).
+ *
+ * Each overlay subsets the base data by cell_id; the lookup map is built
+ * once per call so an overlay containing 1000 cells is O(N + N) rather
+ * than O(N * M).
+ */
+function buildOverlayTraces(
+  cellIds: string[],
+  x: Array<number | null>,
+  y: Array<number | null>,
+  overlay: OverlayInputs,
+): unknown[] {
+  const indexById = new Map<string, number>();
+  cellIds.forEach((c, i) => indexById.set(c, i));
+
+  const traces: unknown[] = [];
+
+  const brush = (overlay.brushCellIds ?? []).filter((id) => indexById.has(id));
+  if (brush.length > 0) {
+    traces.push(_subsetTrace(brush, indexById, x, y, {
+      color: BRUSH_COLOR,
+      name: `Brush (${brush.length})`,
+      size: OVERLAY_BASE_SIZE,
+    }));
+  }
+
+  const neighbors = (overlay.neighborCellIds ?? []).filter(
+    (id) => indexById.has(id) && id !== overlay.focusCellId,
+  );
+  if (neighbors.length > 0) {
+    traces.push(_subsetTrace(neighbors, indexById, x, y, {
+      color: NEIGHBOR_COLOR,
+      name: `Neighbors (${neighbors.length})`,
+      size: OVERLAY_BASE_SIZE,
+    }));
+  }
+
+  if (overlay.focusCellId && indexById.has(overlay.focusCellId)) {
+    traces.push(_subsetTrace([overlay.focusCellId], indexById, x, y, {
+      color: FOCUS_COLOR,
+      name: "Focus",
+      size: FOCUS_MARKER_SIZE,
+      borderColor: "#1a1a1a",
+    }));
+  }
+
+  return traces;
+}
+
+interface OverlayStyle {
+  color: string;
+  name: string;
+  size: number;
+  borderColor?: string;
+}
+
+function _subsetTrace(
+  ids: string[],
+  indexById: Map<string, number>,
+  x: Array<number | null>,
+  y: Array<number | null>,
+  style: OverlayStyle,
+): unknown {
+  const subX: Array<number | null> = [];
+  const subY: Array<number | null> = [];
+  for (const id of ids) {
+    const i = indexById.get(id)!;
+    subX.push(x[i]);
+    subY.push(y[i]);
+  }
+  return {
+    type: "scattergl",
+    mode: "markers",
+    x: subX,
+    y: subY,
+    customdata: ids,
+    name: style.name,
+    marker: {
+      size: style.size,
+      opacity: 1,
+      color: style.color,
+      line: style.borderColor
+        ? { color: style.borderColor, width: 1 }
+        : undefined,
+    },
+    hovertemplate: `${style.name.replace(/\s\(\d+\)$/, "")}: cell %{customdata}<extra></extra>`,
+    showlegend: true,
+  };
 }

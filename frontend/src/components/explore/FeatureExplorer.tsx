@@ -1,9 +1,11 @@
-import { useEffect, useMemo } from "react";
+import { useCallback, useEffect, useMemo } from "react";
 import { useEmbeddingList, useEmbeddingPoints } from "../../api/embeddings";
 import { parseMatVersion, useSetUrlParams, useUrlParam } from "../../hooks/useUrlState";
 import { ColorByPicker } from "./ColorByPicker";
 import { EmbeddingPicker } from "./EmbeddingPicker";
 import { EmbeddingScatter } from "./EmbeddingScatter";
+import { KnnControls } from "./KnnControls";
+import { SelectionPane } from "./SelectionPane";
 
 /**
  * Top-level route component for `/explore`.
@@ -30,9 +32,20 @@ export function FeatureExplorer() {
   const [mvRaw] = useUrlParam("mv");
   const [emb, setEmb] = useUrlParamSafe("emb");
   const [color, setColor] = useUrlParamSafe("color");
-  const [, setCell] = useUrlParamSafe("cell");
+  const [cell, setCell] = useUrlParamSafe("cell");
+  const [neighborsRaw] = useUrlParam("neighbors");
+  const [selRaw] = useUrlParam("sel");
+  const [kRaw] = useUrlParam("k");
   const [decRaw] = useUrlParam("dec");
   const setUrl = useSetUrlParams();
+
+  const neighborCellIds = useMemo(() => parseIdList(neighborsRaw), [neighborsRaw]);
+  const brushCellIds = useMemo(() => parseIdList(selRaw), [selRaw]);
+  const currentK = useMemo(() => {
+    if (!kRaw) return null;
+    const n = Number(kRaw);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  }, [kRaw]);
 
   const matVersion = parseMatVersion(mvRaw);
   const decorationTables = useMemo(
@@ -107,6 +120,23 @@ export function FeatureExplorer() {
     );
   }
 
+  const handleNeighbors = useCallback(
+    (queryCellId: string, neighborIds: string[]) => {
+      setUrl({
+        cell: queryCellId,
+        neighbors: neighborIds.join(",") || null,
+      });
+    },
+    [setUrl],
+  );
+
+  const handleLasso = useCallback(
+    (cellIds: string[]) => {
+      setUrl({ sel: cellIds.join(",") });
+    },
+    [setUrl],
+  );
+
   return (
     <div className="explore">
       <aside className="explore-rail">
@@ -115,6 +145,17 @@ export function FeatureExplorer() {
         {points.data?.color?.resolution_stats && (
           <ResolutionStatsBanner stats={points.data.color.resolution_stats} />
         )}
+        <KnnControls
+          ds={ds}
+          embeddingId={selected.id}
+          matVersion={matVersion}
+          knnDefaults={catalog.data?.knn}
+          currentCellId={cell}
+          currentK={currentK}
+          onFocusCell={(cellId) => setCell(cellId)}
+          onNeighbors={handleNeighbors}
+          onKChange={(k) => setUrl({ k: String(k) })}
+        />
       </aside>
       <section className="explore-canvas">
         {points.isPending && <div className="explore-loading">Loading points…</div>}
@@ -126,14 +167,33 @@ export function FeatureExplorer() {
         {points.data && (
           <EmbeddingScatter
             data={points.data}
+            focusCellId={cell}
+            neighborCellIds={neighborCellIds}
+            brushCellIds={brushCellIds}
             xLabel={selected.axes[0]}
             yLabel={selected.axes[1]}
             onCellClick={(cellId) => setCell(cellId)}
+            onSelected={handleLasso}
           />
         )}
       </section>
+      <SelectionPane
+        focusCellId={cell}
+        neighborCellIds={neighborCellIds}
+        brushCellIds={brushCellIds}
+        onCellClick={(cellId) => setCell(cellId)}
+        onClearNeighbors={() => setUrl({ neighbors: null })}
+        onClearBrush={() => setUrl({ sel: null })}
+      />
     </div>
   );
+}
+
+/** Parse a CSV URL param like `?neighbors=12345,12346` into an array
+ *  of trimmed ids. Empty/missing → empty array. */
+function parseIdList(raw: string | null): string[] {
+  if (!raw) return [];
+  return raw.split(",").map((s) => s.trim()).filter(Boolean);
 }
 
 /**

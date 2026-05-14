@@ -2722,7 +2722,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .explore {
   display: grid;
-  grid-template-columns: 280px 1fr;
+  grid-template-columns: 280px 1fr 320px;
   gap: 12px;
   height: calc(100vh - 60px);
 }
@@ -2799,3 +2799,150 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   color: var(--muted);
   text-align: center;
 }
+
+/* ---- KnnControls -------------------------------------------------------- */
+
+.explore-knn {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 0;
+  border-top: 1px solid var(--line);
+}
+.explore-knn-mode {
+  display: flex;
+  gap: 4px;
+}
+.explore-knn-mode button {
+  flex: 1;
+  padding: 4px 0;
+  font-size: 12px;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+}
+.explore-knn-mode button.active {
+  background: var(--accent);
+  color: white;
+  border-color: var(--accent);
+}
+.explore-knn-input {
+  font: inherit;
+  font-size: 13px;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  padding: 6px 8px;
+}
+.explore-knn-k {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+.explore-knn-k label { color: var(--muted); }
+.explore-knn-k input {
+  font: inherit;
+  font-size: 13px;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  padding: 4px 6px;
+  width: 80px;
+}
+.explore-knn-actions {
+  display: flex;
+  gap: 6px;
+}
+.explore-knn-actions button {
+  flex: 1;
+  padding: 6px 0;
+  font-size: 12px;
+  border: 1px solid var(--accent);
+  border-radius: var(--r-sm);
+  background: var(--bg);
+  color: var(--accent);
+  cursor: pointer;
+}
+.explore-knn-actions button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.explore-knn-error {
+  font-size: 11px;
+  color: #b00020;
+  padding: 4px 0;
+}
+
+/* ---- SelectionPane ------------------------------------------------------ */
+
+.explore-selection {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  background: var(--surface);
+  border-left: 1px solid var(--line);
+  overflow-y: auto;
+}
+.explore-selection-empty {
+  font-size: 12px;
+  color: var(--muted);
+  font-style: italic;
+}
+.explore-selection-section { display: flex; flex-direction: column; gap: 4px; }
+.explore-selection-section header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.explore-selection-pip {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+.explore-selection-focus .explore-selection-pip { background: #E76F51; }
+.explore-selection-neighbor .explore-selection-pip { background: #2A9D8F; }
+.explore-selection-brush .explore-selection-pip { background: #9D4EDD; }
+.explore-selection-title { flex: 1; }
+.explore-selection-clear {
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 16px;
+  cursor: pointer;
+  padding: 0 4px;
+}
+.explore-selection-clear:hover { color: var(--fg); }
+.explore-selection-rows {
+  display: flex;
+  flex-direction: column;
+  max-height: 240px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--bg);
+}
+.explore-selection-row {
+  text-align: left;
+  font: inherit;
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  color: var(--fg);
+  background: none;
+  border: none;
+  padding: 4px 8px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--line);
+}
+.explore-selection-row:last-child { border-bottom: none; }
+.explore-selection-row:hover { background: var(--surface); }
