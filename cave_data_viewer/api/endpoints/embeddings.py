@@ -1,26 +1,26 @@
-"""Feature Explorer endpoints.
+"""Feature Explorer endpoints — foundation slice.
 
 Mounted at ``/api/v1/datastacks/<ds>/embeddings/...``:
 
-- ``GET  /embeddings``                     list the catalog (always 200; carries
-                                           an ``enabled`` flag).
-- ``GET  /embeddings/<id>/points``         scatter payload (cell_ids + xy + color).
+- ``GET  /embeddings``                     list the catalog.
+- ``POST /embeddings/<id>/knn``            kNN by cell_id (or by root_id with
+                                           server-side reverse-resolve).
+- ``POST /embeddings/<id>/resolve_roots``  batched cell_id → root_id at mv.
 
-Both endpoints are pure reads of the cached parquet — no CAVE round-trip on
-the hot path. The auth decorator still gates them at the same boundary as
-every other endpoint (and ``CDV_DEV_AUTH_BYPASS=1`` covers local dev).
+The ``/points`` and ``/column`` endpoints were removed when the explorer
+refactored onto the shared plot toolkit. Plotting now flows through the
+existing ``services/plots.py`` (with a new ``embedding_cells`` data
+source), and table-shaped rows ship via a sibling endpoint added under
+``/feature_tables/<ft_id>/rows``.
 
-Decoration-sourced color/filter columns (the ``table.column`` form) will be
-wired into ``/points`` in a follow-up task; today the endpoint returns a
-clean 501 when the SPA asks for one.
+The auth decorator still gates everything at the same boundary as
+elsewhere in the API (and ``CDV_DEV_AUTH_BYPASS=1`` covers local dev).
 """
 
 from __future__ import annotations
 
-import math
 from typing import Any
 
-import pandas as pd
 from flask import Blueprint, current_app, jsonify, request
 
 from ..auth import auth_required, current_token, is_dev_bypass
@@ -30,8 +30,6 @@ from ..services.datastack_config import check_live_allowed, load_datastack_confi
 from ..services.embeddings import (
     EmbeddingSpec,
     get_index,
-    join_decoration_column,
-    load_embedding_frame,
     resolve_cell_ids_to_root_ids,
     reverse_resolve_root_id_to_cell_id,
     source_for,
@@ -59,8 +57,6 @@ def list_embeddings(ds: str):
     try:
         manifest = src.list()
     except ValueError as exc:
-        # Manifest fetch / parse failure. 502 because the misconfiguration
-        # is in upstream storage (the manifest_uri), not the request.
         raise ApiError(
             502,
             "manifest_unavailable",
@@ -77,193 +73,16 @@ def list_embeddings(ds: str):
     )
 
 
-@bp.route("/<ds>/embeddings/<embedding_id>/points", methods=["GET"])
-@auth_required
-def points(ds: str, embedding_id: str):
-    """Scatter payload for one embedding.
-
-    Query params
-    ------------
-    x, y
-        Columns to plot on the two axes. Defaults to the manifest's
-        ``axes`` field. Accept the same two name forms as ``color_by``:
-
-        - bare column (e.g. ``soma_depth_y``) — parquet-native.
-        - ``table.column`` (e.g. ``cell_type_multifeature_combo.cell_type``)
-          — decoration-sourced; same gating as decoration color.
-
-        Letting x/y override means the explorer renders not just the
-        pre-computed UMAP, but any pair of features-vs-features (e.g.
-        ``soma_depth_y`` vs ``soma_area_um``) or even decoration columns
-        on an axis (categorical x renders as a category axis in plotly).
-    color_by
-        Same shape, populates the ``color`` block. Defaults to
-        ``spec.default_color_by``.
-    dec
-        Comma-separated decoration tables attached to this request.
-        Tables outside this list cannot supply x/y/color values.
-    mv
-        Materialization version (int or ``"live"``). Required when any of
-        x/y/color_by names a decoration column.
-
-    Response shape
-    --------------
-    ``{cell_ids, x, y, color?}`` where each of x/y/color is a column block
-    (same shape: ``{kind, source, column, values, resolution_stats?}``).
-    """
-    cfg = load_datastack_config(ds)
-    src = source_for(ds, cfg)
-    if src is None:
-        raise ApiError(
-            404,
-            "feature_explorer_disabled",
-            f"datastack {ds!r} does not enable the feature explorer",
-        )
-
-    try:
-        spec = src.resolve(embedding_id)
-    except KeyError as exc:
-        raise ApiError(404, "embedding_not_found", str(exc)) from exc
-
-    x_col = request.args.get("x") or spec.axes[0]
-    y_col = request.args.get("y") or spec.axes[1]
-    color_by = request.args.get("color_by") or spec.default_color_by
-    size_by = request.args.get("size")
-    attached_decorations = _parse_csv(request.args.get("dec"))
-    mat_version = request.args.get("mv")
-
-    df = load_embedding_frame(ds, spec, cache_ds=cfg.cache_alias or ds)
-
-    cell_id_strings = [str(v) for v in df[spec.id_column].tolist()]
-    cell_id_ints = [int(v) for v in df[spec.id_column].tolist()]
-
-    payload: dict[str, Any] = {
-        "cell_ids": cell_id_strings,
-        "x": _build_column_block(
-            ds=ds, cfg=cfg, spec=spec, df=df, column=x_col,
-            attached_decorations=attached_decorations,
-            cell_ids=cell_id_ints, mat_version=mat_version,
-            error_code="x_column_unknown",
-        ),
-        "y": _build_column_block(
-            ds=ds, cfg=cfg, spec=spec, df=df, column=y_col,
-            attached_decorations=attached_decorations,
-            cell_ids=cell_id_ints, mat_version=mat_version,
-            error_code="y_column_unknown",
-        ),
-    }
-
-    if color_by:
-        payload["color"] = _build_column_block(
-            ds=ds, cfg=cfg, spec=spec, df=df, column=color_by,
-            attached_decorations=attached_decorations,
-            cell_ids=cell_id_ints, mat_version=mat_version,
-            error_code="color_column_unknown",
-        )
-
-    if size_by:
-        # Size is meaningful only for numeric columns — the SPA's scatter
-        # maps the value range onto a marker-pixel range. Reject categorical
-        # / decoration-categorical inputs with a structured 422 so the SPA
-        # can fall back to uniform sizing without guessing.
-        size_block = _build_column_block(
-            ds=ds, cfg=cfg, spec=spec, df=df, column=size_by,
-            attached_decorations=attached_decorations,
-            cell_ids=cell_id_ints, mat_version=mat_version,
-            error_code="size_column_unknown",
-        )
-        if size_block["kind"] != "numeric":
-            raise ApiError(
-                422,
-                "size_column_not_numeric",
-                f"size={size_by!r} is {size_block['kind']!r}; only numeric "
-                "columns work for marker size",
-            )
-        payload["size"] = size_block
-
-    return jsonify(payload)
-
-
-@bp.route("/<ds>/embeddings/<embedding_id>/column/<path:column>", methods=["GET"])
-@auth_required
-def column(ds: str, embedding_id: str, column: str):
-    """Single-column read for client-side filter / recolor / tooltip.
-
-    Path
-    ----
-    ``column`` accepts the same two forms as ``/points``' ``color_by``:
-    bare parquet column, or ``table.column`` for decoration. Uses ``path``
-    converter on the route so ``.`` survives the URL match.
-
-    Query params
-    ------------
-    Same as ``/points`` (``dec``, ``mv``).
-
-    Response shape
-    --------------
-    ``{column, kind, source, values, resolution_stats?}``. Indexed
-    positionally — same order as ``cell_ids`` from ``/points``. Cached
-    per (column, mv) on the TanStack Query side; same caching surface the
-    SPA already uses for ``/points``.
-    """
-    cfg = load_datastack_config(ds)
-    src = source_for(ds, cfg)
-    if src is None:
-        raise ApiError(
-            404,
-            "feature_explorer_disabled",
-            f"datastack {ds!r} does not enable the feature explorer",
-        )
-    try:
-        spec = src.resolve(embedding_id)
-    except KeyError as exc:
-        raise ApiError(404, "embedding_not_found", str(exc)) from exc
-
-    attached_decorations = _parse_csv(request.args.get("dec"))
-    df = load_embedding_frame(ds, spec, cache_ds=cfg.cache_alias or ds)
-
-    cell_id_ints = [int(v) for v in df[spec.id_column].tolist()]
-
-    block = _build_column_block(
-        ds=ds,
-        cfg=cfg,
-        spec=spec,
-        df=df,
-        column=column,
-        attached_decorations=attached_decorations,
-        cell_ids=cell_id_ints,
-        mat_version=request.args.get("mv"),
-    )
-    # The /column endpoint surfaces the same fields as the /points
-    # channel blocks (x/y/color/size), just at the top level. No reshaping.
-    return jsonify(block)
-
-
 @bp.route("/<ds>/embeddings/<embedding_id>/knn", methods=["POST"])
 @auth_required
 def knn(ds: str, embedding_id: str):
     """k-nearest-neighbor query in feature space.
 
-    Request body
-    ------------
-    ``{cell_id, k?, feature_columns?}``
-
-    - ``cell_id``: the query cell (int or string, both accepted).
-    - ``k``: number of neighbors to return. Defaults to
-      ``manifest.knn.default_k``; clamped to ``manifest.knn.max_k``.
-    - ``feature_columns``: optional override of the kNN feature subset.
-      When omitted, falls back to ``spec.feature_columns`` from the
-      manifest, then to "all non-axis non-audit numerics" auto-derived
-      from the parquet.
-
-    For v1 this endpoint accepts cell_id only. ``root_id`` input (with
-    reverse resolution via ``services/cell_id.py``) lands in the next
-    task and currently returns 501.
-
-    Response
-    --------
-    ``{query_cell_id, neighbors: [{cell_id, distance}, ...]}``. Both ids
-    are stringified per project convention.
+    Body: ``{cell_id | root_id+mat_version, k?, feature_columns?}``.
+    ``k`` is clamped to the manifest's ``knn.max_k``. ``feature_columns``
+    defaults to the embedding's manifest declaration; passing an explicit
+    list cuts a fresh index entry (the standardize digest covers the
+    feature subset).
     """
     cfg = load_datastack_config(ds)
     src = source_for(ds, cfg)
@@ -280,9 +99,6 @@ def knn(ds: str, embedding_id: str):
         raise ApiError(404, "embedding_not_found", str(exc)) from exc
 
     body = request.get_json(silent=True) or {}
-
-    # Resolve the query cell_id. Accepts either a stable cell_id directly or
-    # a root_id + mat_version pair that the resolver reverse-translates.
     cell_id = _resolve_query_cell_id(ds, cfg, body)
 
     manifest = src.list()
@@ -295,7 +111,7 @@ def knn(ds: str, embedding_id: str):
         ) from exc
     k = max(1, min(requested_k, manifest.knn.max_k))
 
-    feature_columns = body.get("feature_columns")  # None -> spec defaults
+    feature_columns = body.get("feature_columns")
     if feature_columns is not None and not isinstance(feature_columns, list):
         raise ApiError(
             422,
@@ -339,16 +155,10 @@ def resolve_roots(ds: str, embedding_id: str):
     ------------
     ``{cell_ids: [int|str, ...], mat_version: int | "live"}``
 
-    Both keys are required. Numeric strings are accepted for ids (the SPA
-    treats ids as strings end-to-end). Empty list → empty resolutions
-    array, no CAVE call.
-
     Response
     --------
     ``{mat_version, resolutions: [{cell_id, root_id|null, status, candidates?}]}``.
-    Order matches the request. Status is ``ok`` / ``missing`` (v1 forward
-    direction does not currently emit ``ambiguous``, but the field shape
-    accepts it forward-compatibly).
+    Order matches the request.
     """
     cfg = load_datastack_config(ds)
     src = source_for(ds, cfg)
@@ -359,8 +169,6 @@ def resolve_roots(ds: str, embedding_id: str):
             f"datastack {ds!r} does not enable the feature explorer",
         )
 
-    # Validate the embedding exists so a typo in the URL surfaces here
-    # rather than after we've already round-tripped to CAVE.
     try:
         src.resolve(embedding_id)
     except KeyError as exc:
@@ -431,11 +239,6 @@ def _resolve_query_cell_id(ds: str, cfg, body: dict[str, Any]) -> int:
 
     - ``cell_id`` (int or numeric string): used directly.
     - ``root_id`` + ``mat_version``: reverse-resolved through the resolver.
-
-    Raises ``ApiError`` with structured codes the SPA can branch on:
-    ``missing_id``, ``invalid_cell_id``, ``invalid_root_id``,
-    ``missing_mat_version`` (root_id without mat_version),
-    ``root_id_unresolved`` (resolver returned None).
     """
     if "cell_id" in body:
         try:
@@ -506,11 +309,7 @@ def _resolve_query_cell_id(ds: str, cfg, body: dict[str, Any]) -> int:
 
 
 def _cave_client(ds: str, mat_version: int | str | None):
-    """Build a CAVE client with the request's auth context.
-
-    Centralized so the (typically two) callers in this file don't drift on
-    the no-auth-token error path.
-    """
+    """Build a CAVE client with the request's auth context."""
     try:
         return request_client(
             datastack_name=ds,
@@ -524,8 +323,6 @@ def _cave_client(ds: str, mat_version: int | str | None):
 
 
 def _resolution_to_json(r) -> dict[str, Any]:
-    """Wire-format projection of a Resolution. Ids are stringified; the
-    ``candidates`` field is included only when non-empty."""
     out: dict[str, Any] = {
         "cell_id": str(r.cell_id),
         "root_id": str(r.root_id) if r.root_id is not None else None,
@@ -539,10 +336,9 @@ def _resolution_to_json(r) -> dict[str, Any]:
 def _spec_summary(spec: EmbeddingSpec) -> dict[str, Any]:
     """Public-API projection of an EmbeddingSpec.
 
-    Drops ``source.uri`` (internal storage detail, no UI value) and reduces
-    ``audit`` to a boolean ``has_audit`` flag — the actual audit *values* per
-    cell surface through ``/column`` once that endpoint lands, not by sending
-    the column names in the catalog response.
+    Drops ``source.uri`` (internal storage detail) and reduces ``audit``
+    to a boolean flag — the actual audit *values* per cell ship through
+    the rows endpoint, not the catalog.
     """
     return {
         "id": spec.id,
@@ -555,216 +351,3 @@ def _spec_summary(spec: EmbeddingSpec) -> dict[str, Any]:
         "categorical_columns": spec.categorical_columns,
         "has_audit": spec.audit is not None,
     }
-
-
-def _numeric_list(s: pd.Series) -> list[float | None]:
-    """Convert a numeric Series to a JSON-safe list.
-
-    NumpyJSONProvider already maps ``pd.NA`` and non-finite floats to null,
-    but it triggers via ``default()`` only for non-stdlib types. Bare Python
-    ``float('nan')`` returned from ``tolist()`` falls through and Flask
-    emits the literal ``NaN`` (invalid JSON). Doing the substitution here
-    is belt-and-suspenders, and gives a single place to enforce the rule
-    when decoration columns start producing nulls.
-    """
-    return [
-        None if (v is None or (isinstance(v, float) and not math.isfinite(v))) else float(v)
-        for v in s.tolist()
-    ]
-
-
-def _build_column_block(
-    *,
-    ds: str,
-    cfg,
-    spec: EmbeddingSpec,
-    df: pd.DataFrame,
-    column: str,
-    attached_decorations: list[str],
-    cell_ids: list[int],
-    mat_version: str | None,
-    error_code: str = "column_unknown",
-) -> dict[str, Any]:
-    """Resolve one column to a ``{kind, source, column, values, ...}``
-    block, dispatching parquet vs decoration based on the name shape.
-
-    Used by every channel that takes a column (x, y, color, size) — the
-    block shape is identical, only how the SPA *uses* the values differs.
-
-    Bare name → loaded from the cached frame, no CAVE call. ``table.column``
-    → joined through the resolver + decoration cache at ``mat_version``.
-
-    ``error_code`` is passed-through into the structured 404 so callers
-    (one per channel) can distinguish "the x column was bad" from "the
-    color column was bad" in the SPA's error display.
-
-    Errors raised as ``ApiError`` so they map cleanly to HTTP codes:
-
-    - 404 ``<error_code>``: bare column not present in the parquet.
-    - 422 ``decoration_table_not_attached``: ``table.column`` form but the
-      table isn't in ``?dec=``.
-    - 422 ``missing_mat_version``: decoration source without ``?mv=``.
-    """
-    if "." in column:
-        return _decoration_column_block(
-            ds=ds,
-            cfg=cfg,
-            column=column,
-            attached_decorations=attached_decorations,
-            cell_ids=cell_ids,
-            mat_version=mat_version,
-        )
-
-    if column not in df.columns:
-        raise ApiError(
-            404,
-            error_code,
-            f"column={column!r} is not in this embedding "
-            f"(available: {sorted(df.columns)})",
-        )
-    return _series_column_block(df[column], column, source="parquet")
-
-
-def _decoration_column_block(
-    *,
-    ds: str,
-    cfg,
-    column: str,
-    attached_decorations: list[str],
-    cell_ids: list[int],
-    mat_version: str | None,
-) -> dict[str, Any]:
-    """Build a column block for a ``table.column`` spec.
-
-    Routes the projection through ``join_decoration_column`` so the
-    cell_id → root_id resolution + decoration snapshot fetch is the same
-    machinery the rest of the app uses for connectivity decorations.
-    """
-    table, _, decoration_column = column.partition(".")
-    if table not in attached_decorations:
-        raise ApiError(
-            422,
-            "decoration_table_not_attached",
-            f"column={column!r} requires `{table}` in ?dec= "
-            f"(attached: {attached_decorations or '[]'})",
-        )
-    if mat_version is None:
-        raise ApiError(
-            422,
-            "missing_mat_version",
-            "decoration-sourced column requires ?mv=<int|live>",
-        )
-
-    try:
-        check_live_allowed(ds, mat_version)
-    except ValueError as exc:
-        raise ApiError(422, "live_mode_disallowed", str(exc)) from exc
-
-    # Build a client_factory so the decoration service's eventual
-    # background revalidation paths get a fresh client; the immediate
-    # call captures the request's auth context once.
-    auth_token = current_token()
-    dev_bypass = is_dev_bypass()
-    server_address = current_app.config["GLOBAL_SERVER_ADDRESS"]
-
-    def client_factory():
-        return request_client(
-            datastack_name=ds,
-            server_address=server_address,
-            auth_token=auth_token,
-            dev_bypass=dev_bypass,
-            materialize_version=mat_version,
-        )
-
-    try:
-        values, stats = join_decoration_column(
-            client_factory=client_factory,
-            cfg=cfg,
-            ds=ds,
-            mat_version=mat_version,
-            table=table,
-            column=decoration_column,
-            cell_ids=cell_ids,
-        )
-    except ValueError as exc:
-        raise ApiError(422, "lookup_unavailable", str(exc)) from exc
-    except Exception as exc:
-        raise ApiError(
-            502, "cave_upstream", f"{type(exc).__name__}: {exc}"
-        ) from exc
-
-    return _serialize_join_values(
-        values, column, source="decoration", resolution_stats=stats
-    )
-
-
-def _series_column_block(s: pd.Series, column: str, *, source: str) -> dict[str, Any]:
-    """Shape the color payload from a pandas Series. Infers categorical
-    vs numeric from dtype; bool treated as categorical (3 states).
-    """
-    if pd.api.types.is_numeric_dtype(s) and not pd.api.types.is_bool_dtype(s):
-        return {
-            "kind": "numeric",
-            "column": column,
-            "source": source,
-            "values": _numeric_list(s),
-        }
-
-    values: list[Any] = []
-    for v in s.tolist():
-        values.append(_clean_categorical(v))
-    return {
-        "kind": "categorical",
-        "column": column,
-        "source": source,
-        "values": values,
-    }
-
-
-def _serialize_join_values(
-    values: list[Any], column: str, *, source: str, resolution_stats: dict[str, int]
-) -> dict[str, Any]:
-    """Shape the color payload from a list of joined values + stats.
-
-    The join already returned positional values; dtype isn't known at this
-    point so we infer from the first non-None entry. An all-null column
-    falls back to categorical (no semantically-meaningful color either way).
-    """
-    sample = next((v for v in values if v is not None), None)
-    is_numeric = isinstance(sample, (int, float)) and not isinstance(sample, bool)
-
-    if is_numeric:
-        cleaned = [
-            None if (v is None or (isinstance(v, float) and not math.isfinite(v))) else float(v)
-            for v in values
-        ]
-        kind = "numeric"
-    else:
-        cleaned = [_clean_categorical(v) for v in values]
-        kind = "categorical"
-
-    return {
-        "kind": kind,
-        "column": column,
-        "source": source,
-        "values": cleaned,
-        "resolution_stats": resolution_stats,
-    }
-
-
-def _clean_categorical(v: Any) -> Any:
-    """Categorical-value normalizer: null forms → None, primitives pass
-    through, everything else stringifies."""
-    if v is None or v is pd.NA or (isinstance(v, float) and math.isnan(v)):
-        return None
-    if isinstance(v, (str, bool, int)):
-        return v
-    return str(v)
-
-
-def _parse_csv(raw: str | None) -> list[str]:
-    """Parse ``?dec=foo,bar,baz`` → ``["foo", "bar", "baz"]``. Empty string
-    or missing → empty list."""
-    if not raw:
-        return []
-    return [item.strip() for item in raw.split(",") if item.strip()]
