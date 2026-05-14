@@ -226,6 +226,9 @@ export function FeatureExplorer() {
         )}
       </section>
       <SelectionPane
+        ds={ds}
+        matVersion={matVersion}
+        embeddingId={selected.id}
         focusCellId={cell}
         neighborCellIds={neighborCellIds}
         brushCellIds={brushCellIds}
