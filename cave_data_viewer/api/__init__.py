@@ -166,6 +166,23 @@ def _init_l2_immutable_caches(app: Flask) -> None:
         immutable=True,
     )
 
+    # Feature-explorer embedding frames. Immutable per (cache_ds, _, embedding_id,
+    # parquet_uri) — the parquet URI is the load-bearing slot and content at a
+    # URI is by-definition fixed. Cache entries are full pickled DataFrames
+    # (single-digit MB up to ~200MB for a 500k-row embedding), so the maxsize
+    # is conservative. A different parquet URI for the same embedding id
+    # (e.g. after a feature recompute that rolls out a new file) routes to a
+    # fresh entry; the old one orphans and ages out via bucket lifecycle.
+    app.extensions["dcv_embedding_frame_cache"] = LayeredSwrCache(
+        soft_ttl=soft_unique,
+        hard_ttl=soft_unique,
+        maxsize=32,
+        l2=_l2_for_kind("embedding_frames"),
+        executor=writer,
+        retention_resolver=_resolve_retention,
+        immutable=True,
+    )
+
     # Datastack-info cache: long-TTL (24h via CACHE_INFO_TTL_SECONDS).
     # Holds the dict returned by `client.info.get_datastack_info()` per
     # datastack — aligned_volume, soma_table, synapse_table, viewer
@@ -188,6 +205,20 @@ def _init_l2_immutable_caches(app: Flask) -> None:
     app.extensions["dcv_datastack_info_cache"] = SwrCache(
         soft_ttl=soft_info,
         hard_ttl=soft_info,
+        maxsize=64,
+    )
+
+    # Feature-explorer manifest cache. Unlike the immutable caches above,
+    # this one has real TTLs: soft is the freshness window (manifest edits
+    # propagate within ~5 min via background SWR refresh), hard bounds how
+    # long we'll serve stale data if refresh keeps failing. L1-only — the
+    # manifest is small (single-digit kB) so the GCS infrastructure overhead
+    # isn't worth it. Key shape: (datastack, manifest_uri).
+    soft_manifest = app.config["CACHE_EMBEDDING_MANIFEST_SOFT_TTL_SECONDS"]
+    hard_manifest = app.config["CACHE_EMBEDDING_MANIFEST_HARD_TTL_SECONDS"]
+    app.extensions["dcv_embedding_manifest_cache"] = SwrCache(
+        soft_ttl=soft_manifest,
+        hard_ttl=hard_manifest,
         maxsize=64,
     )
 

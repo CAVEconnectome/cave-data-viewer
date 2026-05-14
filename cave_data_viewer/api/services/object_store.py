@@ -277,6 +277,12 @@ _KINDS: tuple[str, ...] = (
     "synapse",
     "spatial_features",
     "unique_values",
+    # Pickled pd.DataFrame of one embedding parquet. The parquet itself
+    # lives outside the lifecycle prefix (under `embeddings/`, not
+    # `cache/<retention>/embedding_frames/`); the cached copy here is an
+    # eviction-bounded mirror of the read so cold pods don't re-parse the
+    # parquet from scratch.
+    "embedding_frames",
 )
 _RETENTION_CLASSES: tuple[str, ...] = ("default", "longlived")
 

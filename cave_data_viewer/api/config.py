@@ -40,6 +40,14 @@ _DEFAULTS = {
     "CACHE_DECORATION_HARD_TTL_SECONDS": 24 * 60 * 60,
     "CACHE_DECORATION_LIVE_SOFT_TTL_SECONDS": 5 * 60,
     "CACHE_DECORATION_LIVE_HARD_TTL_SECONDS": 30 * 60,
+    # Feature Explorer manifest cache. Soft TTL is the freshness window —
+    # manifest edits propagate within this interval (the next /embeddings
+    # request after the soft TTL elapses returns the stale entry and
+    # triggers a background refresh). Hard TTL bounds how long stale
+    # data is served if refresh keeps failing; past that, the next caller
+    # pays a synchronous fetch and any error surfaces loudly.
+    "CACHE_EMBEDDING_MANIFEST_SOFT_TTL_SECONDS": 5 * 60,
+    "CACHE_EMBEDDING_MANIFEST_HARD_TTL_SECONDS": 60 * 60,
     "DECORATION_REVALIDATION_WORKERS": 4,
     "LINK_TEMPLATE_DIR": None,
     "PLOT_TEMPLATE_DIR": None,
