@@ -29,6 +29,7 @@ All of these reduce to "the explorer can read both parquet-native columns AND ex
 | Question | Decision |
 | --- | --- |
 | Data source | Precomputed **parquet** per (datastack, embedding). v1 stores files in the same GCS bucket as the L2 cache. Loader sits behind an `EmbeddingSource` interface so a future "catalog" service can drop in without touching the explorer. |
+| **Discovery** | The datastack YAML points to a **GCS manifest file** (`manifest_uri:`) that lists the available embeddings; the inline embedding list does *not* live in the datastack YAML. Adding a new embedding = drop a parquet + edit the manifest in GCS, no backend redeploy. Manifest is cached with SWR semantics (soft TTL ~5 min) so changes propagate quickly. v1 ships `ManifestEmbeddingSource`; the future "catalog service" is just a second `EmbeddingSource` implementation that calls HTTP. |
 | **Identity key** | Features are **indexed by `cell_id`** (stable across proofreading), not by `root_id`. Features are *computed* against a specific root_id at a specific mat_version, but stored/served keyed on cell_id. Crossing the boundary into `/neuron` or Neuroglancer requires translating cell_id → current root_id at the requested mat_version, using the existing `services/cell_id.py` infrastructure (`cell_id_lookup_view` in the datastack YAML). |
 | Scale | 50k-500k cells per embedding. **Server-rendered Plotly with `scattergl`** (WebGL). Wire format is column-arrays, not per-point objects. The component is isolated enough that swapping to a custom deck.gl renderer later doesn't change the URL shape or the API. |
 | Scope v1 | Find-cell + kNN, lasso/box select, color/filter by any feature column **OR any column from a decoration table the user has attached via `?dec=`**. Decoration values are joined onto cell_ids through the cell_id→root_id resolver at the current `?mv`. Distribution-overlay (selected vs rest histograms) is **deferred** (clean to add later). |
@@ -50,10 +51,16 @@ Concretely:
 Mirrors the existing `connectivity` flow: declarative YAML config → loader+cache service → endpoint module → TanStack Query hook → React route component → URL-first state.
 
 ```
-config/datastacks/<ds>.yaml          [+ feature_explorer: block]
+config/datastacks/<ds>.yaml          [+ feature_explorer: { manifest_uri, ... }]
+        │
+        └── manifest_uri: gs://.../manifest.yaml   (or file:// for dev)
+              ↓ (fetched by ManifestEmbeddingSource, SWR-cached ~5 min)
+            manifest.yaml: { schema_version, knn defaults, embeddings: [...] }
         │
 api/services/embeddings/
-        ├── source.py    (EmbeddingSource interface + YAML impl + future catalog impl)
+        ├── source.py    (EmbeddingSource interface + ManifestEmbeddingSource;
+        │                 future CatalogEmbeddingSource drops in here)
+        ├── manifest.py  (fetch manifest_uri, parse + validate, cache with SWR)
         ├── loader.py    (parquet -> DataFrame keyed by cell_id, cached)
         ├── knn.py       (StandardScaler + KDTree over feature subset, cached)
         ├── resolver.py  (cell_id -> root_id at mat_version/live, wraps services/cell_id.py)
@@ -97,55 +104,90 @@ Different embeddings (UMAP vs PCA, full-features vs morphology-only) = different
 
 ### Datastack YAML extension
 
-Add a new top-level `feature_explorer:` block in `config/datastacks/<ds>.yaml`. Schema lives in `api/services/datastack_config.py` alongside existing Pydantic models (`SynapseConfig`, `SpatialConfig`, etc.).
+Add a new top-level `feature_explorer:` block in `config/datastacks/<ds>.yaml`. The datastack YAML carries only **datastack-level** facts — what's tightly tied to CAVE state. The actual embedding catalog lives in a separate GCS-hosted manifest, so adding new feature data does not require a backend redeploy.
 
 ```yaml
 feature_explorer:
   enabled: true
   # The CAVE table that defines the cell_id namespace used by every parquet
-  # in this datastack. cell_id values in the parquets are validated to be a
-  # subset of this table's rows (at the parquet's source_mat_version). The
-  # cell_id -> root_id resolver uses the datastack's existing
-  # `cell_id_lookup_view` to translate at query time.
+  # discoverable through the manifest. cell_id values in the parquets are
+  # validated to be a subset of this table's rows (at the parquet's
+  # source_mat_version). The cell_id -> root_id resolver uses the
+  # datastack's existing `cell_id_lookup_view` to translate at query time.
   cell_id_source_table: nucleus_detection_v0
-  embeddings:
-    - id: morpho_umap                                 # URL-safe internal id
-      title: "Morphology features — UMAP"            # for the picker
-      source:
-        kind: parquet                                 # v1; future: { kind: catalog, ref: "..." }
-        uri: "gs://<bucket>/embeddings/minnie65_phase3_v1/morpho_umap_v661.parquet"
-      id_column: cell_id                              # primary key in the parquet
-      axes: [umap_x, umap_y]                          # 2 columns -> 2D scatter
-      default_color_by: predicted_subclass
-      feature_columns:                                # used for kNN + filtering. Omit -> all non-axis numerics.
-        - soma_depth_y
-        - nucleus_volume_um
-        - soma_area_um
-        # ...
-      categorical_columns:                            # excluded from kNN; usable for color/filter
-        - predicted_class
-        - predicted_subclass
-      # Optional audit columns surfaced in the cell-detail tooltip:
-      audit:
-        source_root_column: source_root_id
-        source_mat_version_column: source_mat_version
-  knn:
-    default_k: 25
-    max_k: 200
-    standardize: true                                 # StandardScaler on feature subset
+
+  # Pointer to the embedding catalog manifest. Supports gs://, file://, and
+  # http(s)://. Updated independently of any backend deploy — drop a new
+  # parquet in GCS, add an entry here, wait <=5 min for the SWR cache to
+  # refresh. Pod restarts pick up the latest immediately.
+  manifest_uri: "gs://<bucket>/embeddings/minnie65_phase3_v1/manifest.yaml"
 ```
 
-Notes:
-- `cell_id_source_table` lives at the `feature_explorer:` block level (not per-embedding) — v1 assumes one cell_id namespace per datastack. If a future need arises to mix sources, this field can be lifted to per-embedding without breaking existing configs.
-- `source.kind: parquet` is the only v1 implementation. Adding `kind: catalog` later means writing a second `EmbeddingSource` and toggling on the kind field — no schema migration for existing configs.
-- The `uri` is a `gs://...` URL even for the v1 same-bucket case, so a future per-embedding bucket override is a one-line change. For local dev without GCS, `file://...` or a path resolved via `CDV_LOCAL_EMBEDDINGS_DIR` is supported by the loader.
+Schema lives in `api/services/datastack_config.py` alongside existing Pydantic models (`SynapseConfig`, `SpatialConfig`, etc.) as a small `FeatureExplorerConfig`.
+
+### Embedding manifest
+
+A YAML file in GCS (or anywhere reachable by URI) that the backend resolves and caches. **This is where adding/removing/editing embeddings happens.** The SPA never sees it directly — `GET /datastacks/<ds>/embeddings` returns its synthesized contents.
+
+```yaml
+schema_version: 1                          # bumped on incompatible changes; unknown versions rejected
+
+# kNN defaults apply across all embeddings in this manifest. Embedding-set
+# concerns live here rather than in the datastack YAML so they can be
+# retuned without a backend deploy.
+knn:
+  default_k: 25
+  max_k: 200
+  standardize: true                        # StandardScaler on feature subset
+
+embeddings:
+  - id: morpho_umap                        # URL-safe internal id (stable; SPA URL state references this)
+    title: "Morphology features — UMAP"   # for the picker
+    description: "UMAP over soma + nucleus geometry, computed at mv 1718."  # optional, surfaced in tooltips
+    source:
+      kind: parquet                        # v1; future: { kind: catalog, ref: "..." }
+      uri: "gs://<bucket>/embeddings/minnie65_phase3_v1/morpho_umap_v661.parquet"
+    id_column: cell_id                     # primary key in the parquet
+    axes: [umap_x, umap_y]                 # 2 columns -> 2D scatter
+    default_color_by: predicted_subclass
+    feature_columns:                       # used for kNN + filtering. Omit -> all non-axis numerics.
+      - soma_depth_y
+      - nucleus_volume_um
+      - soma_area_um
+    categorical_columns:                   # excluded from kNN; usable for color/filter
+      - predicted_class
+      - predicted_subclass
+    audit:                                 # optional; surfaced in cell-detail tooltip
+      source_root_column: source_root_id
+      source_mat_version_column: source_mat_version
+
+  - id: morpho_pca
+    title: "Morphology features — PCA (first 2 PCs)"
+    source: { kind: parquet, uri: "gs://.../morpho_pca_v661.parquet" }
+    id_column: cell_id
+    axes: [pc1, pc2]
+    default_color_by: predicted_subclass
+    # feature_columns omitted -> loader uses all non-axis numerics
+```
+
+**Manifest caching.** A new `dcv_embedding_manifest_cache` (L1-only `SwrCache`, **not** GCS-backed — manifests are small and want freshness) keyed by `(cache_ds, manifest_uri)`. Soft TTL ~5 min, hard TTL ~1 h. SWR semantics: stale entries served immediately while a background refresh runs. A manifest edit propagates in ≤5 min; a transient GCS failure during refresh falls back to the stale entry and logs. The *first* fetch with no stale to fall back to fails loudly (so a misconfigured `manifest_uri` is obvious).
+
+**Validation.** On fetch the backend (a) checks `schema_version` is recognized — unknown versions return an empty embedding list + a loud log; (b) validates each entry against the Pydantic model — invalid entries are *skipped* (not fatal) so one bad row doesn't take down the rest of the catalog; (c) deduplicates by `id`, keeping the first occurrence and logging the conflict.
+
+**Per-embedding parquet caches** (`dcv_embedding_frame_cache`) are unaffected by manifest changes — they're keyed by `parquet_uri`. Manifests that swap one URI for another simply route new lookups to a new cache entry; the old entry orphans and ages out naturally.
+
+**Notes:**
+- `source.kind: parquet` is the only v1 implementation. Adding `kind: catalog` later means writing a second `EmbeddingSource` and toggling on the kind field — no schema migration for existing manifests.
+- For local dev without GCS, `file://` URIs work for both `manifest_uri` and per-embedding `source.uri`. `CDV_LOCAL_EMBEDDINGS_DIR` can serve as a base for relative paths if useful.
+- `cell_id_source_table` lives in the **datastack** YAML (not the manifest) — v1 assumes one cell_id namespace per datastack. If a future need arises to mix sources within one datastack, this field can be lifted to per-embedding without breaking existing manifests.
 
 ### New backend files
 
 | File | Purpose |
 | --- | --- |
 | `cave_data_viewer/api/services/embeddings/__init__.py` | Package marker. |
-| `cave_data_viewer/api/services/embeddings/source.py` | `EmbeddingSource` Protocol + `YamlEmbeddingSource` (resolves spec from the datastack YAML). Future `CatalogEmbeddingSource` drops in here. |
+| `cave_data_viewer/api/services/embeddings/source.py` | `EmbeddingSource` Protocol + `ManifestEmbeddingSource` (resolves embeddings by fetching + parsing the `manifest_uri` from the datastack config). Future `CatalogEmbeddingSource` drops in here. |
+| `cave_data_viewer/api/services/embeddings/manifest.py` | Fetches the manifest from any URI scheme (`gs://`, `file://`, `http(s)://`) via the same fsspec/GCS layer used elsewhere. Parses YAML, validates `schema_version`, validates each entry against the Pydantic model (skipping invalid ones with a warning), deduplicates by `id`. Cached in `dcv_embedding_manifest_cache` (L1-only SwrCache, soft TTL ~5 min, hard TTL ~1 h, SWR semantics). First fetch failure raises loudly; refresh failures fall back to stale. |
 | `cave_data_viewer/api/services/embeddings/loader.py` | `load_embedding_frame(ref) -> pd.DataFrame` indexed by `cell_id`. Reads parquet via `services/object_store.py`'s existing GCS layer (auth, retries) and `file://` for local dev. Validates the parquet's id namespace against `cell_id_source_table`. Cached. |
 | `cave_data_viewer/api/services/embeddings/knn.py` | `EmbeddingIndex` class wrapping `StandardScaler` + `KDTree`. `build_index(frame, feature_columns)` + `query(cell_id, k)`. Cached separately from the frame. |
 | `cave_data_viewer/api/services/embeddings/resolver.py` | Thin wrapper over `services/cell_id.py`'s `cell_ids_to_root_ids()` that adds: (a) batching for many ids, (b) per-(ds, mv) caching for materialized mode (live mode is uncached or short-TTL), (c) clear `{cell_id, root_id, status}` return shape where status ∈ {`ok`, `missing`, `ambiguous`}. |
@@ -250,7 +292,8 @@ New entries in `api/caches.py`, initialized in `_init_l2_immutable_caches()` in 
 
 | Cache | Backing | Key | Holds |
 | --- | --- | --- | --- |
-| `dcv_embedding_frame_cache` | LayeredSwrCache, L1 (small LRU, ~32) + L2 GCS (`embeddings_frames/` partition, immutable) | `(cache_ds, embedding_id, parquet_uri)` | Full `pd.DataFrame` after parquet read. |
+| `dcv_embedding_manifest_cache` | SwrCache, **L1 only** (soft TTL ~5 min, hard TTL ~1 h, SWR refresh) | `(cache_ds, manifest_uri)` | Parsed + validated manifest object. Short TTL is the freshness path for "added an embedding, don't restart". |
+| `dcv_embedding_frame_cache` | LayeredSwrCache, L1 (small LRU, ~32) + L2 GCS (`embeddings_frames/` partition, immutable) | `(cache_ds, embedding_id, parquet_uri)` | Full `pd.DataFrame` after parquet read. Immutable — `parquet_uri` change = new cache entry. |
 | `dcv_embedding_index_cache` | SwrCache, **L1 only** | `(cache_ds, embedding_id, feature_columns_digest)` | `EmbeddingIndex` (scaler + KDTree). Rebuild from frame on cold pod — KDTree isn't worth serializing. |
 
 Lifecycle: embedding parquets sit under a separate GCS prefix (e.g. `embeddings/`) **outside** the 7-day lifecycle rule used for the regular L2 partitions — they're long-lived inputs, not cache outputs. The L2 frame cache reads them and writes a pickled copy back into the regular cache prefix where lifecycle applies.
@@ -348,8 +391,8 @@ Reverse direction (small v1 affordance, since the resolver and `?cell=` are both
 
 ## Verification (no automated tests yet — manual walk-through)
 
-1. **Local sample parquet.** Put a small parquet at `/tmp/cdv-embeddings/morpho_umap_sample.parquet` with `cell_id`, `umap_x`, `umap_y`, `predicted_subclass`, `source_root_id`, `source_mat_version`, and a couple of numeric features for ~1000 cells. The cell_ids should be real ids drawn from `nucleus_detection_v0` at a known mat_version so the resolver has something to translate.
-2. **Wire YAML.** Add a `feature_explorer:` block to `config/datastacks/minnie65_public.yaml` with `cell_id_source_table: nucleus_detection_v0` and one embedding entry pointing at `file:///tmp/cdv-embeddings/morpho_umap_sample.parquet`.
+1. **Local sample parquet + manifest.** Put a small parquet at `/tmp/cdv-embeddings/morpho_umap_sample.parquet` with `cell_id`, `umap_x`, `umap_y`, `predicted_subclass`, `source_root_id`, `source_mat_version`, and a couple of numeric features for ~1000 cells. The cell_ids should be real ids drawn from `nucleus_detection_v0` at a known mat_version so the resolver has something to translate. Alongside it, write `/tmp/cdv-embeddings/manifest.yaml` listing that parquet under `embeddings:` with the schema described above.
+2. **Wire YAML.** Add a `feature_explorer:` block to `config/datastacks/minnie65_public.yaml` with `cell_id_source_table: nucleus_detection_v0` and `manifest_uri: "file:///tmp/cdv-embeddings/manifest.yaml"`.
 3. **Start backend:** `CDV_DEV_AUTH_BYPASS=1 CDV_PORT=5001 uv run python run_api.py`.
 4. **Smoke the endpoints with curl:**
    - `GET /api/v1/datastacks/minnie65_public/embeddings` returns the one entry, including `cell_id_source_table`.
@@ -372,6 +415,7 @@ Reverse direction (small v1 affordance, since the resolver and `?cell=` are both
    - Hard refresh → entire view state (selection, filters, focus cell_id, neighbor cell_ids, color, k, decoration tables) restored from URL. Confirm no root_ids appear in the URL.
 7. **Scale check.** Repeat step 6 against a real ~100k-point parquet, then a ~500k one. Watch DevTools network for the `/points` payload size, the `resolve_roots` latency on lasso, decoration-join latency on first color-by-decoration switch, and that `scattergl` interactions stay responsive.
 8. **Cache sanity.** Restart the API; first `/points` call rebuilds from parquet (visible in timing), second is L1-hot. First `/knn` rebuilds the KDTree (visible in timing), second is hot. Hit `/resolve_roots` for the same cell_ids at the same mat_version twice — second call is L1-hot. First decoration-join for a `(table, column, mv)` triple rebuilds; second is hot. Delete the L1 cache (restart again) and confirm L2 GCS read serves the frame quickly.
+9. **Manifest hot-update.** With the backend still running, edit `/tmp/cdv-embeddings/manifest.yaml` to add a second embedding entry (or change a `title`). Within ~5 minutes (or after one more `/embeddings` request that triggers a background SWR refresh), the SPA's embedding picker reflects the change — no restart. Then break the manifest YAML (introduce a syntax error) and confirm: in-flight requests continue to be served from the stale cache, errors are logged loudly, and the SPA stays functional until the manifest is fixed.
 
 ## Part 2 sketch (planned separately)
 
