@@ -94,6 +94,30 @@ export function FeatureExplorer() {
   // the fetch so a default-colored view actually renders colored.
   const effectiveColor = color ?? selected?.default_color_by ?? null;
 
+  // Callbacks declared above the early returns so the hook count is
+  // stable across renders regardless of which return branch fires.
+  // (Previously these sat between the `!selected` return and the main
+  // render, so the first paint -- where ?emb wasn't yet auto-picked --
+  // had zero useCallbacks and the second paint had two. React caught
+  // that as "rendered more hooks than during the previous render" and
+  // unmounted the tree.)
+  const handleNeighbors = useCallback(
+    (queryCellId: string, neighborIds: string[]) => {
+      setUrl({
+        cell: queryCellId,
+        neighbors: neighborIds.join(",") || null,
+      });
+    },
+    [setUrl],
+  );
+
+  const handleLasso = useCallback(
+    (cellIds: string[]) => {
+      setUrl({ sel: cellIds.join(",") });
+    },
+    [setUrl],
+  );
+
   const points = useEmbeddingPoints(
     ds && selected
       ? {
@@ -140,23 +164,6 @@ export function FeatureExplorer() {
       </div>
     );
   }
-
-  const handleNeighbors = useCallback(
-    (queryCellId: string, neighborIds: string[]) => {
-      setUrl({
-        cell: queryCellId,
-        neighbors: neighborIds.join(",") || null,
-      });
-    },
-    [setUrl],
-  );
-
-  const handleLasso = useCallback(
-    (cellIds: string[]) => {
-      setUrl({ sel: cellIds.join(",") });
-    },
-    [setUrl],
-  );
 
   return (
     <div className="explore">
