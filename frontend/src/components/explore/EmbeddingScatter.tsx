@@ -50,6 +50,11 @@ interface Props {
    *  treatment, different color so the three highlight kinds read
    *  distinctly. */
   brushCellIds?: string[];
+  /** Per-row pass/fail mask from the FeatureFilters component. Cells
+   *  with `passing[i] === false` are dimmed (opacity drop) so the user
+   *  can still see the population shape; clearing the filter unmutes
+   *  them. `null`/undefined or all-true → no dimming. */
+  filterMask?: boolean[] | null;
   /** Click on a point — receives that point's cell_id. */
   onCellClick?: (cellId: string) => void;
   /** Lasso/box selection — receives the deduped selected cell_ids. */
@@ -95,6 +100,7 @@ export function EmbeddingScatter({
   focusCellId,
   neighborCellIds,
   brushCellIds,
+  filterMask,
   onCellClick,
   onSelected,
   xLabel,
@@ -102,8 +108,8 @@ export function EmbeddingScatter({
   height = 600,
 }: Props) {
   const traces = useMemo(
-    () => buildTraces(data, { focusCellId, neighborCellIds, brushCellIds }),
-    [data, focusCellId, neighborCellIds, brushCellIds],
+    () => buildTraces(data, { focusCellId, neighborCellIds, brushCellIds, filterMask }),
+    [data, focusCellId, neighborCellIds, brushCellIds, filterMask],
   );
 
   const layout = useMemo(
@@ -180,64 +186,100 @@ interface OverlayInputs {
   focusCellId?: string | null;
   neighborCellIds?: string[];
   brushCellIds?: string[];
+  filterMask?: boolean[] | null;
 }
+
+const DIMMED_OPACITY = 0.08;
+const NORMAL_OPACITY = 0.7;
 
 function buildTraces(
   data: EmbeddingPointsResponse | null | undefined,
   overlay: OverlayInputs,
 ): unknown[] {
   if (!data) return [];
-  const baseTraces = buildBaseTraces(data);
+  const baseTraces = buildBaseTraces(data, overlay.filterMask ?? null);
   const overlayTraces = buildOverlayTraces(data.cell_ids, data.x, data.y, overlay);
   return [...baseTraces, ...overlayTraces];
 }
 
-function buildBaseTraces(data: EmbeddingPointsResponse): unknown[] {
+function buildBaseTraces(
+  data: EmbeddingPointsResponse,
+  filterMask: boolean[] | null,
+): unknown[] {
+  // Apply the filter mask by partitioning indices into "passing" (full
+  // color) and "failing" (rendered as a dimmed background trace). Two
+  // traces per styled-set rather than one because plotly's scattergl
+  // backend doesn't honor per-point marker.opacity — uniform opacity per
+  // trace is the WebGL-friendly path.
   const { cell_ids, x, y, color } = data;
+  const passing = filterMask ? indexWhere(filterMask, true) : null;
+  const failing = filterMask ? indexWhere(filterMask, false) : [];
+
+  const traces: unknown[] = [];
+
+  if (failing.length > 0) {
+    // Dimmed background trace — drawn first so the passing trace sits
+    // on top. Uniform gray, low opacity, no legend entry.
+    traces.push({
+      type: "scattergl",
+      mode: "markers",
+      x: failing.map((i) => x[i]),
+      y: failing.map((i) => y[i]),
+      customdata: failing.map((i) => cell_ids[i]),
+      marker: { size: 3, opacity: DIMMED_OPACITY, color: NULL_COLOR },
+      hovertemplate: "(filtered) cell %{customdata}<extra></extra>",
+      showlegend: false,
+    });
+  }
 
   if (!color) {
-    return [
-      {
-        type: "scattergl",
-        mode: "markers",
-        x,
-        y,
-        customdata: cell_ids,
-        marker: { size: 4, opacity: 0.7, color: NULL_COLOR },
-        hovertemplate: "cell %{customdata}<extra></extra>",
-        showlegend: false,
-      },
-    ];
+    const indices = passing ?? cell_ids.map((_, i) => i);
+    traces.push({
+      type: "scattergl",
+      mode: "markers",
+      x: passing ? indices.map((i) => x[i]) : x,
+      y: passing ? indices.map((i) => y[i]) : y,
+      customdata: passing ? indices.map((i) => cell_ids[i]) : cell_ids,
+      marker: { size: 4, opacity: NORMAL_OPACITY, color: NULL_COLOR },
+      hovertemplate: "cell %{customdata}<extra></extra>",
+      showlegend: false,
+    });
+    return traces;
   }
 
   if (color.kind === "numeric") {
-    return [
-      {
-        type: "scattergl",
-        mode: "markers",
-        x,
-        y,
-        customdata: cell_ids,
-        marker: {
-          size: 4,
-          opacity: 0.7,
-          color: color.values as number[],
-          colorscale: NUMERIC_COLORSCALE,
-          showscale: true,
-          colorbar: { title: { text: color.column, side: "right" }, thickness: 12 },
-        },
-        hovertemplate:
-          `cell %{customdata}<br>${color.column}: %{marker.color}<extra></extra>`,
-        showlegend: false,
+    const indices = passing ?? cell_ids.map((_, i) => i);
+    const values = color.values as Array<number | null>;
+    traces.push({
+      type: "scattergl",
+      mode: "markers",
+      x: indices.map((i) => x[i]),
+      y: indices.map((i) => y[i]),
+      customdata: indices.map((i) => cell_ids[i]),
+      marker: {
+        size: 4,
+        opacity: NORMAL_OPACITY,
+        color: indices.map((i) => values[i]),
+        colorscale: NUMERIC_COLORSCALE,
+        showscale: true,
+        colorbar: { title: { text: color.column, side: "right" }, thickness: 12 },
       },
-    ];
+      hovertemplate:
+        `cell %{customdata}<br>${color.column}: %{marker.color}<extra></extra>`,
+      showlegend: false,
+    });
+    return traces;
   }
 
   // Categorical: split into per-category traces. Stable ordering by first
   // occurrence so legend order matches what the user sees scanning the data.
+  // Failing-mask cells already extracted into the dimmed background trace
+  // above, so we only iterate passing indices here.
+  const allowed = passing ? new Set(passing) : null;
   const byCategory = new Map<string, number[]>();
   const labelFor: Record<string, string> = {};
   color.values.forEach((v, i) => {
+    if (allowed && !allowed.has(i)) return;
     const key = v == null ? "__null__" : String(v);
     if (!byCategory.has(key)) {
       byCategory.set(key, []);
@@ -247,21 +289,28 @@ function buildBaseTraces(data: EmbeddingPointsResponse): unknown[] {
   });
 
   let paletteIdx = 0;
-  return [...byCategory.entries()].map(([key, indices]) => {
+  for (const [key, indices] of byCategory.entries()) {
     const isNull = key === "__null__";
     const c = isNull ? NULL_COLOR : CATEGORICAL_PALETTE[paletteIdx++ % CATEGORICAL_PALETTE.length];
-    return {
+    traces.push({
       type: "scattergl",
       mode: "markers",
       x: indices.map((i) => x[i]),
       y: indices.map((i) => y[i]),
       customdata: indices.map((i) => cell_ids[i]),
       name: labelFor[key],
-      marker: { size: 4, opacity: 0.7, color: c },
+      marker: { size: 4, opacity: NORMAL_OPACITY, color: c },
       hovertemplate: `cell %{customdata}<br>${color.column}: ${labelFor[key]}<extra></extra>`,
       showlegend: true,
-    };
-  });
+    });
+  }
+  return traces;
+}
+
+function indexWhere(mask: boolean[], value: boolean): number[] {
+  const out: number[] = [];
+  for (let i = 0; i < mask.length; i++) if (mask[i] === value) out.push(i);
+  return out;
 }
 
 /**

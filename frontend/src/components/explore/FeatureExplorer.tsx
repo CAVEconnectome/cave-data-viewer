@@ -1,9 +1,15 @@
-import { useCallback, useEffect, useMemo } from "react";
-import { useEmbeddingList, useEmbeddingPoints } from "../../api/embeddings";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  useDecorationCategoricalColumns,
+  useEmbeddingList,
+  useEmbeddingPoints,
+} from "../../api/embeddings";
 import { parseMatVersion, useSetUrlParams, useUrlParam } from "../../hooks/useUrlState";
 import { ColorByPicker } from "./ColorByPicker";
+import { DecorationPicker } from "./DecorationPicker";
 import { EmbeddingPicker } from "./EmbeddingPicker";
 import { EmbeddingScatter } from "./EmbeddingScatter";
+import { FeatureFilters, type FilterMask } from "./FeatureFilters";
 import { KnnControls } from "./KnnControls";
 import { SelectionPane } from "./SelectionPane";
 
@@ -37,7 +43,13 @@ export function FeatureExplorer() {
   const [selRaw] = useUrlParam("sel");
   const [kRaw] = useUrlParam("k");
   const [decRaw] = useUrlParam("dec");
+  const [cellsExpression, setCellsExpression] = useUrlParamSafe("cells");
   const setUrl = useSetUrlParams();
+
+  // Filter mask comes back from FeatureFilters; threaded into the scatter
+  // as a boolean[] per cell. Lives in component state because the mask is
+  // derived from column fetches that don't belong in the URL.
+  const [filterMask, setFilterMask] = useState<FilterMask | null>(null);
 
   const neighborCellIds = useMemo(() => parseIdList(neighborsRaw), [neighborsRaw]);
   const brushCellIds = useMemo(() => parseIdList(selRaw), [selRaw]);
@@ -56,6 +68,15 @@ export function FeatureExplorer() {
   const catalog = useEmbeddingList(ds);
   const enabled = catalog.data?.enabled === true;
   const embeddings = catalog.data?.embeddings ?? [];
+
+  // Discover categorical decoration columns for whatever tables are
+  // currently attached via ?dec=. Runs in parallel as a useQueries
+  // batch; results merge into one flat list for the menus.
+  const { columns: decorationColumns } = useDecorationCategoricalColumns(
+    ds,
+    matVersion,
+    decorationTables,
+  );
 
   // First-mount: pick the first embedding if none in the URL. Avoids a
   // blank screen on a bare `/explore` link.
@@ -141,10 +162,36 @@ export function FeatureExplorer() {
     <div className="explore">
       <aside className="explore-rail">
         <EmbeddingPicker embeddings={embeddings} value={emb} onChange={(id) => setEmb(id)} />
-        <ColorByPicker embedding={selected} value={color} onChange={setColor} />
+        <DecorationPicker
+          ds={ds}
+          matVersion={matVersion}
+          attached={decorationTables}
+          onChange={(next) => setUrl({ dec: next.length ? next.join(",") : null })}
+        />
+        <ColorByPicker
+          embedding={selected}
+          value={color}
+          onChange={setColor}
+          decorationColumns={decorationColumns.map((dc) => ({
+            label: `${dc.table}.${dc.column}`,
+            value: `${dc.table}.${dc.column}`,
+            source: "decoration",
+          }))}
+        />
         {points.data?.color?.resolution_stats && (
           <ResolutionStatsBanner stats={points.data.color.resolution_stats} />
         )}
+        <FeatureFilters
+          embedding={selected}
+          ds={ds}
+          matVersion={matVersion}
+          attachedDecorations={decorationTables}
+          decorationColumns={decorationColumns}
+          totalCellCount={points.data?.cell_ids.length ?? 0}
+          cellsExpression={cellsExpression}
+          onCellsChange={setCellsExpression}
+          onMaskChange={setFilterMask}
+        />
         <KnnControls
           ds={ds}
           embeddingId={selected.id}
@@ -170,6 +217,7 @@ export function FeatureExplorer() {
             focusCellId={cell}
             neighborCellIds={neighborCellIds}
             brushCellIds={brushCellIds}
+            filterMask={filterMask?.passing ?? null}
             xLabel={selected.axes[0]}
             yLabel={selected.axes[1]}
             onCellClick={(cellId) => setCell(cellId)}

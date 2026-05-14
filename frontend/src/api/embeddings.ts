@@ -7,7 +7,7 @@
 // Hooks split by endpoint so cache invalidation is granular: changing
 // `?color_by=` only re-fetches `/points`, not the catalog list.
 
-import { useMutation, useQuery, type QueryKey } from "@tanstack/react-query";
+import { useMutation, useQueries, useQuery, type QueryKey } from "@tanstack/react-query";
 import { apiFetch } from "./client";
 import type {
   EmbeddingColumnResponse,
@@ -15,6 +15,7 @@ import type {
   EmbeddingListResponse,
   EmbeddingPointsResponse,
   ResolveRootsResponse,
+  TableUniqueValuesResponse,
 } from "./types";
 
 const PATHS = {
@@ -172,6 +173,61 @@ export interface ResolveRootsArgs {
   embeddingId: string;
   cellIds: Array<string | number>;
   matVersion: number | "live";
+}
+
+// ---- Decoration column discovery ------------------------------------------
+
+export interface DecorationColumnEntry {
+  table: string;
+  column: string;
+  /** v1 only surfaces categorical columns (cell types, statuses) because the
+   *  table-values endpoint exposes distinct values per categorical column;
+   *  numeric decoration columns would need a separate schema endpoint. */
+  kind: "categorical";
+}
+
+/**
+ * Discover categorical column names across a set of attached decoration
+ * tables. Drives the explorer's ColorByPicker and FeatureFilters menus.
+ *
+ * Implemented via `useQueries` so each table's
+ * `/tables/<name>/values` call runs in parallel and re-renders the parent
+ * once all settle. Failed/pending tables contribute no entries — silent
+ * because a fresh-from-CAVE table can take a second or two to populate and
+ * the user shouldn't see a flapping error state in the meantime.
+ */
+export function useDecorationCategoricalColumns(
+  ds: string | null,
+  matVersion: number | "live" | null,
+  tables: string[],
+): { columns: DecorationColumnEntry[]; isPending: boolean } {
+  const results = useQueries({
+    queries: tables.map((table) => ({
+      queryKey: ["table_unique_values", ds, table, matVersion],
+      queryFn: () =>
+        apiFetch<TableUniqueValuesResponse>(
+          `/api/v1/datastacks/${ds}/tables/${table}/values`,
+          {
+            query: {
+              mat_version: matVersion === "live" ? undefined : matVersion ?? undefined,
+            },
+          },
+        ),
+      enabled: !!ds && !!table,
+      staleTime: 24 * 60 * 60 * 1000,
+    })),
+  });
+
+  const columns: DecorationColumnEntry[] = [];
+  let isPending = false;
+  results.forEach((r, i) => {
+    if (r.isPending) isPending = true;
+    if (!r.data) return;
+    for (const col of Object.keys(r.data.values)) {
+      columns.push({ table: tables[i], column: col, kind: "categorical" });
+    }
+  });
+  return { columns, isPending };
 }
 
 /** Batched cell_id -> root_id resolution. Used by the SelectionPane to
