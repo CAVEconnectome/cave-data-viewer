@@ -51,6 +51,20 @@ decoration_warmup:
   interval_seconds: 3600       # one hour
   startup_delay_seconds: 180   # three minutes
 
+# Feature Explorer enablement. The embedding catalog (which parquets exist,
+# their axes, feature columns, kNN defaults) lives in the manifest file
+# referenced by `manifest_uri` — not inline here — so adding new feature data
+# does not require a backend redeploy. The manifest is fetched with SWR
+# semantics (soft TTL ~5 min) so edits propagate without a restart.
+#
+# Disabled by default. For local development point this at the manifest
+# produced by `scripts/make_sample_embedding.py`. For production, point at
+# a gs://... manifest file in the cache bucket.
+feature_explorer:
+  enabled: false
+  cell_id_source_table: nucleus_detection_v0
+  manifest_uri: "file:///tmp/cdv-embeddings/manifest.yaml"
+
 # Operator-curated tours for the landing page. Examples are full workspace
 # states (CTA "Open"); recipes are configuration overlays applied onto the
 # user's current cell (CTA "Apply"). Both are optional. See the schema in

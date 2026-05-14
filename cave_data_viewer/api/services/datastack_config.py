@@ -268,6 +268,32 @@ class DecorationWarmup(BaseModel):
     startup_delay_seconds: float = 0.0
 
 
+class FeatureExplorerConfig(BaseModel):
+    """Per-datastack Feature Explorer enablement + manifest pointer.
+
+    The datastack YAML carries only datastack-level facts — what's tightly tied
+    to the datastack's CAVE state. The embedding catalog itself (which parquets
+    exist, their axes, feature columns, kNN defaults) lives in the GCS-hosted
+    manifest file referenced by `manifest_uri`, so adding new feature data is
+    an edit-in-GCS workflow rather than a backend redeploy.
+
+    `cell_id_source_table` names the CAVE table that defines the cell_id
+    namespace used by every parquet discoverable through the manifest. It is
+    required when `enabled` is True. Kept as a distinct field from
+    `root_id_lookup_main_table` (rather than reusing it) so a future datastack
+    with a multi-table reverse-lookup chain doesn't ambiguate which table
+    anchors the embedding namespace. In practice they will usually point at
+    the same table.
+
+    `manifest_uri` supports `gs://`, `file://`, and `http(s)://` schemes. The
+    backend fetches it through a SWR cache (soft TTL ~5 min) so manifest edits
+    propagate without a restart.
+    """
+    enabled: bool = False
+    cell_id_source_table: str | None = None
+    manifest_uri: str | None = None
+
+
 class TourPlotBindings(BaseModel):
     """Plot bindings on a tour entry — direct passthrough of the SPA's
     `PlotBindings` shape (frontend/src/api/queries.ts). Field names match
@@ -386,6 +412,12 @@ class DatastackConfig(BaseModel):
     cell_id_lookup_view: str | None = None       # materialized view: id → pt_root_id (+ pt_supervoxel_id)
     root_id_lookup_main_table: str | None = None # primary table: pt_root_id → id
     root_id_lookup_alt_tables: list[str] = Field(default_factory=list)
+
+    # ---- feature explorer -----------------------------------------------------
+    # Optional. When omitted (or `enabled: false`) the SPA hides the /explore
+    # route for this datastack. The embedding catalog itself lives in a GCS
+    # manifest referenced from this block — see FeatureExplorerConfig.
+    feature_explorer: FeatureExplorerConfig | None = None
 
     # ---- tours: operator-curated landing-page entries -------------------------
     # `examples` are fully-specified workspaces (ds + mv + root + decorations
