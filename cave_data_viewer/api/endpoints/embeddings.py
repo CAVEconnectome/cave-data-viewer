@@ -1,20 +1,28 @@
 """Feature Explorer endpoints — foundation slice.
 
-Mounted at ``/api/v1/datastacks/<ds>/embeddings/...``:
+Mounted at ``/api/v1/datastacks/<ds>/feature_tables/...``:
 
-- ``GET  /embeddings``                     list the catalog.
-- ``POST /embeddings/<id>/knn``            kNN by cell_id (or by root_id with
-                                           server-side reverse-resolve).
-- ``POST /embeddings/<id>/resolve_roots``  batched cell_id → root_id at mv.
+- ``GET  /feature_tables``                              catalog: tables +
+                                                        nested embeddings
+                                                        + kNN defaults
+                                                        + cell_id_source_table.
+- ``POST /feature_tables/<ft>/knn``                     kNN by cell_id (or by
+                                                        root_id with server-
+                                                        side reverse-resolve).
+                                                        Data-level concern —
+                                                        independent of which
+                                                        embedding the SPA is
+                                                        currently rendering.
+- ``POST /feature_tables/<ft>/resolve_roots``           batched cell_id →
+                                                        root_id at mat_version.
 
-The ``/points`` and ``/column`` endpoints were removed when the explorer
-refactored onto the shared plot toolkit. Plotting now flows through the
-existing ``services/plots.py`` (with a new ``embedding_cells`` data
-source), and table-shaped rows ship via a sibling endpoint added under
-``/feature_tables/<ft_id>/rows``.
+The plotting + table-rows endpoints land separately:
+``services/plots.py`` gains an ``embedding_cells`` data source (served
+through the existing ``/plots/<spec>`` machinery), and a sibling
+``/feature_tables/<ft>/rows`` endpoint provides table-mode rows.
 
-The auth decorator still gates everything at the same boundary as
-elsewhere in the API (and ``CDV_DEV_AUTH_BYPASS=1`` covers local dev).
+The auth decorator gates everything at the same boundary as the rest of
+the API; ``CDV_DEV_AUTH_BYPASS=1`` covers local dev.
 """
 
 from __future__ import annotations
@@ -29,6 +37,7 @@ from ..errors import ApiError
 from ..services.datastack_config import check_live_allowed, load_datastack_config
 from ..services.embeddings import (
     EmbeddingSpec,
+    FeatureTableSpec,
     get_index,
     resolve_cell_ids_to_root_ids,
     reverse_resolve_root_id_to_cell_id,
@@ -38,16 +47,15 @@ from ..services.embeddings import (
 bp = Blueprint("embeddings", __name__, url_prefix="/datastacks")
 
 
-@bp.route("/<ds>/embeddings", methods=["GET"])
+@bp.route("/<ds>/feature_tables", methods=["GET"])
 @auth_required
-def list_embeddings(ds: str):
-    """List the embeddings available for one datastack.
+def list_feature_tables(ds: str):
+    """List the feature tables (with their nested embeddings) for one datastack.
 
     Always returns 200 with an ``enabled`` flag — the SPA switches the
     /explore route on this flag rather than guessing from a 404. When the
     feature explorer is disabled or unconfigured for the datastack, only
-    ``enabled: false`` is set; the rest of the body is omitted so the SPA
-    doesn't render an empty picker.
+    ``enabled: false`` is set.
     """
     cfg = load_datastack_config(ds)
     src = source_for(ds, cfg)
@@ -68,21 +76,25 @@ def list_embeddings(ds: str):
             "enabled": True,
             "cell_id_source_table": cfg.feature_explorer.cell_id_source_table,
             "knn": manifest.knn.model_dump(),
-            "embeddings": [_spec_summary(e) for e in manifest.embeddings],
+            "feature_tables": [_feature_table_summary(ft) for ft in manifest.feature_tables],
         }
     )
 
 
-@bp.route("/<ds>/embeddings/<embedding_id>/knn", methods=["POST"])
+@bp.route("/<ds>/feature_tables/<feature_table_id>/knn", methods=["POST"])
 @auth_required
-def knn(ds: str, embedding_id: str):
+def knn(ds: str, feature_table_id: str):
     """k-nearest-neighbor query in feature space.
 
+    Keyed on **feature table**, not embedding — the kNN index is built
+    from the table's feature columns (or an explicit subset), so the
+    same index serves every embedding declared on that table. Switching
+    a UMAP for a t-SNE on the SPA doesn't refetch this.
+
     Body: ``{cell_id | root_id+mat_version, k?, feature_columns?}``.
-    ``k`` is clamped to the manifest's ``knn.max_k``. ``feature_columns``
-    defaults to the embedding's manifest declaration; passing an explicit
-    list cuts a fresh index entry (the standardize digest covers the
-    feature subset).
+    ``feature_columns`` defaults to the table's manifest declaration;
+    when omitted the call may also pass through an embedding's
+    ``knn_features`` override at the SPA layer.
     """
     cfg = load_datastack_config(ds)
     src = source_for(ds, cfg)
@@ -94,9 +106,9 @@ def knn(ds: str, embedding_id: str):
         )
 
     try:
-        spec = src.resolve(embedding_id)
+        ft = src.resolve_feature_table(feature_table_id)
     except KeyError as exc:
-        raise ApiError(404, "embedding_not_found", str(exc)) from exc
+        raise ApiError(404, "feature_table_not_found", str(exc)) from exc
 
     body = request.get_json(silent=True) or {}
     cell_id = _resolve_query_cell_id(ds, cfg, body)
@@ -122,7 +134,7 @@ def knn(ds: str, embedding_id: str):
     try:
         index = get_index(
             ds,
-            spec,
+            ft,
             feature_columns=feature_columns,
             standardize=manifest.knn.standardize,
             cache_ds=cfg.cache_alias or ds,
@@ -146,19 +158,18 @@ def knn(ds: str, embedding_id: str):
     )
 
 
-@bp.route("/<ds>/embeddings/<embedding_id>/resolve_roots", methods=["POST"])
+@bp.route("/<ds>/feature_tables/<feature_table_id>/resolve_roots", methods=["POST"])
 @auth_required
-def resolve_roots(ds: str, embedding_id: str):
+def resolve_roots(ds: str, feature_table_id: str):
     """Batched cell_id → root_id resolve at a specific mat_version.
 
-    Request body
-    ------------
-    ``{cell_ids: [int|str, ...], mat_version: int | "live"}``
-
-    Response
-    --------
-    ``{mat_version, resolutions: [{cell_id, root_id|null, status, candidates?}]}``.
+    Body: ``{cell_ids: [int|str, ...], mat_version: int | "live"}``.
+    Response: ``{mat_version, resolutions: [{cell_id, root_id, status, ...}]}``.
     Order matches the request.
+
+    Keyed on feature_table rather than embedding because the cell_id
+    universe is owned by the table; embedding choice doesn't affect
+    resolution.
     """
     cfg = load_datastack_config(ds)
     src = source_for(ds, cfg)
@@ -170,9 +181,9 @@ def resolve_roots(ds: str, embedding_id: str):
         )
 
     try:
-        src.resolve(embedding_id)
+        src.resolve_feature_table(feature_table_id)
     except KeyError as exc:
-        raise ApiError(404, "embedding_not_found", str(exc)) from exc
+        raise ApiError(404, "feature_table_not_found", str(exc)) from exc
 
     body = request.get_json(silent=True) or {}
 
@@ -233,13 +244,7 @@ def resolve_roots(ds: str, embedding_id: str):
 
 
 def _resolve_query_cell_id(ds: str, cfg, body: dict[str, Any]) -> int:
-    """Translate the /knn body's ``cell_id`` or ``root_id`` into a cell_id.
-
-    Accepts either:
-
-    - ``cell_id`` (int or numeric string): used directly.
-    - ``root_id`` + ``mat_version``: reverse-resolved through the resolver.
-    """
+    """Translate the /knn body's ``cell_id`` or ``root_id`` into a cell_id."""
     if "cell_id" in body:
         try:
             return int(body["cell_id"])
@@ -333,21 +338,31 @@ def _resolution_to_json(r) -> dict[str, Any]:
     return out
 
 
-def _spec_summary(spec: EmbeddingSpec) -> dict[str, Any]:
-    """Public-API projection of an EmbeddingSpec.
-
-    Drops ``source.uri`` (internal storage detail) and reduces ``audit``
-    to a boolean flag — the actual audit *values* per cell ship through
-    the rows endpoint, not the catalog.
+def _feature_table_summary(ft: FeatureTableSpec) -> dict[str, Any]:
+    """Public-API projection of a FeatureTableSpec — drops the storage URI
+    (internal) and renders the audit block as a boolean flag (the audit
+    *values* per cell ship through the rows endpoint, not the catalog).
     """
     return {
-        "id": spec.id,
-        "title": spec.title,
-        "description": spec.description,
-        "axes": spec.axes,
-        "id_column": spec.id_column,
-        "default_color_by": spec.default_color_by,
-        "feature_columns": spec.feature_columns,
-        "categorical_columns": spec.categorical_columns,
-        "has_audit": spec.audit is not None,
+        "id": ft.id,
+        "title": ft.title,
+        "description": ft.description,
+        "id_column": ft.id_column,
+        "feature_columns": ft.feature_columns,
+        "categorical_columns": ft.categorical_columns,
+        "depth_columns": ft.depth_columns,
+        "has_audit": ft.audit is not None,
+        "embeddings": [_embedding_summary(e) for e in ft.embeddings],
+    }
+
+
+def _embedding_summary(emb: EmbeddingSpec) -> dict[str, Any]:
+    return {
+        "id": emb.id,
+        "title": emb.title,
+        "description": emb.description,
+        "axes": emb.axes,
+        "default_color_by": emb.default_color_by,
+        "knn_features": emb.knn_features,
+        "depth_axis": emb.depth_axis,
     }

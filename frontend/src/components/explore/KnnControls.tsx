@@ -5,7 +5,7 @@ import type { EmbeddingKnnDefaults } from "../../api/types";
 
 interface Props {
   ds: string;
-  embeddingId: string;
+  featureTableId: string;
   matVersion: number | "live";
   /** Manifest-level kNN defaults (default_k + max_k). When absent the
    *  controls fall back to k=25, max=200. */
@@ -45,7 +45,7 @@ type IdMode = "cell" | "root";
  */
 export function KnnControls({
   ds,
-  embeddingId,
+  featureTableId,
   matVersion,
   knnDefaults,
   currentCellId,
@@ -113,7 +113,7 @@ export function KnnControls({
     if (!cellId) return;
     try {
       const result = await knn.mutateAsync({
-        ds, embeddingId, cellId, k,
+        ds, featureTableId, cellId, k,
       });
       onFocusCell(result.query_cell_id);
       onNeighbors(

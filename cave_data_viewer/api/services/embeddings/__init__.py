@@ -7,24 +7,26 @@ Discovery flow (one indirection):
     datastack YAML (feature_explorer.manifest_uri)
           │
           ▼
-    manifest YAML            ← cached, SWR ~5 min soft / ~1 h hard
-          │ EmbeddingSpec per embedding
+    manifest YAML (schema_v2)   ← cached, SWR ~5 min soft / ~1 h hard
+          │ FeatureTableSpec × N  (each owning a parquet)
+          │   └── EmbeddingSpec × N  (axes-only views onto the table)
           ▼
-    parquet DataFrame        ← cached, immutable, L2 GCS-backed
+    parquet DataFrame             ← cached, immutable, L2 GCS-backed
 
-Public re-exports are listed in ``__all__``. Endpoint and downstream
-service code should depend on the ``EmbeddingSource`` Protocol and the
-``EmbeddingSpec`` / ``Manifest`` Pydantic models; the manifest's caching
-behavior, URI fetcher, and parquet reader are implementation details.
+Public re-exports below. Endpoint and downstream service code should
+depend on the ``FeatureTableSource`` Protocol and the Pydantic schema
+types; the manifest's caching behavior, URI fetcher, and parquet
+reader are implementation details.
 """
 
 from .decoration_join import get_decoration_table_snapshot, join_decoration_column
 from .knn import EmbeddingIndex, build_index, get_index
-from .loader import load_embedding_frame
+from .loader import load_feature_table_frame
 from .manifest import (
-    EmbeddingAudit,
-    EmbeddingSourceRef,
     EmbeddingSpec,
+    FeatureTableAudit,
+    FeatureTableSourceRef,
+    FeatureTableSpec,
     KnnDefaults,
     Manifest,
     SUPPORTED_SCHEMA_VERSIONS,
@@ -37,24 +39,25 @@ from .resolver import (
     resolve_cell_ids_to_root_ids,
     reverse_resolve_root_id_to_cell_id,
 )
-from .source import EmbeddingSource, ManifestEmbeddingSource, source_for
+from .source import FeatureTableSource, ManifestFeatureTableSource, source_for
 
 __all__ = [
     # Source layer (Protocol + impl + factory).
-    "EmbeddingSource",
-    "ManifestEmbeddingSource",
+    "FeatureTableSource",
+    "ManifestFeatureTableSource",
     "source_for",
     # Manifest schema + helpers.
-    "EmbeddingAudit",
-    "EmbeddingSourceRef",
     "EmbeddingSpec",
+    "FeatureTableAudit",
+    "FeatureTableSourceRef",
+    "FeatureTableSpec",
     "KnnDefaults",
     "Manifest",
     "SUPPORTED_SCHEMA_VERSIONS",
     "fetch_and_parse_manifest",
     "get_manifest",
     # Parquet loader.
-    "load_embedding_frame",
+    "load_feature_table_frame",
     # kNN index.
     "EmbeddingIndex",
     "build_index",

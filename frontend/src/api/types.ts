@@ -354,21 +354,33 @@ export interface PlotSpecCatalogResponse {
 
 // ---- Feature Explorer ------------------------------------------------------
 
+/** One embedding under a feature table — a 2D scatter view. */
 export interface EmbeddingListItem {
   id: string;
   title: string;
   description: string | null;
   axes: [string, string];
-  id_column: string;
   default_color_by: string | null;
-  /** Numeric columns eligible for kNN + range filter. `null` means "every
-   *  non-axis numeric on the parquet" — the backend auto-derives. */
+  /** Optional override of the table's feature_columns for kNN over this
+   *  embedding. ``null`` means "inherit from the parent table". */
+  knn_features: string[] | null;
+  /** Which axis (if any) is depth-shaped; lets the rendering pipeline
+   *  flip the axis + overlay layer markers. */
+  depth_axis: "x" | "y" | null;
+}
+
+/** One feature table — the data unit; owns rows, features, and a list
+ *  of embeddings (views) declared over those rows. */
+export interface FeatureTableListItem {
+  id: string;
+  title: string;
+  description: string | null;
+  id_column: string;
   feature_columns: string[] | null;
-  /** Categorical / object columns usable for color and equality filter. */
   categorical_columns: string[];
-  /** Whether the parquet carries audit columns (source_root_id +
-   *  source_mat_version). Drives the cell-detail tooltip's provenance row. */
+  depth_columns: string[];
   has_audit: boolean;
+  embeddings: EmbeddingListItem[];
 }
 
 export interface EmbeddingKnnDefaults {
@@ -377,14 +389,19 @@ export interface EmbeddingKnnDefaults {
   standardize: boolean;
 }
 
-export interface EmbeddingListResponse {
+export interface FeatureTableListResponse {
   /** When false, every other field is omitted — the explorer is not
    *  configured for this datastack and the SPA should hide /explore. */
   enabled: boolean;
   cell_id_source_table?: string;
   knn?: EmbeddingKnnDefaults;
-  embeddings?: EmbeddingListItem[];
+  feature_tables?: FeatureTableListItem[];
 }
+
+/** Back-compat alias. The catalog used to be a flat embeddings list under
+ *  schema v1; the catalog hook keeps the historical name even though the
+ *  inner shape is now feature_tables. */
+export type EmbeddingListResponse = FeatureTableListResponse;
 
 export interface EmbeddingKnnNeighbor {
   cell_id: string;

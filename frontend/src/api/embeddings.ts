@@ -16,11 +16,11 @@ import type {
 } from "./types";
 
 const PATHS = {
-  list: (ds: string) => `/api/v1/datastacks/${ds}/embeddings`,
-  knn: (ds: string, id: string) =>
-    `/api/v1/datastacks/${ds}/embeddings/${id}/knn`,
-  resolveRoots: (ds: string, id: string) =>
-    `/api/v1/datastacks/${ds}/embeddings/${id}/resolve_roots`,
+  list: (ds: string) => `/api/v1/datastacks/${ds}/feature_tables`,
+  knn: (ds: string, ftId: string) =>
+    `/api/v1/datastacks/${ds}/feature_tables/${ftId}/knn`,
+  resolveRoots: (ds: string, ftId: string) =>
+    `/api/v1/datastacks/${ds}/feature_tables/${ftId}/resolve_roots`,
 };
 
 // ---- /embeddings (catalog) -------------------------------------------------
@@ -42,7 +42,10 @@ export function useEmbeddingList(ds: string | null) {
 
 export interface EmbeddingKnnArgs {
   ds: string;
-  embeddingId: string;
+  /** Feature table id — kNN is data-level, not view-level, so it's keyed
+   *  on the table rather than any one embedding. Multiple embeddings on
+   *  one table share the kNN index. */
+  featureTableId: string;
   /** Provide either `cellId` (preferred — stable across edits) or
    *  `rootId` + `matVersion` (server reverse-resolves to cell_id). */
   cellId?: string | number;
@@ -57,7 +60,7 @@ export interface EmbeddingKnnArgs {
 export function useEmbeddingKnnMutation() {
   return useMutation<EmbeddingKnnResponse, Error, EmbeddingKnnArgs>({
     mutationFn: (args) =>
-      apiFetch<EmbeddingKnnResponse>(PATHS.knn(args.ds, args.embeddingId), {
+      apiFetch<EmbeddingKnnResponse>(PATHS.knn(args.ds, args.featureTableId), {
         method: "POST",
         body: {
           ...(args.cellId !== undefined ? { cell_id: args.cellId } : {}),
@@ -78,7 +81,7 @@ export function useEmbeddingKnnMutation() {
 
 export interface ResolveRootsArgs {
   ds: string;
-  embeddingId: string;
+  featureTableId: string;
   cellIds: Array<string | number>;
   matVersion: number | "live";
 }
@@ -91,7 +94,7 @@ export function useResolveRoots(args: ResolveRootsArgs | null) {
     ? [
         "embedding_resolve_roots",
         args.ds,
-        args.embeddingId,
+        args.featureTableId,
         args.matVersion,
         // Order matters — different orderings produce the same resolutions
         // but distinct cache entries; tradeoff is fine for v1 (each
@@ -103,7 +106,7 @@ export function useResolveRoots(args: ResolveRootsArgs | null) {
     queryKey,
     queryFn: () =>
       apiFetch<ResolveRootsResponse>(
-        PATHS.resolveRoots(args!.ds, args!.embeddingId),
+        PATHS.resolveRoots(args!.ds, args!.featureTableId),
         {
           method: "POST",
           body: {
@@ -112,7 +115,7 @@ export function useResolveRoots(args: ResolveRootsArgs | null) {
           },
         },
       ),
-    enabled: !!args && !!args.ds && !!args.embeddingId && args.cellIds.length > 0,
+    enabled: !!args && !!args.ds && !!args.featureTableId && args.cellIds.length > 0,
     // Resolutions are stable within a mat_version (cell_id -> root_id is
     // frozen at a materialization); cache for an hour.
     staleTime: 60 * 60 * 1000,

@@ -31,8 +31,8 @@ import pandas as pd
 from flask import current_app
 from scipy.spatial import KDTree
 
-from .loader import load_embedding_frame
-from .manifest import EmbeddingSpec
+from .loader import load_feature_table_frame
+from .manifest import FeatureTableSpec
 
 logger = logging.getLogger(__name__)
 
@@ -158,21 +158,29 @@ def build_index(
 
 def get_index(
     datastack: str,
-    spec: EmbeddingSpec,
+    ft: FeatureTableSpec,
     *,
     feature_columns: Sequence[str] | None = None,
     standardize: bool = True,
     cache_ds: str | None = None,
 ) -> EmbeddingIndex:
-    """Cached lookup for the index of one (embedding, feature_subset).
+    """Cached lookup for the kNN index of one (feature_table, feature_subset).
+
+    Note the index is keyed on the **feature table**, not the embedding.
+    All embeddings declared on one table share the same row set and the
+    same feature universe, so they share kNN indices — flipping between
+    a UMAP and a t-SNE doesn't rebuild. The embedding can override the
+    default features (its ``knn_features`` field) and that *does* cut a
+    fresh index entry via the column-digest in the key.
 
     Resolution order for ``feature_columns``:
 
     1. Explicit argument (the endpoint passes the request's
-       ``feature_columns`` here when set).
-    2. Manifest-declared ``spec.feature_columns``.
-    3. Auto-derived: every non-axis non-audit numeric column on the
-       loaded frame.
+       ``feature_columns`` or the embedding's ``knn_features`` here when
+       set).
+    2. Manifest-declared ``ft.feature_columns``.
+    3. Auto-derived: every numeric column on the loaded frame that
+       isn't ``id_column`` or an audit column.
 
     The cache key incorporates a digest of the resolved column set so
     distinct subsets cache separately — a user that explicitly narrows
@@ -180,18 +188,18 @@ def get_index(
     """
     cache_ds = cache_ds or datastack
 
-    df = load_embedding_frame(datastack, spec, cache_ds=cache_ds)
+    df = load_feature_table_frame(datastack, ft, cache_ds=cache_ds)
 
     if feature_columns is not None:
         cols = list(feature_columns)
-    elif spec.feature_columns is not None:
-        cols = list(spec.feature_columns)
+    elif ft.feature_columns is not None:
+        cols = list(ft.feature_columns)
     else:
-        cols = _default_feature_columns(df, spec)
+        cols = _default_feature_columns(df, ft)
 
     if not cols:
         raise ValueError(
-            f"embedding {spec.id!r}: no feature columns available for kNN "
+            f"feature_table {ft.id!r}: no feature columns available for kNN "
             "(neither manifest nor auto-detection yielded any numeric column)"
         )
 
@@ -199,7 +207,7 @@ def get_index(
         ",".join(cols).encode() + (b"|std" if standardize else b"|raw"),
         digest_size=8,
     ).hexdigest()
-    key = (cache_ds, None, spec.id, digest)
+    key = (cache_ds, None, ft.id, digest)
 
     cache = current_app.extensions.get("dcv_embedding_index_cache")
     if cache is not None:
@@ -209,39 +217,41 @@ def get_index(
         if hit is not None:
             value, _ = hit
             logger.debug(
-                "embedding_index cache hit ds=%s id=%s in %.1fms",
-                cache_ds, spec.id, elapsed_ms,
+                "embedding_index cache hit ds=%s ft=%s in %.1fms",
+                cache_ds, ft.id, elapsed_ms,
             )
             return value
 
     t0 = time.perf_counter()
     index = build_index(
-        df, id_column=spec.id_column, feature_columns=cols, standardize=standardize
+        df, id_column=ft.id_column, feature_columns=cols, standardize=standardize
     )
     build_ms = (time.perf_counter() - t0) * 1000.0
     logger.info(
-        "built kNN index ds=%s id=%s n=%d k_features=%d in %.1fms",
-        cache_ds, spec.id, len(index.cell_ids), len(cols), build_ms,
+        "built kNN index ds=%s ft=%s n=%d k_features=%d in %.1fms",
+        cache_ds, ft.id, len(index.cell_ids), len(cols), build_ms,
     )
     if cache is not None:
         cache.set(key, index)
     return index
 
 
-def _default_feature_columns(df: pd.DataFrame, spec: EmbeddingSpec) -> list[str]:
+def _default_feature_columns(df: pd.DataFrame, ft: FeatureTableSpec) -> list[str]:
     """Auto-derive feature columns when neither the call site nor the
-    manifest names any. Every numeric column that isn't an axis, the id,
-    or an audit column qualifies.
+    manifest names any. Every numeric column that isn't the id, an axis
+    on any of the table's embeddings, or an audit column qualifies.
 
     Booleans are excluded — they're picker-friendly for filter/color but
     contribute nothing useful to euclidean distance.
     """
-    excluded: set[str] = set(spec.axes) | {spec.id_column}
-    if spec.audit:
-        if spec.audit.source_root_column:
-            excluded.add(spec.audit.source_root_column)
-        if spec.audit.source_mat_version_column:
-            excluded.add(spec.audit.source_mat_version_column)
+    excluded: set[str] = {ft.id_column}
+    for emb in ft.embeddings:
+        excluded.update(emb.axes)
+    if ft.audit:
+        if ft.audit.source_root_column:
+            excluded.add(ft.audit.source_root_column)
+        if ft.audit.source_mat_version_column:
+            excluded.add(ft.audit.source_mat_version_column)
     return [
         c
         for c in df.columns

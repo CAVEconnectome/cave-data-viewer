@@ -1,10 +1,17 @@
-"""Embedding-catalog manifest: schema, fetch, parse, validate, and SWR cache.
+"""Feature-table catalog manifest: schema, fetch, parse, validate, SWR cache.
 
 The manifest is a single YAML file in GCS (or anywhere the URI resolver can
-reach) that lists every embedding available for a datastack. The datastack
-YAML carries only ``manifest_uri:`` — the embedding catalog itself lives
-here, so adding a new embedding is an edit-in-GCS workflow rather than a
-backend redeploy.
+reach) that describes the feature dataframes available for a datastack and
+the embeddings declared over each one. The datastack YAML carries only
+``manifest_uri:`` — the catalog lives here, so adding a new feature table or
+embedding is an edit-in-GCS workflow rather than a backend redeploy.
+
+Schema v2 separates **data** (a feature table — the parquet, id column,
+feature columns, categoricals, etc.) from **view** (embeddings — pairs of
+axis columns over that data). One feature table can declare multiple
+embeddings: a whole-population UMAP, an inhibitory-only UMAP computed over
+a subset, a t-SNE, etc. Embeddings share the table's rows + features; only
+the axes (and optionally a kNN-feature override) differ.
 
 Caching strategy:
 
@@ -14,13 +21,14 @@ Caching strategy:
   separately.
 - SWR semantics via ``services.swr.SwrCache``. Soft TTL ~5 min: stale
   entries are served immediately while a background thread refetches.
-  Hard TTL ~1 h: bounds how long we'll serve stale data if refresh keeps
+  Hard TTL ~1 h bounds how long we'll serve stale data if refresh keeps
   failing — after that, the next caller pays a synchronous fetch and any
   error surfaces loudly.
 - Validation is layered: manifest-level structural errors (bad YAML,
   unknown schema_version) raise hard; per-entry validation failures are
-  soft — invalid rows are dropped with a logged warning, valid rows
-  surface. One bad row should not take down the catalog.
+  soft — invalid feature_tables / embeddings are dropped with a logged
+  warning, valid ones surface. One bad row should not take down the
+  catalog.
 """
 
 from __future__ import annotations
@@ -37,11 +45,15 @@ from .uri import fetch_bytes
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_SCHEMA_VERSIONS: frozenset[int] = frozenset({1})
+# v1 was a flat ``embeddings:`` list with each entry carrying its own
+# source/id_column/feature_columns. v2 splits data (FeatureTableSpec) from
+# view (EmbeddingSpec). No real users on v1 yet, so no migration path —
+# the manifests in the repo and on GCS get updated to v2 directly.
+SUPPORTED_SCHEMA_VERSIONS: frozenset[int] = frozenset({2})
 
 
-class EmbeddingSourceRef(BaseModel):
-    """How the backend finds a single embedding's underlying data.
+class FeatureTableSourceRef(BaseModel):
+    """How the backend finds a feature table's underlying data.
 
     v1 only ships ``kind: parquet``. A future catalog service would add
     ``kind: catalog`` (or similar) without changing this file's downstream
@@ -52,7 +64,7 @@ class EmbeddingSourceRef(BaseModel):
     uri: str
 
 
-class EmbeddingAudit(BaseModel):
+class FeatureTableAudit(BaseModel):
     """Names of optional audit columns in the parquet.
 
     When set, the SPA's cell-detail tooltip surfaces ``source_root_id`` and
@@ -66,41 +78,80 @@ class EmbeddingAudit(BaseModel):
 
 
 class EmbeddingSpec(BaseModel):
-    """One entry in the manifest's ``embeddings:`` list.
+    """One ``embeddings:`` entry under a feature table. Describes a single
+    2D scatter view onto the table's rows.
 
-    All knobs the explorer needs to render this embedding. The split
-    between ``feature_columns`` and ``categorical_columns`` is important:
+    Multiple embeddings per table are the point of the v2 schema: one
+    feature dataframe can have a whole-population UMAP + an
+    inhibitory-only UMAP + a t-SNE, all sharing rows, features, and
+    decorations.
 
-    - ``feature_columns`` are the numeric features eligible for kNN +
-      range filtering. If omitted, the loader will default to "every
-      non-axis numeric column".
-    - ``categorical_columns`` are *not* eligible for kNN; they're surfaced
-      for color-by and equality filters.
+    Display-level only — the data (id column, feature columns, source
+    parquet) lives on the parent ``FeatureTableSpec``.
 
-    ``axes`` must be exactly two columns (2D scatter). Higher-dimensional
-    embeddings would need a different visualization and a different spec
-    shape.
+    ``axes`` must be exactly two columns (2D scatter). Cells with null
+    values in either axis column are dropped from the scatter naturally
+    by plotly; that's the mechanism for subset embeddings like
+    "inhibitory only" (non-inhibitory cells get null axes in the
+    parquet).
+
+    ``knn_features`` overrides the parent table's ``feature_columns`` for
+    kNN computed on this embedding. Useful when the embedding was built
+    over a feature subset (e.g. inhibitory-relevant features) and kNN
+    should use the same subset for consistency. ``None`` (default) →
+    inherit the table's ``feature_columns``.
+
+    ``depth_axis`` names which axis (if any) is depth-shaped so plots.py
+    can flip the axis + add layer markers automatically. Typically null —
+    UMAP axes aren't depth-shaped — but a scatter binding the user picks
+    over a real depth column will surface depth-axis treatment through
+    the same machinery the connectivity plots use.
     """
 
     id: str
     title: str
     description: str | None = None
-    source: EmbeddingSourceRef
-    id_column: str = "cell_id"
     axes: list[str] = Field(min_length=2, max_length=2)
     default_color_by: str | None = None
-    # `None` is a sentinel that means "infer from the parquet at load time
-    # (every non-axis non-audit numeric column)". An empty list explicitly
-    # disables kNN for this embedding (the picker still works for color/filter
-    # over `categorical_columns` only).
+    knn_features: list[str] | None = None
+    depth_axis: Literal["x", "y", None] = None
+
+
+class FeatureTableSpec(BaseModel):
+    """One ``feature_tables:`` entry. Owns the data (a parquet keyed by
+    cell_id) plus all the columns the explorer can plot / filter / kNN
+    over. Embeddings nested under this entry share the same row set and
+    feature universe; they differ only in which two columns they bind
+    to the axes.
+
+    ``feature_columns`` are numeric columns eligible for kNN + range
+    filtering (None → infer at load time from non-axis non-audit
+    numerics). ``categorical_columns`` are usable for color and equality
+    filters but are excluded from kNN by default.
+
+    ``depth_columns`` declares which numeric columns are
+    depth-shaped — when one is bound on a plot's axis the rendering
+    pipeline auto-flips the axis and overlays layer-boundary markers
+    (the same machinery the connectivity-side plots use, via
+    ``services/plots.py::_is_depth_column``). Typically a single column
+    name (e.g. ``soma_depth_y``).
+    """
+
+    id: str
+    title: str
+    description: str | None = None
+    source: FeatureTableSourceRef
+    id_column: str = "cell_id"
     feature_columns: list[str] | None = None
     categorical_columns: list[str] = Field(default_factory=list)
-    audit: EmbeddingAudit | None = None
+    depth_columns: list[str] = Field(default_factory=list)
+    audit: FeatureTableAudit | None = None
+    embeddings: list[EmbeddingSpec] = Field(default_factory=list)
 
 
 class KnnDefaults(BaseModel):
     """Manifest-level kNN configuration. Applies to every embedding in the
-    manifest unless an embedding overrides individual fields (not in v1)."""
+    manifest unless an embedding overrides ``knn_features``."""
 
     default_k: int = 25
     max_k: int = 200
@@ -112,7 +163,7 @@ class Manifest(BaseModel):
 
     schema_version: int
     knn: KnnDefaults = Field(default_factory=KnnDefaults)
-    embeddings: list[EmbeddingSpec]
+    feature_tables: list[FeatureTableSpec]
 
 
 def fetch_and_parse_manifest(uri: str, *, project: str | None = None) -> Manifest:
@@ -123,12 +174,13 @@ def fetch_and_parse_manifest(uri: str, *, project: str | None = None) -> Manifes
     - Bytes don't parse as YAML.
     - Top-level isn't a mapping.
     - ``schema_version`` is missing or not in ``SUPPORTED_SCHEMA_VERSIONS``.
-    - ``embeddings`` is present but isn't a list.
+    - ``feature_tables`` is present but isn't a list.
 
     Soft-fail conditions (skip with a warning, keep going):
 
-    - An individual entry in ``embeddings`` fails Pydantic validation.
-    - Two entries share an ``id`` (first wins).
+    - An individual feature_tables entry fails Pydantic validation.
+    - Two tables share an ``id`` (first wins).
+    - Two embeddings within one table share an ``id`` (first wins).
     - The ``knn`` block fails validation (falls back to ``KnnDefaults()``).
 
     The caller (typically the SWR cache wrapper) decides whether to
@@ -156,31 +208,31 @@ def fetch_and_parse_manifest(uri: str, *, project: str | None = None) -> Manifes
             f"(supported: {sorted(SUPPORTED_SCHEMA_VERSIONS)})"
         )
 
-    raw_embeddings = data.get("embeddings") or []
-    if not isinstance(raw_embeddings, list):
+    raw_tables = data.get("feature_tables") or []
+    if not isinstance(raw_tables, list):
         raise ValueError(
-            f"manifest at {uri!r}: `embeddings` must be a list, "
-            f"got {type(raw_embeddings).__name__}"
+            f"manifest at {uri!r}: `feature_tables` must be a list, "
+            f"got {type(raw_tables).__name__}"
         )
 
-    valid: list[EmbeddingSpec] = []
-    seen_ids: set[str] = set()
-    for i, entry in enumerate(raw_embeddings):
+    valid: list[FeatureTableSpec] = []
+    seen_table_ids: set[str] = set()
+    for i, entry in enumerate(raw_tables):
         try:
-            spec = EmbeddingSpec.model_validate(entry)
+            ft = _validate_feature_table(entry, manifest_uri=uri, index=i)
         except ValidationError as e:
             logger.warning(
-                "manifest %s: skipping embedding entry %d (%s)", uri, i, e
+                "manifest %s: skipping feature_tables entry %d (%s)", uri, i, e
             )
             continue
-        if spec.id in seen_ids:
+        if ft.id in seen_table_ids:
             logger.warning(
-                "manifest %s: duplicate embedding id %r, keeping first occurrence",
-                uri, spec.id,
+                "manifest %s: duplicate feature_table id %r, keeping first occurrence",
+                uri, ft.id,
             )
             continue
-        seen_ids.add(spec.id)
-        valid.append(spec)
+        seen_table_ids.add(ft.id)
+        valid.append(ft)
 
     try:
         knn = KnnDefaults.model_validate(data.get("knn") or {})
@@ -191,7 +243,54 @@ def fetch_and_parse_manifest(uri: str, *, project: str | None = None) -> Manifes
         )
         knn = KnnDefaults()
 
-    return Manifest(schema_version=schema_version, knn=knn, embeddings=valid)
+    return Manifest(schema_version=schema_version, knn=knn, feature_tables=valid)
+
+
+def _validate_feature_table(
+    entry, *, manifest_uri: str, index: int
+) -> FeatureTableSpec:
+    """Validate one feature_tables entry plus its nested embeddings.
+
+    Embeddings are validated individually; bad embeddings are dropped
+    (with a logged warning) so a typo on one of them doesn't sink the
+    table. Duplicate embedding ids within a table are also dropped.
+    """
+    # First validate the parent shape without the embeddings list — that
+    # gives us a clear error if `source` or `id_column` is malformed,
+    # without conflating it with embedding-entry issues.
+    if not isinstance(entry, dict):
+        # Surface as a ValidationError via Pydantic's own machinery so
+        # the upstream handler's `except ValidationError` catches it.
+        FeatureTableSpec.model_validate(entry)  # raises
+
+    raw_embeddings = entry.get("embeddings") or []
+    skeleton = {k: v for k, v in entry.items() if k != "embeddings"}
+    # Validate the parent (with embeddings=[] so the model field is
+    # present); we'll attach the validated embeddings below.
+    parent = FeatureTableSpec.model_validate({**skeleton, "embeddings": []})
+
+    valid_embeddings: list[EmbeddingSpec] = []
+    seen_emb_ids: set[str] = set()
+    for j, raw in enumerate(raw_embeddings):
+        try:
+            emb = EmbeddingSpec.model_validate(raw)
+        except ValidationError as e:
+            logger.warning(
+                "manifest %s: feature_table %r — skipping embeddings entry %d (%s)",
+                manifest_uri, parent.id, j, e,
+            )
+            continue
+        if emb.id in seen_emb_ids:
+            logger.warning(
+                "manifest %s: feature_table %r — duplicate embedding id %r, "
+                "keeping first occurrence",
+                manifest_uri, parent.id, emb.id,
+            )
+            continue
+        seen_emb_ids.add(emb.id)
+        valid_embeddings.append(emb)
+
+    return parent.model_copy(update={"embeddings": valid_embeddings})
 
 
 def get_manifest(
@@ -215,8 +314,6 @@ def get_manifest(
     key = (datastack, uri)
     hit = cache.get(key)
     if hit is None:
-        # Cold path: synchronous fetch. Any error here is a configuration
-        # problem the operator needs to see immediately.
         manifest = fetch_and_parse_manifest(uri, project=project)
         cache.set(key, manifest)
         return manifest
@@ -230,18 +327,16 @@ def get_manifest(
 def _schedule_refresh(cache, key, uri: str, *, project: str | None) -> None:
     """Refresh a stale manifest entry in a daemon thread.
 
-    Manifests are small + infrequent, so a per-refresh daemon thread is
-    fine — no need for a dedicated executor. Failures are logged and the
-    stale entry stays in place; we never wipe a stale entry just because
-    refresh failed (a transient GCS hiccup shouldn't surface as a broken
-    /embeddings to the SPA).
+    Failures are logged and the stale entry stays in place; we never wipe
+    a stale entry just because refresh failed (a transient GCS hiccup
+    shouldn't surface as a broken /feature_tables to the SPA).
     """
 
     def _refresh() -> None:
         try:
             manifest = fetch_and_parse_manifest(uri, project=project)
             cache.set(key, manifest)
-        except Exception as e:  # broad on purpose: this is a daemon
+        except Exception as e:
             logger.warning(
                 "manifest %s: background refresh failed (%s); keeping stale entry",
                 uri, e,

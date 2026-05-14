@@ -1,4 +1,4 @@
-"""Parquet → DataFrame loader for embedding data.
+"""Parquet → DataFrame loader for feature-table data.
 
 Reads happen once per unique ``parquet_uri`` and cache to
 ``dcv_embedding_frame_cache`` (immutable ``LayeredSwrCache``, L2 GCS-backed).
@@ -23,27 +23,27 @@ import time
 import pandas as pd
 from flask import current_app
 
-from .manifest import EmbeddingSpec
+from .manifest import FeatureTableSpec
 from .uri import fetch_bytes, local_path_for
 
 logger = logging.getLogger(__name__)
 
 
-def load_embedding_frame(
+def load_feature_table_frame(
     datastack: str,
-    spec: EmbeddingSpec,
+    ft: FeatureTableSpec,
     *,
     cache_ds: str | None = None,
 ) -> pd.DataFrame:
-    """Return the parquet for ``spec`` as a pandas DataFrame, cached.
+    """Return the parquet for ``ft`` as a pandas DataFrame, cached.
 
     Parameters
     ----------
     datastack
         The datastack this load was made on behalf of. Used only for cache
         key construction; not for any CAVE call.
-    spec
-        Resolved ``EmbeddingSpec`` from the manifest.
+    ft
+        Resolved ``FeatureTableSpec`` from the manifest.
     cache_ds
         Cache-namespace override (defaults to ``datastack``). Lets two
         datastacks that point at the same parquet share cache entries —
@@ -52,14 +52,16 @@ def load_embedding_frame(
 
     Notes
     -----
-    Cache key shape is ``(cache_ds, None, embedding_id, parquet_uri)``. The
-    second slot mirrors the ``(cache_ds, mat_version, ...)`` convention used
-    by the other immutable caches so the shared retention resolver in
-    ``api/__init__.py`` short-circuits to the ``"default"`` partition without
-    a per-cache branch.
+    Cache key shape is ``(cache_ds, None, feature_table_id, parquet_uri)``.
+    The second slot mirrors the ``(cache_ds, mat_version, ...)`` convention
+    used by the other immutable caches so the shared retention resolver in
+    ``api/__init__.py`` short-circuits to the ``"default"`` partition
+    without a per-cache branch. ``feature_table_id`` is in the key so two
+    tables that happen to share a parquet URI (unusual, but possible
+    during dev) don't alias.
     """
     cache_ds = cache_ds or datastack
-    key = _cache_key(cache_ds, spec)
+    key = _cache_key(cache_ds, ft)
 
     cache = current_app.extensions.get("dcv_embedding_frame_cache")
     if cache is not None:
@@ -69,28 +71,28 @@ def load_embedding_frame(
         if hit is not None:
             value, _freshness = hit
             logger.debug(
-                "embedding_frame cache hit ds=%s id=%s in %.1fms",
-                cache_ds, spec.id, elapsed_ms,
+                "feature_table_frame cache hit ds=%s ft=%s in %.1fms",
+                cache_ds, ft.id, elapsed_ms,
             )
             return value
 
-    df = _read_parquet(spec.source.uri)
-    _validate_frame(df, spec)
+    df = _read_parquet(ft.source.uri)
+    _validate_frame(df, ft)
     if cache is not None:
         cache.set(key, df)
     return df
 
 
-def _cache_key(cache_ds: str, spec: EmbeddingSpec) -> tuple:
-    return (cache_ds, None, spec.id, spec.source.uri)
+def _cache_key(cache_ds: str, ft: FeatureTableSpec) -> tuple:
+    return (cache_ds, None, ft.id, ft.source.uri)
 
 
 def _read_parquet(uri: str) -> pd.DataFrame:
     """Materialize a parquet URI as a DataFrame.
 
     Local file:// URIs go straight to pyarrow so the parquet can be
-    memory-mapped — meaningful for ~500MB embedding frames. Remote URIs
-    fetch into memory and feed through ``io.BytesIO``.
+    memory-mapped — meaningful for ~500MB frames. Remote URIs fetch into
+    memory and feed through ``io.BytesIO``.
     """
     local = local_path_for(uri)
     if local is not None:
@@ -99,39 +101,36 @@ def _read_parquet(uri: str) -> pd.DataFrame:
     return pd.read_parquet(io.BytesIO(body))
 
 
-def _validate_frame(df: pd.DataFrame, spec: EmbeddingSpec) -> None:
+def _validate_frame(df: pd.DataFrame, ft: FeatureTableSpec) -> None:
     """Verify the parquet has the columns the manifest claims.
 
-    Missing ``id_column`` or any axis column is fatal — without those the
-    embedding can't render. Missing entries in ``feature_columns`` or
-    ``categorical_columns`` are downgraded to warnings; downstream paths
-    handle column absence gracefully (the column simply doesn't appear in
-    the picker), and one mistyped column name in the manifest shouldn't
-    break the whole embedding.
+    Missing ``id_column`` is fatal — without it the table can't be
+    keyed. Missing entries in ``feature_columns`` / ``categorical_columns``
+    / ``depth_columns`` are downgraded to warnings; downstream paths
+    handle column absence gracefully and one mistyped column name in
+    the manifest shouldn't break the whole table.
+
+    Embedding axes are validated lazily — they're checked when the
+    embedding is actually rendered, not at table load time. The same
+    parquet can host multiple embeddings, and a typo'd axis on one
+    shouldn't take down the others.
     """
-    missing_required: list[str] = []
-    if spec.id_column not in df.columns:
-        missing_required.append(spec.id_column)
-    for ax in spec.axes:
-        if ax not in df.columns:
-            missing_required.append(ax)
-    if missing_required:
+    if ft.id_column not in df.columns:
         raise ValueError(
-            f"parquet at {spec.source.uri!r}: missing required columns "
-            f"{missing_required} (have {list(df.columns)})"
+            f"parquet at {ft.source.uri!r}: missing required id_column "
+            f"{ft.id_column!r} (have {list(df.columns)})"
         )
 
-    if spec.feature_columns:
-        missing = [c for c in spec.feature_columns if c not in df.columns]
+    def _warn_missing(label: str, cols: list[str] | None) -> None:
+        if not cols:
+            return
+        missing = [c for c in cols if c not in df.columns]
         if missing:
             logger.warning(
-                "embedding %r: feature_columns missing from parquet: %s",
-                spec.id, missing,
+                "feature_table %r: %s missing from parquet: %s",
+                ft.id, label, missing,
             )
-    if spec.categorical_columns:
-        missing = [c for c in spec.categorical_columns if c not in df.columns]
-        if missing:
-            logger.warning(
-                "embedding %r: categorical_columns missing from parquet: %s",
-                spec.id, missing,
-            )
+
+    _warn_missing("feature_columns", ft.feature_columns)
+    _warn_missing("categorical_columns", ft.categorical_columns)
+    _warn_missing("depth_columns", ft.depth_columns)

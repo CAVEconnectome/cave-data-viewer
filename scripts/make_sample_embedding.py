@@ -121,30 +121,43 @@ def _build_frame(n: int, rng: np.random.Generator, cell_ids: Sequence[int] | Non
 
 
 def _build_manifest(parquet_path: Path) -> dict:
-    """Manifest pointing at the parquet. URI is file:// so the local dev
-    backend resolves without GCS auth."""
+    """Manifest (schema v2: feature_tables with nested embeddings) pointing
+    at the local parquet. URI is file:// so the dev backend resolves
+    without GCS auth."""
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "knn": {"default_k": 25, "max_k": 200, "standardize": True},
-        "embeddings": [
+        "feature_tables": [
             {
-                "id": "morpho_umap",
-                "title": "Morphology features — UMAP (synthetic sample)",
+                "id": "morpho_sample",
+                "title": "Morphology features (synthetic sample)",
                 "description": (
-                    "Synthetic sample embedding for local Feature Explorer development. "
-                    "cell_ids do not correspond to real nucleus_detection_v0 rows unless "
-                    "the generator was run with --ids-csv."
+                    "Synthetic sample feature table for local Feature Explorer "
+                    "development. cell_ids do not correspond to real "
+                    "nucleus_detection_v0 rows unless the generator was run with "
+                    "--ids-csv."
                 ),
                 "source": {"kind": "parquet", "uri": f"file://{parquet_path}"},
                 "id_column": "cell_id",
-                "axes": ["umap_x", "umap_y"],
-                "default_color_by": "predicted_subclass",
-                "feature_columns": ["soma_depth_y", "nucleus_volume_um", "soma_area_um"],
+                "feature_columns": [
+                    "soma_depth_y",
+                    "nucleus_volume_um",
+                    "soma_area_um",
+                ],
                 "categorical_columns": ["predicted_class", "predicted_subclass"],
+                "depth_columns": ["soma_depth_y"],
                 "audit": {
                     "source_root_column": "source_root_id",
                     "source_mat_version_column": "source_mat_version",
                 },
+                "embeddings": [
+                    {
+                        "id": "umap",
+                        "title": "UMAP",
+                        "axes": ["umap_x", "umap_y"],
+                        "default_color_by": "predicted_subclass",
+                    }
+                ],
             }
         ],
     }
