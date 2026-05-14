@@ -30,6 +30,12 @@ from .manifest import (
     fetch_and_parse_manifest,
     get_manifest,
 )
+from .resolver import (
+    Resolution,
+    ResolutionStatus,
+    resolve_cell_ids_to_root_ids,
+    reverse_resolve_root_id_to_cell_id,
+)
 from .source import EmbeddingSource, ManifestEmbeddingSource, source_for
 
 __all__ = [
@@ -52,4 +58,9 @@ __all__ = [
     "EmbeddingIndex",
     "build_index",
     "get_index",
+    # cell_id <-> root_id resolver.
+    "Resolution",
+    "ResolutionStatus",
+    "resolve_cell_ids_to_root_ids",
+    "reverse_resolve_root_id_to_cell_id",
 ]

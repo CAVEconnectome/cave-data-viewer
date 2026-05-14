@@ -21,15 +21,18 @@ import math
 from typing import Any
 
 import pandas as pd
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, current_app, jsonify, request
 
-from ..auth import auth_required
+from ..auth import auth_required, current_token, is_dev_bypass
+from ..cave import request_client
 from ..errors import ApiError
-from ..services.datastack_config import load_datastack_config
+from ..services.datastack_config import check_live_allowed, load_datastack_config
 from ..services.embeddings import (
     EmbeddingSpec,
     get_index,
     load_embedding_frame,
+    resolve_cell_ids_to_root_ids,
+    reverse_resolve_root_id_to_cell_id,
     source_for,
 )
 
@@ -180,26 +183,9 @@ def knn(ds: str, embedding_id: str):
 
     body = request.get_json(silent=True) or {}
 
-    if "root_id" in body and "cell_id" not in body:
-        raise ApiError(
-            501,
-            "root_id_knn_not_implemented",
-            "root_id input is a follow-up task; pass cell_id for now",
-        )
-
-    if "cell_id" not in body:
-        raise ApiError(
-            422, "missing_cell_id", "request body must include `cell_id`"
-        )
-
-    try:
-        cell_id = int(body["cell_id"])
-    except (TypeError, ValueError) as exc:
-        raise ApiError(
-            422,
-            "invalid_cell_id",
-            f"cell_id must be an integer or numeric string, got {body['cell_id']!r}",
-        ) from exc
+    # Resolve the query cell_id. Accepts either a stable cell_id directly or
+    # a root_id + mat_version pair that the resolver reverse-translates.
+    cell_id = _resolve_query_cell_id(ds, cfg, body)
 
     manifest = src.list()
     requested_k = body.get("k", manifest.knn.default_k)
@@ -246,7 +232,210 @@ def knn(ds: str, embedding_id: str):
     )
 
 
+@bp.route("/<ds>/embeddings/<embedding_id>/resolve_roots", methods=["POST"])
+@auth_required
+def resolve_roots(ds: str, embedding_id: str):
+    """Batched cell_id → root_id resolve at a specific mat_version.
+
+    Request body
+    ------------
+    ``{cell_ids: [int|str, ...], mat_version: int | "live"}``
+
+    Both keys are required. Numeric strings are accepted for ids (the SPA
+    treats ids as strings end-to-end). Empty list → empty resolutions
+    array, no CAVE call.
+
+    Response
+    --------
+    ``{mat_version, resolutions: [{cell_id, root_id|null, status, candidates?}]}``.
+    Order matches the request. Status is ``ok`` / ``missing`` (v1 forward
+    direction does not currently emit ``ambiguous``, but the field shape
+    accepts it forward-compatibly).
+    """
+    cfg = load_datastack_config(ds)
+    src = source_for(ds, cfg)
+    if src is None:
+        raise ApiError(
+            404,
+            "feature_explorer_disabled",
+            f"datastack {ds!r} does not enable the feature explorer",
+        )
+
+    # Validate the embedding exists so a typo in the URL surfaces here
+    # rather than after we've already round-tripped to CAVE.
+    try:
+        src.resolve(embedding_id)
+    except KeyError as exc:
+        raise ApiError(404, "embedding_not_found", str(exc)) from exc
+
+    body = request.get_json(silent=True) or {}
+
+    raw_ids = body.get("cell_ids")
+    if not isinstance(raw_ids, list):
+        raise ApiError(
+            422, "missing_cell_ids", "body must include a `cell_ids` list"
+        )
+    try:
+        cell_ids = [int(c) for c in raw_ids]
+    except (TypeError, ValueError) as exc:
+        raise ApiError(
+            422, "invalid_cell_ids", f"all cell_ids must be integers: {exc}"
+        ) from exc
+
+    if not cell_ids:
+        return jsonify({"mat_version": body.get("mat_version"), "resolutions": []})
+
+    if "mat_version" not in body:
+        raise ApiError(
+            422,
+            "missing_mat_version",
+            "body must include `mat_version` (int or \"live\")",
+        )
+    mat_version = body["mat_version"]
+
+    try:
+        check_live_allowed(ds, mat_version)
+    except ValueError as exc:
+        raise ApiError(422, "live_mode_disallowed", str(exc)) from exc
+
+    client = _cave_client(ds, mat_version)
+
+    try:
+        resolutions = resolve_cell_ids_to_root_ids(
+            client=client,
+            cfg=cfg,
+            mat_version=mat_version,
+            datastack=ds,
+            cell_ids=cell_ids,
+        )
+    except ValueError as exc:
+        raise ApiError(422, "lookup_unavailable", str(exc)) from exc
+    except Exception as exc:
+        raise ApiError(
+            502, "cave_upstream", f"{type(exc).__name__}: {exc}"
+        ) from exc
+
+    return jsonify(
+        {
+            "mat_version": str(mat_version) if mat_version is not None else None,
+            "resolutions": [_resolution_to_json(r) for r in resolutions],
+        }
+    )
+
+
 # -- internals ----------------------------------------------------------------
+
+
+def _resolve_query_cell_id(ds: str, cfg, body: dict[str, Any]) -> int:
+    """Translate the /knn body's ``cell_id`` or ``root_id`` into a cell_id.
+
+    Accepts either:
+
+    - ``cell_id`` (int or numeric string): used directly.
+    - ``root_id`` + ``mat_version``: reverse-resolved through the resolver.
+
+    Raises ``ApiError`` with structured codes the SPA can branch on:
+    ``missing_id``, ``invalid_cell_id``, ``invalid_root_id``,
+    ``missing_mat_version`` (root_id without mat_version),
+    ``root_id_unresolved`` (resolver returned None).
+    """
+    if "cell_id" in body:
+        try:
+            return int(body["cell_id"])
+        except (TypeError, ValueError) as exc:
+            raise ApiError(
+                422,
+                "invalid_cell_id",
+                f"cell_id must be an integer or numeric string, got {body['cell_id']!r}",
+            ) from exc
+
+    if "root_id" not in body:
+        raise ApiError(
+            422,
+            "missing_id",
+            "request body must include either `cell_id` or `root_id`+`mat_version`",
+        )
+
+    try:
+        root_id = int(body["root_id"])
+    except (TypeError, ValueError) as exc:
+        raise ApiError(
+            422,
+            "invalid_root_id",
+            f"root_id must be an integer or numeric string, got {body['root_id']!r}",
+        ) from exc
+
+    if "mat_version" not in body:
+        raise ApiError(
+            422,
+            "missing_mat_version",
+            "root_id input requires `mat_version` (int or \"live\") so the "
+            "reverse resolution knows which version to look up",
+        )
+    mat_version = body["mat_version"]
+
+    try:
+        check_live_allowed(ds, mat_version)
+    except ValueError as exc:
+        raise ApiError(422, "live_mode_disallowed", str(exc)) from exc
+
+    client = _cave_client(ds, mat_version)
+
+    try:
+        cell_id = reverse_resolve_root_id_to_cell_id(
+            client=client,
+            cfg=cfg,
+            mat_version=mat_version,
+            datastack=ds,
+            root_id=root_id,
+        )
+    except ValueError as exc:
+        raise ApiError(422, "lookup_unavailable", str(exc)) from exc
+    except Exception as exc:
+        raise ApiError(
+            502, "cave_upstream", f"{type(exc).__name__}: {exc}"
+        ) from exc
+
+    if cell_id is None:
+        raise ApiError(
+            404,
+            "root_id_unresolved",
+            f"root_id {root_id!r} could not be reverse-resolved to a "
+            f"cell_id at mat_version={mat_version!r} (no matching row in "
+            "root_id_lookup_main_table or its alt tables)",
+        )
+    return cell_id
+
+
+def _cave_client(ds: str, mat_version: int | str | None):
+    """Build a CAVE client with the request's auth context.
+
+    Centralized so the (typically two) callers in this file don't drift on
+    the no-auth-token error path.
+    """
+    try:
+        return request_client(
+            datastack_name=ds,
+            server_address=current_app.config["GLOBAL_SERVER_ADDRESS"],
+            auth_token=current_token(),
+            dev_bypass=is_dev_bypass(),
+            materialize_version=mat_version,
+        )
+    except ValueError as exc:
+        raise ApiError(401, "no_auth_token", str(exc)) from exc
+
+
+def _resolution_to_json(r) -> dict[str, Any]:
+    """Wire-format projection of a Resolution. Ids are stringified; the
+    ``candidates`` field is included only when non-empty."""
+    out: dict[str, Any] = {
+        "cell_id": str(r.cell_id),
+        "root_id": str(r.root_id) if r.root_id is not None else None,
+        "status": r.status,
+    }
+    if r.candidates:
+        out["candidates"] = [str(c) for c in r.candidates]
+    return out
 
 
 def _spec_summary(spec: EmbeddingSpec) -> dict[str, Any]:

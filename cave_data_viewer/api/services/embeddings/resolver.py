@@ -1,0 +1,136 @@
+"""cell_id ↔ root_id translation for the Feature Explorer.
+
+Thin wrapper over ``services/cell_id.py`` that produces the structured
+``{cell_id, root_id, status}`` shape the SelectionPane and ``/resolve_roots``
+endpoint consume. The underlying primitive already batches + caches; this
+layer adds:
+
+- A structured ``Resolution`` record (vs the existing ``dict`` shape) so
+  callers can distinguish ``ok`` / ``missing`` / ``ambiguous`` without
+  guessing from a ``None`` value.
+- Forward-compatible ``ambiguous`` status (with ``candidates``). v1's
+  forward direction (cell → root) doesn't produce ambiguous results in
+  practice — the materialized view is one row per cell — but the field
+  exists so a future tightening (e.g. surfacing splits across versions)
+  doesn't break the wire shape.
+
+The resolver is *not* called from within the explorer's data path
+(/points, /column, /knn) — those operate purely in cell_id space. The
+resolver is invoked only at boundaries: ``/resolve_roots`` for SPA
+cross-nav prefetch, and ``/knn`` when the caller supplies a root_id
+instead of a cell_id.
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, field
+from typing import Literal, Sequence
+
+logger = logging.getLogger(__name__)
+
+ResolutionStatus = Literal["ok", "missing", "ambiguous"]
+
+
+@dataclass(frozen=True)
+class Resolution:
+    """One ``cell_id -> root_id`` resolution result.
+
+    - ``status == "ok"``: ``root_id`` is a valid current root for the cell
+      at the requested mat_version.
+    - ``status == "missing"``: the cell either isn't in the lookup view at
+      this mat_version, OR (live mode) its supervoxel doesn't resolve to a
+      non-zero root.
+    - ``status == "ambiguous"``: reserved for a future extension; the
+      ``candidates`` tuple would carry the colliding root_ids. v1's
+      forward direction does not emit this status.
+    """
+
+    cell_id: int
+    root_id: int | None
+    status: ResolutionStatus
+    candidates: tuple[int, ...] = field(default_factory=tuple)
+
+
+def resolve_cell_ids_to_root_ids(
+    *,
+    client,
+    cfg,
+    mat_version: int | str | None,
+    datastack: str,
+    cell_ids: Sequence[int],
+) -> list[Resolution]:
+    """Translate cell_ids → root_ids at ``mat_version``.
+
+    Order is preserved: ``output[i].cell_id == cell_ids[i]``. Caching,
+    batching, and (live mode) supervoxel → root translation are inherited
+    from the underlying ``cell_ids_to_root_ids`` primitive.
+
+    Raises ``ValueError`` (propagated from the primitive) when the
+    datastack has no ``cell_id_lookup_view`` configured. The endpoint layer
+    surfaces that as a 422.
+    """
+    # Local import to keep this module free of circular dependencies
+    # (services/cell_id imports nothing from this package).
+    from ..cell_id import cell_ids_to_root_ids
+
+    if not cell_ids:
+        return []
+
+    mapping = cell_ids_to_root_ids(
+        client=client,
+        cfg=cfg,
+        mat_version=mat_version,
+        datastack=datastack,
+        cell_ids=[int(c) for c in cell_ids],
+    )
+
+    results: list[Resolution] = []
+    for raw in cell_ids:
+        cell_id = int(raw)
+        root_id = mapping.get(cell_id)
+        if root_id is None:
+            results.append(
+                Resolution(cell_id=cell_id, root_id=None, status="missing")
+            )
+        else:
+            results.append(
+                Resolution(
+                    cell_id=cell_id, root_id=int(root_id), status="ok"
+                )
+            )
+    return results
+
+
+def reverse_resolve_root_id_to_cell_id(
+    *,
+    client,
+    cfg,
+    mat_version: int | str | None,
+    datastack: str,
+    root_id: int,
+) -> int | None:
+    """Reverse-resolve a single root_id to its cell_id.
+
+    Used by ``/knn`` when the caller supplies a root_id (typically pasted
+    from a Neuroglancer tab) rather than the stable cell_id. The lookup
+    goes through the datastack's ``root_id_lookup_main_table`` + any
+    ``root_id_lookup_alt_tables`` exactly as the existing
+    ``/cell-ids/lookup`` endpoint does.
+
+    Returns ``None`` when the root has no nucleus mapping, or maps
+    ambiguously to multiple cells (the underlying primitive drops
+    duplicate-pt_root_id rows). The endpoint layer translates ``None`` to
+    a 404.
+    """
+    from ..cell_id import root_ids_to_cell_ids
+
+    mapping = root_ids_to_cell_ids(
+        client=client,
+        cfg=cfg,
+        mat_version=mat_version,
+        datastack=datastack,
+        root_ids=[int(root_id)],
+    )
+    cid = mapping.get(int(root_id))
+    return int(cid) if cid is not None else None
