@@ -44,6 +44,11 @@ export function FeatureExplorer() {
   const [decRaw] = useUrlParam("dec");
   const [cells] = useUrlParam("cells");
   const [selUniverseRaw, setSelUniverse] = useUrlParam("sel_universe");
+  // Row-selection state for the cell-list table — lifted to the URL
+  // so reload preserves the selection and the scatter highlight can
+  // read it. Empty / absent = no row-selection active; the highlight
+  // then falls back to the filter/lasso intersection.
+  const [selTableRaw, setSelTable] = useUrlParam("sel_table");
   // Seaborn-style channel bindings. Each is the dotted column name
   // (parquet columns are prefixed with the feature_table id; decoration
   // columns are `<dec_table>.<col>`) or null to fall back to the
@@ -107,6 +112,15 @@ export function FeatureExplorer() {
     () => (selUniverseRaw ? selUniverseRaw.split(",").filter(Boolean) : []),
     [selUniverseRaw],
   );
+  // Row-selection: cell_ids the user explicitly clicked in the table.
+  // When non-empty, this overrides the filter/lasso-derived highlight
+  // on the scatter — the explicit click is what the user wants to
+  // focus on. Filter/lasso still control which rows are *visible*
+  // in the table.
+  const rowSelectedCellIds = useMemo(
+    () => (selTableRaw ? selTableRaw.split(",").filter(Boolean) : []),
+    [selTableRaw],
+  );
 
   // Scatter response — fetched by UniverseScatter too, but TanStack
   // Query dedupes by queryKey so there's only one network call. We
@@ -163,18 +177,24 @@ export function FeatureExplorer() {
       : null,
   );
 
-  // Highlight set on the scatter: the cell_id set that matters right
-  // now. With the /cells endpoint already applying the lasso ∧ filter
-  // intersection server-side, the response's `cell_ids` IS the
-  // intersection — we just consume it. Returns null when nothing is
-  // active so the scatter renders without an overlay.
+  // Highlight set on the scatter, in priority order:
+  //   1. Row-selection from the table (explicit user clicks) — when
+  //      non-empty, that's the highlight. The user clicked these
+  //      specific rows; we surface them.
+  //   2. Filter / lasso intersection. /cells already applies both
+  //      server-side, so the response's `cell_ids` IS the
+  //      intersection — we just consume it.
+  //   3. Nothing active → no overlay (everything renders normally).
   const highlightedCellIds = useMemo(() => {
+    if (rowSelectedCellIds.length > 0) {
+      return new Set(rowSelectedCellIds);
+    }
     const filterActive = !!cells;
     const lassoActive = lassoCellIds.length > 0;
     if (!filterActive && !lassoActive) return null;
     if (!cellList.data) return null;
     return new Set(cellList.data.cell_ids);
-  }, [cells, lassoCellIds, cellList.data]);
+  }, [rowSelectedCellIds, cells, lassoCellIds, cellList.data]);
 
   // Batch cell_id → root_id resolution for the visible rows. The
   // resolver universe-caches per (ds, mv) server-side so a 94k-cell
@@ -451,6 +471,10 @@ export function FeatureExplorer() {
                 }}
                 enableNglAction={false}
                 rowsLabel="cells"
+                selectedIds={rowSelectedCellIds}
+                onSelectedIdsChange={(ids) =>
+                  setSelTable(ids.length > 0 ? ids.join(",") : null)
+                }
               />
             </div>
           )}

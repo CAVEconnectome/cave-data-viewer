@@ -57,6 +57,14 @@ interface Props {
    *  and the CSV filename. Defaults to "partners" so /neuron callers
    *  are unchanged; explorer passes "cells". */
   rowsLabel?: string;
+  /** Controlled row-selection ids (lifted to URL state on the caller
+   *  side). When provided together with `onSelectedIdsChange`, the
+   *  table's internal selection state is replaced by these props —
+   *  row clicks fire the callback, and the table renders whichever
+   *  rows the callback's owner sets. /neuron leaves these unset and
+   *  keeps the in-memory selection it always had. */
+  selectedIds?: string[];
+  onSelectedIdsChange?: (ids: string[]) => void;
 }
 
 // Column key may be `<table>.<col>` (decoration table) or just `<col>` (intrinsic /
@@ -162,13 +170,46 @@ function csvCell(value: unknown): string {
   return s;
 }
 
-export function PartnersTable({ ds, rootId, matVersion, direction, rows, columnGroups, decorationTables, defaultHiddenColumns, externalSelection, onClearSelection, labelOverrides, keyColumn = "root_id", crossNavHref, enableNglAction = true, rowsLabel = "partners" }: Props) {
+export function PartnersTable({ ds, rootId, matVersion, direction, rows, columnGroups, decorationTables, defaultHiddenColumns, externalSelection, onClearSelection, labelOverrides, keyColumn = "root_id", crossNavHref, enableNglAction = true, rowsLabel = "partners", selectedIds, onSelectedIdsChange }: Props) {
   const [searchParams] = useSearchParams();
   const setUrlParams = useSetUrlParams();
   const makeLink = useMakeLinkMutation();
   const [sorting, setSorting] = useState<SortingState>([]);
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
-  const [rowSelection, setRowSelection] = useState<RowSelectionState>({});
+  // Row selection is *controlled* when both `selectedIds` and
+  // `onSelectedIdsChange` are passed (explorer path). Otherwise the
+  // table owns its own selection state (the legacy /neuron path).
+  const isSelectionControlled =
+    selectedIds !== undefined && onSelectedIdsChange !== undefined;
+  const [internalRowSelection, setInternalRowSelection] = useState<RowSelectionState>({});
+  const controlledRowSelection = useMemo<RowSelectionState>(() => {
+    if (!isSelectionControlled || !selectedIds) return {};
+    const out: RowSelectionState = {};
+    for (const id of selectedIds) out[id] = true;
+    return out;
+  }, [isSelectionControlled, selectedIds]);
+  const rowSelection = isSelectionControlled
+    ? controlledRowSelection
+    : internalRowSelection;
+  const handleRowSelectionChange = useCallback(
+    (updater: RowSelectionState | ((prev: RowSelectionState) => RowSelectionState)) => {
+      const prev = isSelectionControlled ? controlledRowSelection : internalRowSelection;
+      const next = typeof updater === "function" ? updater(prev) : updater;
+      if (isSelectionControlled) {
+        // Emit the ids in insertion order; TanStack uses an object, so
+        // we project to keys-with-truthy-value. Falsy entries (which
+        // TanStack writes on deselection) are skipped.
+        const ids: string[] = [];
+        for (const [k, v] of Object.entries(next)) {
+          if (v) ids.push(k);
+        }
+        onSelectedIdsChange!(ids);
+      } else {
+        setInternalRowSelection(next);
+      }
+    },
+    [isSelectionControlled, controlledRowSelection, internalRowSelection, onSelectedIdsChange],
+  );
 
   // Hidden / shown / collapsed are derived from URL params on every render
   // — the URL is the source of truth for column visibility.
@@ -586,7 +627,7 @@ export function PartnersTable({ ds, rootId, matVersion, direction, rows, columnG
     },
     onSortingChange: setSorting,
     onColumnFiltersChange: setColumnFilters,
-    onRowSelectionChange: setRowSelection,
+    onRowSelectionChange: handleRowSelectionChange,
     getRowId: (row) => String((row as Record<string, unknown>)[keyColumn] ?? ""),
     enableRowSelection: true,
     getCoreRowModel: getCoreRowModel(),
@@ -602,7 +643,11 @@ export function PartnersTable({ ds, rootId, matVersion, direction, rows, columnG
   });
 
   const filteredRows = table.getFilteredRowModel().rows;
-  const selectedIds = Object.keys(rowSelection);
+  // Effective row-selection ids (always derived from `rowSelection`,
+  // whether that came from controlled props or internal state).
+  // Renamed from the bare `selectedIds` to avoid shadowing the new
+  // prop of the same name.
+  const effectiveSelectedIds = Object.keys(rowSelection);
 
   const filterIsActive = columnFilters.length > 0 && filteredRows.length !== rows.length;
 
@@ -648,7 +693,7 @@ export function PartnersTable({ ds, rootId, matVersion, direction, rows, columnG
   // buttons on the page. The strictest non-empty scope wins.
   const bothScope: { ids: string[] | undefined; label: string } = (() => {
     if (direction !== "both") return { ids: undefined, label: "" };
-    if (selectedIds.length > 0) return { ids: selectedIds, label: `${selectedIds.length} selected` };
+    if (effectiveSelectedIds.length > 0) return { ids: effectiveSelectedIds, label: `${effectiveSelectedIds.length} selected` };
     if (filterIsActive) return { ids: filteredRows.map((r) => r.id), label: `${filteredRows.length} filtered` };
     return { ids: undefined, label: `all ${rows.length}` };
   })();
@@ -698,10 +743,10 @@ export function PartnersTable({ ds, rootId, matVersion, direction, rows, columnG
               </button>
             )}
             <button
-              onClick={() => open(linkTemplate, selectedIds)}
-              disabled={selectedIds.length === 0}
+              onClick={() => open(linkTemplate, effectiveSelectedIds)}
+              disabled={effectiveSelectedIds.length === 0}
             >
-              Open {selectedIds.length} selected in NGL
+              Open {effectiveSelectedIds.length} selected in NGL
             </button>
           </>
         ))}
