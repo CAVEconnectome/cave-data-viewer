@@ -442,9 +442,12 @@ export interface EmbeddingColorBlock {
 
 export interface EmbeddingSizeBlock {
   column: string;
-  /** Same length as `cell_ids`. Server pre-scales to [4, 20]px so the
-   *  client renders without re-fitting. */
-  values: number[];
+  /** Raw numeric values, same length as `cell_ids`. Nullable for
+   *  rows where the source column was NaN. The client rank-scales
+   *  these to px in UniverseScatter (so the size-range slider is a
+   *  free client-side transform with no refetch), and SummaryPanel
+   *  bins them for the distribution overlay. */
+  values: Array<number | null>;
   raw_range: [number, number];
 }
 

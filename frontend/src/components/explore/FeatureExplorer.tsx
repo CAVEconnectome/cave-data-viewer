@@ -114,8 +114,6 @@ export function FeatureExplorer() {
           y: yBinding,
           colorBy: colorBinding,
           sizeBy: sizeBinding,
-          sizeMinPx,
-          sizeMaxPx,
           decorationTables,
           matVersion,
         }

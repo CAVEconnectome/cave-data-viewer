@@ -168,8 +168,6 @@ export function UniverseScatter({
     y: yBinding,
     colorBy,
     sizeBy,
-    sizeMinPx,
-    sizeMaxPx,
     decorationTables,
     matVersion,
   });
@@ -190,8 +188,12 @@ export function UniverseScatter({
   // 0–2). Pan/zoom operate in normalized space; axis labels (when we
   // add them) inverse-transform tick positions through `extent`.
   const partition = useMemo(
-    () => buildPartition(query.data, highlightedCellIds, extent),
-    [query.data, highlightedCellIds, extent],
+    () =>
+      buildPartition(query.data, highlightedCellIds, extent, {
+        sizeMinPx: sizeMinPx ?? 2,
+        sizeMaxPx: sizeMaxPx ?? 18,
+      }),
+    [query.data, highlightedCellIds, extent, sizeMinPx, sizeMaxPx],
   );
 
   // Measure the container so the initial fit uses the actual canvas
@@ -396,10 +398,12 @@ export function UniverseScatter({
     }
     const s = query.data.size;
     if (s) {
-      // The wire `size.values` is the px-scaled radius; surface raw_range
-      // bounds as a hint of where this point sits.
-      const px = s.values[idx];
-      lines.push(`${s.column}: ${px.toFixed(2)} px (range ${s.raw_range[0].toFixed(2)}–${s.raw_range[1].toFixed(2)})`);
+      const v = s.values[idx];
+      lines.push(
+        `${s.column}: ${
+          v === null || v === undefined ? "(null)" : v
+        } (range ${s.raw_range[0].toFixed(2)}–${s.raw_range[1].toFixed(2)})`,
+      );
     }
     return { lines, px: hovered.px, py: hovered.py };
   }, [hovered, query.data]);
@@ -578,9 +582,20 @@ function buildPartition(
   data: EmbeddingScatterResponse | undefined,
   highlight: Set<string> | null | undefined,
   extent: Extent | null,
+  sizeOpts: { sizeMinPx: number; sizeMaxPx: number },
 ): Partition | null {
   if (!data || !extent) return null;
   const n = data.cell_ids.length;
+
+  // Client-side rank-to-px scaling for the size channel. The server
+  // ships raw values; we map each value to its percentile rank in the
+  // sorted distribution, then linearly into [sizeMinPx, sizeMaxPx].
+  // Same encoding as the backend `_scale_size_rank` used to do, but
+  // now driven by the size-range slider without a refetch.
+  let sizePx: number[] | null = null;
+  if (data.size) {
+    sizePx = rankScaleToPx(data.size.values, sizeOpts.sizeMinPx, sizeOpts.sizeMaxPx);
+  }
   // Per-axis linear scalers to [0, 1]. Constant-axis (xMax === xMin)
   // collapses to 0.5 so every point lands at the middle of that axis
   // rather than NaN'ing the position.
@@ -652,12 +667,12 @@ function buildPartition(
       alpha = HIGHLIGHT_RGBA[3];
     }
 
-    // Size: server-scaled value (3-10px) when bound; otherwise small for
+    // Size: client-rank-scaled to px when bound; otherwise small for
     // base, slightly larger for highlight. Highlight bumps by +1px when
     // size is bound so the highlight set still reads above the base.
     let radius: number;
-    if (sizeBlock) {
-      radius = sizeBlock.values[i] ?? 3;
+    if (sizePx) {
+      radius = sizePx[i];
       if (isHighlight) radius += 1;
     } else {
       radius = isHighlight ? 4 : hasHighlight ? 2 : 3;
@@ -679,8 +694,46 @@ function buildPartition(
   // the GPU buffers. Including the binding identity here is enough; the
   // per-point arrays are immutable for a given binding set.
   const colorRevision = `${colorBlock?.column ?? ""}|${colorBlock?.kind ?? ""}|${hasHighlight ? "hl" : "no-hl"}`;
-  const sizeRevision = `${sizeBlock?.column ?? ""}|${hasHighlight ? "hl" : "no-hl"}`;
+  const sizeRevision = `${sizeBlock?.column ?? ""}|${sizeOpts.sizeMinPx}|${sizeOpts.sizeMaxPx}|${hasHighlight ? "hl" : "no-hl"}`;
   return { base, highlight: hl, colorRevision, sizeRevision };
+}
+
+/** Percentile-rank scaling: each value maps to its position in the
+ *  sorted-by-value index, then linearly into [lo, hi]. NaN values
+ *  land at `lo` so they're visible but deprioritized.
+ *
+ *  O(n log n) for the sort; ~80ms on 94k values, memoized in
+ *  buildPartition. Mirrors the backend's _scale_size_rank that we
+ *  retired from the /scatter response.
+ */
+function rankScaleToPx(
+  values: Array<number | null>,
+  lo: number,
+  hi: number,
+): number[] {
+  const n = values.length;
+  // Sort indices by value to compute ranks. NaN/null entries get
+  // a sentinel rank of 0 (lo) without participating in the sort
+  // among real values.
+  const idx: number[] = [];
+  for (let i = 0; i < n; i++) {
+    const v = values[i];
+    if (v !== null && Number.isFinite(v)) idx.push(i);
+  }
+  idx.sort((a, b) => (values[a] as number) - (values[b] as number));
+  const result = new Array<number>(n);
+  // Default everything to lo; sorted indices overwrite below.
+  for (let i = 0; i < n; i++) result[i] = lo;
+  const m = idx.length;
+  if (m === 0) return result;
+  // Map sorted positions into [lo, hi]. Ties: average rank handled
+  // implicitly by stable sort + linear position, close enough.
+  const span = hi - lo;
+  for (let k = 0; k < m; k++) {
+    const pct = m === 1 ? 1 : k / (m - 1);
+    result[idx[k]] = lo + pct * span;
+  }
+  return result;
 }
 
 interface Extent {

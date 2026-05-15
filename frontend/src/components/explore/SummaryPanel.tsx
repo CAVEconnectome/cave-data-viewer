@@ -82,6 +82,34 @@ export function SummaryPanel({ scatter, highlightedCellIds }: Props) {
 
   if (!scatter) return null;
 
+  // Numeric channel selection for the histogram view:
+  //   1. Color, when bound numerically — color's the user's primary
+  //      visual encoding, so it gets the panel.
+  //   2. Size, when bound (always numeric) and color isn't categorical.
+  //   3. Nothing — falls back to the categorical/empty case above.
+  // The histogram color matches whatever channel is in play: numeric-
+  // color uses a Viridis mid-stop; size uses the project accent
+  // because there's no "color of the size encoding."
+  const numericChannel = (() => {
+    const c = scatter.color;
+    if (c && c.kind === "numeric") {
+      return {
+        column: c.column,
+        values: c.values as Array<number | null>,
+        color: "#21908d", // mid-Viridis teal
+      };
+    }
+    const s = scatter.size;
+    if (s && c?.kind !== "categorical") {
+      return {
+        column: s.column,
+        values: s.values,
+        color: "#f59e0b",
+      };
+    }
+    return null;
+  })();
+
   const maxUniverse = categories
     ? Math.max(...categories.map((c) => c.universeCount), 1)
     : 1;
@@ -112,13 +140,179 @@ export function SummaryPanel({ scatter, highlightedCellIds }: Props) {
           ))}
         </div>
       )}
-      {scatter.color?.kind === "numeric" && (
-        <div className="summary-panel-numeric">
-          numeric color — histogram view coming soon
-        </div>
+      {numericChannel && (
+        <NumericHistogram
+          column={numericChannel.column}
+          values={numericChannel.values}
+          cellIds={scatter.cell_ids}
+          highlightedCellIds={highlightedCellIds ?? null}
+          color={numericChannel.color}
+        />
       )}
     </div>
   );
+}
+
+// --- numeric histogram view -------------------------------------------------
+
+interface NumericHistogramProps {
+  column: string;
+  values: Array<number | null>;
+  cellIds: string[];
+  highlightedCellIds: Set<string> | null;
+  /** Hex color for the highlight bars. Defaults to the project's
+   *  accent orange so unbound (e.g. lasso-only) cases still read. */
+  color?: string;
+}
+
+function NumericHistogram({
+  column,
+  values,
+  cellIds,
+  highlightedCellIds,
+  color = "#f59e0b",
+}: NumericHistogramProps) {
+  const bins = useMemo(
+    () => buildHistogram(values, cellIds, highlightedCellIds, 24),
+    [values, cellIds, highlightedCellIds],
+  );
+
+  if (!bins || bins.binCounts.length === 0) return null;
+
+  const width = 240;
+  const height = 60;
+  const padLeft = 0;
+  const padBottom = 14;
+  const innerW = width - padLeft;
+  const innerH = height - padBottom;
+  const maxCount = Math.max(1, ...bins.binCounts);
+  const barW = innerW / bins.binCounts.length;
+
+  return (
+    <div className="summary-histogram" title={column}>
+      <div className="summary-panel-cat-title">{bareCol(column)}</div>
+      <svg
+        viewBox={`0 0 ${width} ${height}`}
+        className="summary-histogram-svg"
+        preserveAspectRatio="none"
+      >
+        {bins.binCounts.map((u, i) => {
+          const h = (u / maxCount) * innerH;
+          const hl = bins.highlightCounts[i];
+          const hlH = (hl / maxCount) * innerH;
+          const x = padLeft + i * barW;
+          return (
+            <g key={i}>
+              {/* Universe bar (gray). */}
+              <rect
+                x={x + 0.5}
+                y={innerH - h}
+                width={Math.max(0, barW - 1)}
+                height={h}
+                fill="rgba(0, 0, 0, 0.18)"
+              />
+              {/* Highlight overlay (in the channel color). */}
+              {hl > 0 && (
+                <rect
+                  x={x + 0.5}
+                  y={innerH - hlH}
+                  width={Math.max(0, barW - 1)}
+                  height={hlH}
+                  fill={color}
+                />
+              )}
+            </g>
+          );
+        })}
+        {/* Axis ticks: min + max raw values. */}
+        <text
+          x={padLeft}
+          y={height - 2}
+          fontSize="9"
+          fill="rgba(0,0,0,0.55)"
+          fontFamily="ui-monospace, monospace"
+        >
+          {formatTick(bins.binMin)}
+        </text>
+        <text
+          x={width}
+          y={height - 2}
+          fontSize="9"
+          fill="rgba(0,0,0,0.55)"
+          textAnchor="end"
+          fontFamily="ui-monospace, monospace"
+        >
+          {formatTick(bins.binMax)}
+        </text>
+      </svg>
+    </div>
+  );
+}
+
+interface HistogramData {
+  binCounts: number[];
+  highlightCounts: number[];
+  binMin: number;
+  binMax: number;
+}
+
+function buildHistogram(
+  values: Array<number | null>,
+  cellIds: string[],
+  highlight: Set<string> | null,
+  nBins: number,
+): HistogramData | null {
+  // Pass 1: extent over finite values.
+  let mn = Number.POSITIVE_INFINITY;
+  let mx = Number.NEGATIVE_INFINITY;
+  for (const v of values) {
+    if (v === null || v === undefined || !Number.isFinite(v)) continue;
+    if (v < mn) mn = v;
+    if (v > mx) mx = v;
+  }
+  if (!Number.isFinite(mn)) return null;
+  if (mx === mn) {
+    // Constant column — collapse to one bin so the panel renders without
+    // a divide-by-zero. Useful smoke test for "histogram never empty."
+    const universe = values.filter((v) => v !== null && Number.isFinite(v as number)).length;
+    let hi = 0;
+    if (highlight) {
+      for (let i = 0; i < values.length; i++) {
+        const v = values[i];
+        if (v === null || !Number.isFinite(v)) continue;
+        if (highlight.has(cellIds[i])) hi += 1;
+      }
+    }
+    return {
+      binCounts: [universe],
+      highlightCounts: [hi],
+      binMin: mn,
+      binMax: mx,
+    };
+  }
+  const span = mx - mn;
+  const binCounts = new Array<number>(nBins).fill(0);
+  const highlightCounts = new Array<number>(nBins).fill(0);
+  // Pass 2: bin every cell.
+  for (let i = 0; i < values.length; i++) {
+    const v = values[i];
+    if (v === null || v === undefined || !Number.isFinite(v)) continue;
+    let bin = Math.floor(((v - mn) / span) * nBins);
+    if (bin >= nBins) bin = nBins - 1; // clamp the max-value point
+    binCounts[bin] += 1;
+    if (highlight && highlight.has(cellIds[i])) {
+      highlightCounts[bin] += 1;
+    }
+  }
+  return { binCounts, highlightCounts, binMin: mn, binMax: mx };
+}
+
+function formatTick(n: number): string {
+  if (!Number.isFinite(n)) return "—";
+  if (Math.abs(n) >= 1000 || (Math.abs(n) < 0.01 && n !== 0))
+    return n.toExponential(1);
+  if (Math.abs(n) >= 100) return n.toFixed(0);
+  return n.toFixed(2);
 }
 
 function SummaryRow({

@@ -3295,3 +3295,15 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   color: var(--muted, #6b7280);
   font-style: italic;
 }
+
+/* ---- Summary histogram (numeric channel) ----------------------------- */
+.summary-histogram {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.summary-histogram-svg {
+  width: 100%;
+  height: 60px;
+  display: block;
+}

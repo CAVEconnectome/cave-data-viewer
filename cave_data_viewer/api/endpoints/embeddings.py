@@ -196,20 +196,6 @@ def scatter(ds: str, feature_table_id: str, embedding_id: str):
     y_override = request.args.get("y") or None
     color_col = request.args.get("color") or None
     size_col = request.args.get("size") or None
-    # Size range bounds — let the client widen/narrow the visual range
-    # of the size channel without server changes. Defaults match the
-    # _scale_size_rank defaults (2–18 px). Bounded to a sane envelope
-    # so a stray URL value doesn't render giant blobs.
-    try:
-        size_min_px = float(request.args.get("size_min", 2.0))
-        size_max_px = float(request.args.get("size_max", 18.0))
-    except ValueError as exc:
-        raise ApiError(
-            422, "invalid_size_range",
-            f"size_min / size_max must be numeric: {exc}",
-        ) from exc
-    size_min_px = max(0.5, min(size_min_px, 40.0))
-    size_max_px = max(size_min_px + 0.5, min(size_max_px, 40.0))
     mv_raw = request.args.get("mat_version")
     if mv_raw is None or mv_raw == "":
         mat_version: int | str | None = None
@@ -353,28 +339,24 @@ def scatter(ds: str, feature_table_id: str, embedding_id: str):
                 f"size channel {size_col!r} is not numeric "
                 f"(dtype={series.dtype}); size only supports numeric columns",
             )
+        # Ship raw values + raw_range. The client handles the
+        # px-encoding mapping (rank percentile → [size_min, size_max])
+        # because (a) the user-controlled size-range slider becomes a
+        # free client transform with no refetch, and (b) the summary
+        # panel needs raw values to render a meaningful histogram —
+        # binning rank-scaled px values would produce a uniform
+        # distribution by construction.
         finite = pd.to_numeric(series, errors="coerce").dropna()
         if finite.empty:
             raw_range = [0.0, 0.0]
         else:
             raw_range = [float(finite.min()), float(finite.max())]
-        # Percentile-rank scaling so the visual encoding is uniform
-        # regardless of the source distribution. Linear scaling of
-        # long-tailed morphology features (soma_volume, nucleus_area,
-        # etc. — typical for connectomics) compresses most cells to
-        # the small end with a few visible outliers; "looks broken"
-        # because the variation hides in the tail. Rank scaling gives
-        # the same visual span across the dataset, which is what users
-        # expect from a "size by feature" binding.
-        #
-        # 2-18px range — wider than the Plotly-era 3-10 because deck.gl
-        # handles large markers without overdraw issues. Hover surfaces
-        # the raw value in raw_range so the user can still read the
-        # actual number.
-        scaled = _scale_size_rank(series, lo_px=size_min_px, hi_px=size_max_px)
+        coerced = pd.to_numeric(series, errors="coerce")
         size_block = {
             "column": size_col,
-            "values": [float(v) for v in scaled.tolist()],
+            "values": [
+                None if pd.isna(v) else float(v) for v in coerced.tolist()
+            ],
             "raw_range": raw_range,
         }
 
