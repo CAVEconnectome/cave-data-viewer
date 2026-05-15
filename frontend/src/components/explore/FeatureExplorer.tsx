@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   useCellList,
   useEmbeddingList,
@@ -154,10 +154,18 @@ export function FeatureExplorer() {
   // mechanism — row checkboxes in the table OR lassoing on the
   // scatter. Lassoing is a *selection action*, not a table filter —
   // a polygon over the scatter behaves the same as ticking each
-  // contained cell's checkbox. URL key kept as ?sel_table since it
-  // started life as the row-selection state; the name is incidental
-  // now that lasso and row-clicks share it.
-  const [selTableRaw, setSelTable] = useUrlParam("sel_table");
+  // contained cell's checkbox.
+  //
+  // Lives in local component state (not URL) — large lassos overflow
+  // Node's 8KB header limit when the URL becomes a request line on
+  // page refresh (HTTP 431). Selections are inherently transient and
+  // the user opted out of URL persistence here. The rest of the view
+  // config — ?cells, ?dec, ?ft, ?emb, channel bindings — stays in
+  // URL state for shareability.
+  const [selTableLocal, setSelTableLocal] = useState<string[]>([]);
+  const setSelTable = useCallback((csv: string | null) => {
+    setSelTableLocal(csv ? csv.split(",").filter(Boolean) : []);
+  }, []);
   // Seaborn-style channel bindings. Each is the dotted column name
   // (parquet columns are prefixed with the feature_table id; decoration
   // columns are `<dec_table>.<col>`) or null to fall back to the
@@ -177,15 +185,14 @@ export function FeatureExplorer() {
   const tableOpen = tableRaw === "open";
   // "Limit visible to selection" — a *snapshot* of cell_ids the user
   // froze at the moment they clicked the action. The table narrows
-  // to these. Distinct from `?sel_table` (the live selection) so the
-  // user can modify their selection (check/uncheck rows, lasso more)
-  // without the visible-set shifting under their interactions.
-  // "Reset visible" clears this state.
-  const [limitToRaw, setLimitTo] = useUrlParam("limit_to");
-  const limitToCellIds = useMemo(
-    () => (limitToRaw ? limitToRaw.split(",").filter(Boolean) : []),
-    [limitToRaw],
-  );
+  // to these. Distinct from the live selection so the user can
+  // modify their selection (check/uncheck rows, lasso more) without
+  // the visible-set shifting under their interactions.
+  // Same URL-overflow reasoning as the selection state — kept local.
+  const [limitToCellIds, setLimitToCellIds] = useState<string[]>([]);
+  const setLimitTo = useCallback((csv: string | null) => {
+    setLimitToCellIds(csv ? csv.split(",").filter(Boolean) : []);
+  }, []);
   // Size range falls back to client defaults when URL is silent.
   const sizeMinPx = sizeMinRaw ? parseFloat(sizeMinRaw) : 2.0;
   const sizeMaxPx = sizeMaxRaw ? parseFloat(sizeMaxRaw) : 18.0;
@@ -229,11 +236,9 @@ export function FeatureExplorer() {
   // The unified selection set: cell_ids from row checkboxes AND
   // lasso. One source of truth — populated by either mechanism,
   // read by the scatter highlight, the table's row-checked state,
-  // and the NGL "selected" action.
-  const rowSelectedCellIds = useMemo(
-    () => (selTableRaw ? selTableRaw.split(",").filter(Boolean) : []),
-    [selTableRaw],
-  );
+  // and the NGL "selected" action. Local state (see setSelTable
+  // comment above on why we don't put this in URL state).
+  const rowSelectedCellIds = selTableLocal;
 
   // Scatter response — fetched by UniverseScatter too, but TanStack
   // Query dedupes by queryKey so there's only one network call. We
