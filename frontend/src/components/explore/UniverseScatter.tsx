@@ -308,8 +308,44 @@ export function UniverseScatter({
   }, [axesKey, query.data, measuredHeight]);
 
   const fitView = useCallback(() => {
+    // When a highlight is active, frame the viewport on the
+    // highlighted cells specifically — that's almost always what
+    // "fit" means in the moment (the user is looking for them).
+    // Otherwise fit the full unit square (default extent).
+    if (partition && partition.highlight.length > 0) {
+      // Highlight positions are in the same normalized [0,1]×[0,1]
+      // space the view targets. Find their bounding box, pad ~15%
+      // for breathing room, set view center + zoom to that.
+      let minX = 1;
+      let maxX = 0;
+      let minY = 1;
+      let maxY = 0;
+      for (const r of partition.highlight) {
+        const [x, y] = r.position;
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+      // Handle the single-point case — give it a small finite span
+      // so the zoom doesn't go to infinity.
+      const spanX = Math.max(maxX - minX, 0.02);
+      const spanY = Math.max(maxY - minY, 0.02);
+      const cx = (minX + maxX) / 2;
+      const cy = (minY + maxY) / 2;
+      const padding = 1.3;
+      const containerPx = heightForFitRef.current;
+      // Zoom = log2(pixels-per-data-unit). Fit the larger span.
+      const fitSpan = Math.max(spanX, spanY) * padding;
+      const zoom = Math.log2(containerPx / fitSpan);
+      setViewState({
+        target: [cx, cy, 0],
+        zoom: Math.max(-10, Math.min(20, zoom)),
+      });
+      return;
+    }
     setViewState(unitSquareViewState(heightForFitRef.current));
-  }, []);
+  }, [partition]);
 
   const layers = useMemo(() => {
     if (!partition) return [];
@@ -332,16 +368,25 @@ export function UniverseScatter({
       },
     });
     if (partition.highlight.length === 0) return [base];
+    // Contrasting white stroke on every highlight marker. Tiny visual
+    // cost at high count (a thin ring on each dot), large win at low
+    // count: a few highlighted cells in 94k now read as crisp rings
+    // rather than indistinguishable dots. Combined with the
+    // exponential size bonus in `buildPartition`, single-cell
+    // highlights are findable without manual zoom.
     const hl = new ScatterplotLayer({
       id: "universe-highlight",
       data: partition.highlight,
       pickable: true,
-      stroked: false,
+      stroked: true,
       filled: true,
       radiusUnits: "pixels",
+      lineWidthUnits: "pixels",
       getPosition: (d: RenderRow) => d.position,
       getFillColor: (d: RenderRow) => d.color,
       getRadius: (d: RenderRow) => d.radius,
+      getLineColor: [255, 255, 255, 230],
+      getLineWidth: 1.5,
       updateTriggers: {
         getFillColor: partition.colorRevision,
         getRadius: partition.sizeRevision,
@@ -794,11 +839,29 @@ function buildPartition(
     else base.push(row);
   }
 
+  // Sparse-highlight visibility boost. With ~94k cells, picking out
+  // a handful of highlighted points is genuinely hard at default
+  // size. Bump highlight radii continuously as the count shrinks —
+  // small sets get markedly larger, the threshold dissolves so there
+  // isn't a visible "snap" as the user lassos one more cell into a
+  // medium-sized set.
+  //
+  // Curve: at 1 highlighted cell, +8px bonus; at 500, ~0. Continuous
+  // exponential decay. Combined with the always-on stroke on the
+  // highlight layer (see `getLineColor` in the layer config), even
+  // single-cell selections become findable against a dense background.
+  if (hl.length > 0 && hl.length <= 500) {
+    const bonus = 8 * Math.exp(-hl.length / 80);
+    for (const row of hl) {
+      row.radius += bonus;
+    }
+  }
+
   // Revision strings drive deck.gl's updateTriggers — change ⇒ rebuild
   // the GPU buffers. Including the binding identity here is enough; the
   // per-point arrays are immutable for a given binding set.
   const colorRevision = `${colorBlock?.column ?? ""}|${colorBlock?.kind ?? ""}|${hasHighlight ? "hl" : "no-hl"}`;
-  const sizeRevision = `${sizeBlock?.column ?? ""}|${opts.sizeMinPx}|${opts.sizeMaxPx}|${hasHighlight ? "hl" : "no-hl"}`;
+  const sizeRevision = `${sizeBlock?.column ?? ""}|${opts.sizeMinPx}|${opts.sizeMaxPx}|${hl.length}|${hasHighlight ? "hl" : "no-hl"}`;
   return { base, highlight: hl, colorRevision, sizeRevision };
 }
 
