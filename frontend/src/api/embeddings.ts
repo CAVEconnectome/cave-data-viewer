@@ -12,11 +12,17 @@ import { apiFetch } from "./client";
 import type {
   EmbeddingKnnResponse,
   EmbeddingListResponse,
+  EmbeddingScatterResponse,
+  FeatureTableCellsResponse,
   ResolveRootsResponse,
 } from "./types";
 
 const PATHS = {
   list: (ds: string) => `/api/v1/datastacks/${ds}/feature_tables`,
+  scatter: (ds: string, ftId: string, embId: string) =>
+    `/api/v1/datastacks/${ds}/feature_tables/${ftId}/embeddings/${embId}/scatter`,
+  cells: (ds: string, ftId: string) =>
+    `/api/v1/datastacks/${ds}/feature_tables/${ftId}/cells`,
   knn: (ds: string, ftId: string) =>
     `/api/v1/datastacks/${ds}/feature_tables/${ftId}/knn`,
   resolveRoots: (ds: string, ftId: string) =>
@@ -34,6 +40,81 @@ export function useEmbeddingList(ds: string | null) {
     // Catalog comes from a SWR-cached manifest server-side (~5 min refresh).
     // 5 min stale matches that cadence so the SPA doesn't poll the catalog
     // more aggressively than the backend refreshes it.
+    staleTime: 5 * 60 * 1000,
+  });
+}
+
+// ---- /scatter (universe layer) ---------------------------------------------
+
+export interface EmbeddingScatterArgs {
+  ds: string;
+  featureTableId: string;
+  embeddingId: string;
+}
+
+/** Universe payload for the scatter component. Parquet-pinned + cached
+ *  immutably; second-and-subsequent fetches are dict-fast. */
+export function useEmbeddingScatter(args: EmbeddingScatterArgs | null) {
+  return useQuery<EmbeddingScatterResponse>({
+    queryKey: args
+      ? ["embedding_scatter", args.ds, args.featureTableId, args.embeddingId]
+      : ["embedding_scatter", "disabled"],
+    queryFn: () =>
+      apiFetch<EmbeddingScatterResponse>(
+        PATHS.scatter(args!.ds, args!.featureTableId, args!.embeddingId),
+      ),
+    enabled: !!args && !!args.ds && !!args.featureTableId && !!args.embeddingId,
+    // Parquet content is pinned by URI — once loaded, no need to refetch.
+    staleTime: Infinity,
+  });
+}
+
+// ---- /cells (cell list rows) -----------------------------------------------
+
+export interface CellListArgs {
+  ds: string;
+  featureTableId: string;
+  matVersion: number | "live" | null;
+  decorationTables?: string[];
+  cells?: string | null;
+  limit?: number;
+}
+
+/** Rows + column_groups for the explorer's cell-list table. Filter
+ *  expression is server-side; client just renders + paginates. */
+export function useCellList(args: CellListArgs | null) {
+  return useQuery<FeatureTableCellsResponse>({
+    queryKey: args
+      ? [
+          "feature_cells",
+          args.ds,
+          args.featureTableId,
+          args.matVersion,
+          (args.decorationTables ?? []).join(","),
+          args.cells ?? "",
+          args.limit ?? null,
+        ]
+      : ["feature_cells", "disabled"],
+    queryFn: () =>
+      apiFetch<FeatureTableCellsResponse>(PATHS.cells(args!.ds, args!.featureTableId), {
+        query: {
+          mat_version:
+            args!.matVersion === "live"
+              ? "live"
+              : args!.matVersion === null || args!.matVersion === undefined
+                ? undefined
+                : String(args!.matVersion),
+          dec: args!.decorationTables?.length
+            ? args!.decorationTables.join(",")
+            : undefined,
+          cells: args!.cells || undefined,
+          limit: args!.limit ? String(args!.limit) : undefined,
+        },
+      }),
+    enabled: !!args && !!args.ds && !!args.featureTableId,
+    // Parquet is immutable + decoration values are stable within a
+    // mat_version; 5 min keeps the SPA responsive across explorer
+    // navigation while still reflecting a manifest swap reasonably fast.
     staleTime: 5 * 60 * 1000,
   });
 }

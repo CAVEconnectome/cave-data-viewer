@@ -32,14 +32,26 @@ interface Props {
   // columns (e.g. `net_size_out`, `net_size_in`) — useful but verbose, so
   // they're off by default and discoverable through the standard menu.
   defaultHiddenColumns?: string[];
-  /** Plot-brush filter: rows whose `root_id` isn't in this set are hidden,
-   *  ANDed with column filters. `null` / empty disables. */
+  /** Plot-brush filter: rows whose primary-key value isn't in this set are
+   *  hidden, ANDed with column filters. `null` / empty disables. */
   externalSelection?: string[] | null;
   /** Called when the user clicks the "clear" affordance on the brush pill. */
   onClearSelection?: () => void;
   /** Provider-emitted column label overrides from `bundle.spatial_meta`.
    *  Layered on top of the SPA's anatomy-independent renames. */
   labelOverrides?: Record<string, string>;
+  /** Primary-key column on each row. Drives `getRowId`, the plot-brush
+   *  comparison, and the per-row cross-nav arrow. Defaults to "root_id"
+   *  so /neuron callers are unchanged; /explore passes "cell_id". */
+  keyColumn?: "root_id" | "cell_id";
+  /** Builds the cross-nav href for a clicked row. Defaults to the
+   *  partner→/neuron builder; explorer passes a builder that resolves
+   *  cell_id → root_id at the current mv before constructing /neuron URL. */
+  crossNavHref?: (rowId: string) => string;
+  /** Whether to render the per-row "open in Neuroglancer" action column.
+   *  Defaults true (the partners path always wants it); explorer disables
+   *  it until a generic ids-as-segments /links template lands. */
+  enableNglAction?: boolean;
 }
 
 // Column key may be `<table>.<col>` (decoration table) or just `<col>` (intrinsic /
@@ -145,7 +157,7 @@ function csvCell(value: unknown): string {
   return s;
 }
 
-export function PartnersTable({ ds, rootId, matVersion, direction, rows, columnGroups, decorationTables, defaultHiddenColumns, externalSelection, onClearSelection, labelOverrides }: Props) {
+export function PartnersTable({ ds, rootId, matVersion, direction, rows, columnGroups, decorationTables, defaultHiddenColumns, externalSelection, onClearSelection, labelOverrides, keyColumn = "root_id", crossNavHref, enableNglAction = true }: Props) {
   const [searchParams] = useSearchParams();
   const setUrlParams = useSetUrlParams();
   const makeLink = useMakeLinkMutation();
@@ -398,7 +410,7 @@ export function PartnersTable({ ds, rootId, matVersion, direction, rows, columnG
   // Returns a `to=` value (not an imperative `navigate()` call) so the
   // `<Link>` renders a real `<a href>` — that lets cmd-click / middle-click
   // open the partner in a new tab natively without any extra event plumbing.
-  const partnerHref = useCallback(
+  const defaultPartnerHref = useCallback(
     (partnerRoot: string) => {
       const next = new URLSearchParams(searchParams);
       for (const key of [...next.keys()]) {
@@ -425,6 +437,10 @@ export function PartnersTable({ ds, rootId, matVersion, direction, rows, columnG
     },
     [searchParams, rootId, ds, matVersion, decorationTables],
   );
+  // Caller may inject a different builder (the explorer routes through
+  // useResolveRoots so the destination uses a fresh root_id at the current
+  // mv). When unset, the partner→/neuron path stays the default.
+  const hrefFor = crossNavHref ?? defaultPartnerHref;
 
   // Direction → link-template resolution lifted up here so the per-row NGL
   // action button can use it; the action bar below uses the same lookup.
@@ -482,9 +498,9 @@ export function PartnersTable({ ds, rootId, matVersion, direction, rows, columnG
               // the platform's native handling without any extra wiring.
               <Link
                 className="row-action"
-                to={partnerHref(ctx.row.id)}
-                title="View this partner (⌘-click for a new tab)"
-                aria-label="View this partner"
+                to={hrefFor(ctx.row.id)}
+                title="View this row (⌘-click for a new tab)"
+                aria-label="View this row"
               >→</Link>
             ),
             accessorFn: () => null,
@@ -492,7 +508,9 @@ export function PartnersTable({ ds, rootId, matVersion, direction, rows, columnG
             enableColumnFilter: false,
             meta: { actionPlaceholder: true },
           },
-          {
+        ];
+        if (enableNglAction) {
+          leafs.push({
             id: "__action_ngl__",
             header: "",
             cell: (ctx) => (
@@ -507,8 +525,8 @@ export function PartnersTable({ ds, rootId, matVersion, direction, rows, columnG
             enableSorting: false,
             enableColumnFilter: false,
             meta: { actionPlaceholder: true },
-          },
-        ];
+          });
+        }
       }
       // Two header forms by mode:
       //   - Intrinsic group has no visible label.
@@ -541,7 +559,7 @@ export function PartnersTable({ ds, rootId, matVersion, direction, rows, columnG
         columns: leafs,
       };
     });
-  }, [columnGroups, leafColumnDefs, collapsedGroups, partnerHref, open, linkTemplate]);
+  }, [columnGroups, leafColumnDefs, collapsedGroups, hrefFor, open, linkTemplate, enableNglAction]);
 
   // External selection (from a plot brush) ANDs with column filters via
   // TanStack's globalFilter. Empty / null disables; otherwise rows whose
@@ -564,7 +582,7 @@ export function PartnersTable({ ds, rootId, matVersion, direction, rows, columnG
     onSortingChange: setSorting,
     onColumnFiltersChange: setColumnFilters,
     onRowSelectionChange: setRowSelection,
-    getRowId: (row) => row.root_id,
+    getRowId: (row) => String((row as Record<string, unknown>)[keyColumn] ?? ""),
     enableRowSelection: true,
     getCoreRowModel: getCoreRowModel(),
     getSortedRowModel: getSortedRowModel(),

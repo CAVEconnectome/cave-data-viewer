@@ -427,3 +427,27 @@ export interface ResolveRootsResponse {
   mat_version: string | null;
   resolutions: CellRootResolution[];
 }
+
+/** Scatter (universe) payload for one embedding view. */
+export interface EmbeddingScatterResponse {
+  cell_ids: string[];
+  x: number[];
+  y: number[];
+  n_cells: number;
+  axes: { x: string; y: string };
+}
+
+/** Cell-list rows for the explorer's PartnersTable mounting. Shape
+ *  mirrors the partners-frame so the same component renders both. */
+export interface FeatureTableCellsResponse {
+  cell_ids: string[];
+  /** Row records keyed by cell_id; parquet columns are prefixed with the
+   *  feature_table_id (e.g. `morpho_sample.predicted_class`) so they
+   *  share the `<table>.<col>` namespace with decoration columns. */
+  rows: PartnerRecord[];
+  column_groups: ColumnGroup[];
+  matched_count: number;
+  total_count: number;
+  limit: number;
+  limit_hit: boolean;
+}

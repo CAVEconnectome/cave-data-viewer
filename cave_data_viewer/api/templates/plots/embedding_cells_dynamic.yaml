@@ -1,0 +1,9 @@
+name: embedding_cells_dynamic
+description: Runtime-configurable plot over a feature-table parquet (one row per cell in the chosen feature table; parquet columns + any attached decoration columns available)
+kind: scatter
+dynamic: true
+data_query:
+  source: embedding_cells
+bins: 30
+layout:
+  showlegend: true

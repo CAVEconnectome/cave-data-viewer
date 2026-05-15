@@ -2873,3 +2873,64 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   line-height: 1;
 }
 .explore-dec-chip-remove:hover { color: #b00020; }
+
+/* ---- Feature Explorer layout (v2) -------------------------------------- */
+.explore {
+  display: grid;
+  grid-template-columns: 280px 1fr;
+  gap: 16px;
+  padding: 12px;
+  height: 100%;
+  box-sizing: border-box;
+}
+.explore-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  overflow-y: auto;
+}
+.explore-center {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+.universe-scatter {
+  background: var(--panel, #fff);
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 6px;
+  padding: 4px;
+}
+.universe-scatter.loading,
+.universe-scatter.error,
+.universe-scatter.empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted, #6b7280);
+  font-size: 13px;
+}
+.universe-scatter.error { color: #b00020; }
+.explore-cell-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 0;
+}
+.explore-cell-list-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 13px;
+  color: var(--muted, #6b7280);
+  padding: 0 4px;
+}
+.explore-cell-list-header .error { color: #b00020; }
+.explore-clear-lasso {
+  font-size: 12px;
+  padding: 2px 8px;
+  background: var(--panel, #fff);
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 4px;
+  cursor: pointer;
+}

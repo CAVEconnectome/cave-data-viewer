@@ -100,6 +100,21 @@ class FeatureTableQuery:
         # canonical name regardless of how the manifest declared it.
         if self.feature_table.id_column != "cell_id":
             df = df.rename(columns={self.feature_table.id_column: "cell_id"})
+        # Prefix every non-id parquet column with the feature_table_id so the
+        # column lives in the same `<table>.<col>` namespace decoration tables
+        # use. The `?cells=` filter parser requires every clause to be
+        # `<table>.<col>:<op>:<val>`, so without this the user would have no
+        # way to write a predicate on a parquet column. The id stays bare —
+        # it's the primary key, treated specially by PartnersTable's
+        # getRowId + by the resolver's cell_id resolution.
+        ft_id = self.feature_table.id
+        rename: dict[str, str] = {}
+        for col in df.columns:
+            if col == "cell_id":
+                continue
+            rename[col] = f"{ft_id}.{col}"
+        if rename:
+            df = df.rename(columns=rename)
 
         if not decoration_tables:
             return df

@@ -9,6 +9,7 @@ from ..services.datastack_config import (
     load_datastack_config,
     resolve_synapse_config,
 )
+from ..services.embeddings import FeatureTableQuery, source_for as feature_source_for
 from ..services.neuron import NeuronQuery
 from ..services.plots import _parse_cells_param, load_plot_specs, resolve_plot
 from ..services.spatial import build_spatial_provider
@@ -49,9 +50,6 @@ def list_plot_specs():
 @auth_required
 def make_plot(ds: str, spec_name: str):
     body = request.get_json(silent=True) or {}
-    root_id = body.get("root_id")
-    if root_id is None:
-        raise ApiError(422, "missing_root_id", "request body must include 'root_id'")
     decoration_tables = body.get("decoration_tables") or []
     column_override = body.get("column")
     # New multi-channel binding shape: {x?, y?, hue?, size?}. When present,
@@ -87,12 +85,16 @@ def make_plot(ds: str, spec_name: str):
                        f"No plot spec named {spec_name!r}",
                        hint=f"available: {sorted(specs.keys())}")
 
+    source = spec.data_query.source
     # Wraps CAVEclient instantiation, datastack/aligned-volume YAML
-    # resolution, the NeuronQuery setup, and the spatial-provider build.
-    # On a warm pod each piece is fast individually, but `request_client`
-    # alone has historically taken 50–200ms from auth-server discovery —
-    # without this timer that cost lands in `processing_ms` looking like
-    # in-process compute.
+    # resolution, the row-context setup, and (partners path only) the
+    # spatial-provider build. On a warm pod each piece is fast individually,
+    # but `request_client` alone has historically taken 50–200ms from
+    # auth-server discovery — without this timer that cost lands in
+    # `processing_ms` looking like in-process compute.
+    nq: NeuronQuery | None = None
+    ft_query: FeatureTableQuery | None = None
+    spatial_provider = None
     with timer("plot_endpoint_setup"):
         try:
             token = current_token()
@@ -113,23 +115,66 @@ def make_plot(ds: str, spec_name: str):
             raise ApiError(401, "no_auth_token", str(exc)) from exc
 
         cfg = load_datastack_config(ds)
-        # Spatial + synapse config from the aligned_volume; see /connectivity
-        # for the cross-datastack-sharing rationale.
-        av_cfg = aligned_volume_config_for(ds, client)
-        syn_cfg = resolve_synapse_config(av_cfg, cfg)
-        nq = NeuronQuery(
-            client,
-            root_id=int(root_id),
-            datastack=ds,
-            mat_version=mat_version,
-            synapse_aggregation_rules=syn_cfg.aggregation_rules_for_neuron_query(),
-            synapse_columns=syn_cfg.merged_columns(),
-            synapse_position_prefix=syn_cfg.position_prefix,
-        )
-        spatial_provider = build_spatial_provider(av_cfg.spatial)
+
+        if source == "embedding_cells":
+            # Explorer path: row context is a FeatureTableQuery over a
+            # parquet declared in the feature_explorer manifest. No
+            # focal neuron, no spatial features, no synapse query.
+            feature_table_id = body.get("feature_table_id")
+            embedding_id = body.get("embedding_id")
+            if not feature_table_id or not embedding_id:
+                raise ApiError(
+                    422,
+                    "missing_embedding_target",
+                    "source 'embedding_cells' requires both 'feature_table_id' "
+                    "and 'embedding_id' in the request body",
+                )
+            src = feature_source_for(ds, cfg)
+            if src is None:
+                raise ApiError(
+                    404,
+                    "feature_explorer_disabled",
+                    f"datastack {ds!r} does not enable the feature explorer",
+                )
+            try:
+                ft, _emb = src.resolve_embedding(feature_table_id, embedding_id)
+            except KeyError as exc:
+                raise ApiError(404, "embedding_not_found", str(exc)) from exc
+            ft_query = FeatureTableQuery(
+                datastack=ds,
+                mat_version=mat_version,
+                feature_table=ft,
+                cfg=cfg,
+                client_factory=client_factory,
+            )
+            # show_cell_depth is a partners-path notion; there's no focal
+            # cell to anchor the depth marker to, so force it off here.
+            show_cell_depth = False
+        else:
+            # Partner path: existing /neuron behavior. Requires root_id.
+            root_id = body.get("root_id")
+            if root_id is None:
+                raise ApiError(
+                    422, "missing_root_id",
+                    f"source {source!r} requires 'root_id' in the request body",
+                )
+            # Spatial + synapse config from the aligned_volume; see /connectivity
+            # for the cross-datastack-sharing rationale.
+            av_cfg = aligned_volume_config_for(ds, client)
+            syn_cfg = resolve_synapse_config(av_cfg, cfg)
+            nq = NeuronQuery(
+                client,
+                root_id=int(root_id),
+                datastack=ds,
+                mat_version=mat_version,
+                synapse_aggregation_rules=syn_cfg.aggregation_rules_for_neuron_query(),
+                synapse_columns=syn_cfg.merged_columns(),
+                synapse_position_prefix=syn_cfg.position_prefix,
+            )
+            spatial_provider = build_spatial_provider(av_cfg.spatial)
     try:
         result = resolve_plot(
-            spec=spec, nq=nq,
+            spec=spec, nq=nq, ft_query=ft_query,
             decoration_tables=decoration_tables,
             column_override=column_override,
             bindings=bindings,
