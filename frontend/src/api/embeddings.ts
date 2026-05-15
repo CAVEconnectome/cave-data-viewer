@@ -252,8 +252,12 @@ export function useResolveRoots(args: ResolveRootsArgs | null) {
         },
       ),
     enabled: !!args && !!args.ds && !!args.featureTableId && args.cellIds.length > 0,
-    // Resolutions are stable within a mat_version (cell_id -> root_id is
-    // frozen at a materialization); cache for an hour.
-    staleTime: 60 * 60 * 1000,
+    // Resolutions are immutable at a frozen mat_version — cell_id ↔
+    // root_id at a materialization can never change. Cache forever
+    // client-side; the server's L2 GCS cache makes the cross-user /
+    // cross-pod story symmetric. Live mode bypasses this hook via
+    // FeatureExplorer skipping the call when mv === "live".
+    staleTime: Infinity,
+    gcTime: Infinity,
   });
 }

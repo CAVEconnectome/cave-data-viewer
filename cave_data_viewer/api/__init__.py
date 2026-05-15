@@ -166,6 +166,23 @@ def _init_l2_immutable_caches(app: Flask) -> None:
         immutable=True,
     )
 
+    # Cell_id universe cache. One entry per (cache_ds, mat_version,
+    # lookup_view) holding the full {cell_id ↔ root_id} mapping at
+    # that materialization. Immutable by construction (mat_versions are
+    # frozen). First user / first pod on a new mat_version pays the
+    # CAVE round-trip; every subsequent user and pod hits warm via
+    # the shared L2 (GCS) layer. Replaces the per-process TTLCache
+    # that used to live in `services/cell_id.py:_universe_mat`.
+    app.extensions["dcv_cell_id_universe_cache"] = LayeredSwrCache(
+        soft_ttl=soft,
+        hard_ttl=hard,
+        maxsize=64,  # per-pod L1 — generous; entries are single-digit MB
+        l2=_l2_for_kind("cell_id_universe"),
+        executor=writer,
+        retention_resolver=_resolve_retention,
+        immutable=True,
+    )
+
     # Feature-explorer embedding frames. Immutable per (cache_ds, _, embedding_id,
     # parquet_uri) — the parquet URI is the load-bearing slot and content at a
     # URI is by-definition fixed. Cache entries are full pickled DataFrames

@@ -283,6 +283,15 @@ _KINDS: tuple[str, ...] = (
     # eviction-bounded mirror of the read so cold pods don't re-parse the
     # parquet from scratch.
     "embedding_frames",
+    # Full materialized cell_id ↔ root_id universe for one
+    # (datastack, mat_version). Pickled `CellUniverse` dataclass —
+    # two dense dicts of ~low-six-digits of int→int pairs, single-
+    # digit MB total. Immutable per (ds, mv) by construction:
+    # materializations are frozen, so this cache effectively never
+    # expires while the mat_version is current. First-pod-on-a-new-
+    # mat_version pays the CAVE round-trip; all subsequent pods +
+    # users hit warm.
+    "cell_id_universe",
 )
 _RETENTION_CLASSES: tuple[str, ...] = ("default", "longlived")
 

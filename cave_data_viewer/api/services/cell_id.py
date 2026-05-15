@@ -65,12 +65,20 @@ from .request_state import current_timestamp
 
 # ----- caches -----------------------------------------------------------------
 
-# Universe cache: (datastack, mat_version) → CellUniverse. One entry per
-# frozen materialization, holding the full {cell_id: root_id} dict from
-# the lookup view. A TTLCache rather than a plain dict so a dev session
-# that touches a hundred mat versions doesn't accumulate forever; the
-# 7-day TTL is effectively "until pod restart" for any version that
-# stays in the working set.
+# Universe cache: (datastack, mat_version, view) → CellUniverse. One entry
+# per frozen materialization, holding the full {cell_id ↔ root_id} mapping
+# from the lookup view.
+#
+# Production path: `dcv_cell_id_universe_cache` on `app.extensions` — a
+# LayeredSwrCache(immutable=True) shared across all pods + users via
+# GCS L2 (see `_init_l2_immutable_caches`). First request pays the CAVE
+# fetch; everyone after gets the universe from L1 (this pod) or L2 (any
+# pod's previous fetch). Mat_versions are frozen, so entries never go
+# stale.
+#
+# Fallback path: this module-level TTLCache is used when there's no
+# active Flask request context (tools/scripts, tests). 7-day TTL is
+# "until process restart" for anything in the working set.
 _UNIVERSE_TTL = 7 * 24 * 3600
 _universe_mat: TTLCache = TTLCache(maxsize=64, ttl=_UNIVERSE_TTL)
 
@@ -121,8 +129,14 @@ def clear_caches() -> None:
 def _get_universe(
     *, client, view: str, datastack: str, mat_version: int
 ) -> CellUniverse:
-    """Return the cached universe for ``(datastack, mat_version)``, fetching
-    it if necessary. Caller holds no lock; this acquires + releases as needed.
+    """Return the cached universe for ``(datastack, mat_version, view)``,
+    fetching it if necessary.
+
+    Lookup order:
+      1. App L1 + L2 cache (`dcv_cell_id_universe_cache`) — production
+         path, shared across all pods + users via GCS.
+      2. Module-level TTLCache — fallback for tools/tests with no Flask
+         app context.
 
     First-miss path: queries the entire lookup view (no ``id=`` filter),
     builds both directional dicts, caches them, opportunistically
@@ -130,12 +144,28 @@ def _get_universe(
     lookups for these cells are free even if the universe entry ages
     out.
     """
-    key = (datastack, int(mat_version))
+    # Cache key for the app cache. Includes `view` so different lookup
+    # views (a future second namespace per datastack) get distinct
+    # entries. Use `cache_datastack` so two datastacks pointing at the
+    # same underlying data share entries.
+    from .cache_lifecycle import cache_datastack
+    cache_ds = cache_datastack(datastack)
+    app_cache = _app_universe_cache()
+    app_key = (cache_ds, int(mat_version), view)
 
-    with _lock:
-        hit = _universe_mat.get(key)
+    if app_cache is not None:
+        hit = app_cache.get(app_key)
         if hit is not None:
-            return hit
+            value, _freshness = hit
+            return value
+
+    # Fallback: module-level cache, used when there's no Flask context.
+    fallback_key = (datastack, int(mat_version), view)
+    if app_cache is None:
+        with _lock:
+            hit_local = _universe_mat.get(fallback_key)
+            if hit_local is not None:
+                return hit_local
 
     # Cold path: fetch the whole view. Materialized views don't support
     # ``live_query`` and the lookup view is small (low-six-digits of rows
@@ -170,15 +200,34 @@ def _get_universe(
 
     universe = CellUniverse(cell_to_root=cell_to_root, root_to_cell=root_to_cell)
 
+    # Write back. App cache (shared L1 + L2) is the primary; the
+    # module cache only matters when there's no app context.
+    if app_cache is not None:
+        app_cache.set(app_key, universe)
+    else:
+        with _lock:
+            _universe_mat[fallback_key] = universe
+    # Opportunistically prime the per-root cache so reverse-only
+    # lookups (e.g. the form-input flow on /neuron) hit warm without
+    # needing the universe entry to still be live. This is per-pod
+    # only — the universe cache covers the cross-pod case.
     with _lock:
-        _universe_mat[key] = universe
-        # Opportunistically prime the per-root cache so reverse-only
-        # lookups (e.g. the form-input flow on /neuron) hit warm without
-        # needing the universe entry to still be live.
         for rid, cid in root_to_cell.items():
             _root_to_cell[(datastack, rid)] = cid
 
     return universe
+
+
+def _app_universe_cache():
+    """Return the app-extension universe cache, or None when there's
+    no active Flask app context (tools/tests run module-level)."""
+    try:
+        from flask import current_app, has_app_context
+    except ImportError:  # pragma: no cover — flask is a hard dep
+        return None
+    if not has_app_context():
+        return None
+    return current_app.extensions.get("dcv_cell_id_universe_cache")
 
 
 _SENTINEL = object()

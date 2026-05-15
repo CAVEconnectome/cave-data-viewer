@@ -725,7 +725,14 @@ def resolve_roots(ds: str, feature_table_id: str):
     except ValueError as exc:
         raise ApiError(422, "live_mode_disallowed", str(exc)) from exc
 
-    client = _cave_client(ds, mat_version)
+    # Lazy CAVEclient — only constructed when the universe cache misses
+    # and we need to actually hit CAVE. CAVEclient construction has its
+    # own ~500ms cost (auth-server discovery + datastack info fetch); on
+    # a cache hit it's wasted work. The resolver primitive accesses
+    # `client.materialize.views[view]` only on the cold path, so a
+    # LazyClient that defers construction until first attribute access
+    # is safe.
+    client = _LazyClient(lambda: _cave_client(ds, mat_version))
 
     try:
         resolutions = resolve_cell_ids_to_root_ids(
@@ -748,6 +755,25 @@ def resolve_roots(ds: str, feature_table_id: str):
             "resolutions": [_resolution_to_json(r) for r in resolutions],
         }
     )
+
+
+class _LazyClient:
+    """Proxy that defers a CAVEclient construction until first
+    attribute access. Used by the resolve_roots endpoint so cache-hit
+    requests skip the ~500ms client-build overhead entirely. On a
+    miss, the first ``client.materialize.views[...]`` access triggers
+    the underlying ``_cave_client()`` call exactly once."""
+
+    __slots__ = ("_factory", "_built")
+
+    def __init__(self, factory):
+        self._factory = factory
+        self._built = None
+
+    def __getattr__(self, name):
+        if self._built is None:
+            self._built = self._factory()
+        return getattr(self._built, name)
 
 
 # -- internals ----------------------------------------------------------------
