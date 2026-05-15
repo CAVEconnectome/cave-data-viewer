@@ -167,6 +167,93 @@ already have all parquet feature values). No new endpoint needed for v1.
 `predicted_subclass` categories are over-represented? Fisher's exact /
 hypergeometric per category. Same backend pattern.
 
+### 4b. Similarity-based selection expansion ("more like these")
+
+**State**: not implemented; flagged by the user as a near-term direction.
+
+**Translation**: this combines two single-cell-omics patterns:
+
+1. **kNN expansion** (cellxgene's `expand to neighbors`): given a seed
+   selection, grow it to include the k most-similar cells.
+2. **Marker-based grouping**: given a seed, find others sharing the
+   discriminating-feature profile.
+
+The mechanism: pick a *distance space* (feature space; PCA; UMAP; user's
+choice), compute distance from each universe cell to the selection
+(centroid, or nearest-of-selection — both are interesting), sort
+ascending, optionally truncate to top-K or by a distance threshold.
+
+**Why a PCA option matters**: raw normalized features can be dominated by
+the noisiest or most-redundant ones. Many morphology features are
+correlated (e.g., `soma_volume_um` ↔ `nucleus_volume_um` ↔
+`soma_area_um`) — distance in the raw 13-feature space double-counts
+that correlation. PCA on the feature matrix:
+
+- Decorrelates the axes
+- Top-K components capture most of the meaningful variance
+- Distance in the top-K subspace is closer to "perceived similarity"
+
+The choice between raw / PCA / UMAP is itself UX-worthy:
+- **Raw normalized**: the literal feature distance. Honest but
+  imbalanced.
+- **PCA top-K (e.g., 10)**: balanced; default recommendation.
+- **UMAP coords**: distance in the abstract embedding. Visually
+  intuitive (close on the scatter = similar) but UMAP isn't a metric
+  space — UMAP-distance comparisons across non-adjacent regions are
+  unreliable.
+
+**Distance as a data column**: when the user runs the expansion, add a
+synthetic `distance_to_selection` column to the cell list. Sortable
+(default ascending), filterable like any other numeric column, also
+bindable to color/size on the scatter. The latter is especially nice:
+*color cells by their distance to the selection* — the universe smoothly
+gradients out from the seed, giving immediate visual feedback on what's
+"close" without needing to draw a hard boundary.
+
+**CDF of distances + elbow finding**: a meaningful subset boundary
+usually sits at a kink in the cumulative distribution. Plot the
+empirical CDF (cells-within-distance-d / total) as a small chart in the
+summary panel; the kink between "rapid accumulation" and "slow tail" is
+where the seed-similar cluster ends and the diffuse universe begins.
+Click on the CDF to set the distance threshold; that threshold becomes
+either a filter (`?cells=distance_to_selection:lte:THRESHOLD`) or a
+new selection (everything within the threshold).
+
+**Implementation sketch**:
+
+- Backend endpoint `POST /feature_tables/<ft>/distance_to_set` with
+  body `{cell_ids: [seed], space: "raw" | "pca" | "umap", k_pca?: 10,
+  reduction: "centroid" | "nearest" | "mean"}`. Returns
+  `{cell_ids: [...], distances: [...]}` — universe-aligned arrays.
+- Reuse the existing `dcv_embedding_frame_cache` for the feature
+  matrix; reuse the universe-cache pattern for the PCA decomposition
+  (one PCA per `(ds, ft, feature_subset)`, cached forever — features
+  don't change).
+- Sklearn's `PCA` is fine — fit on the whole feature matrix once per
+  table; transform is O(n_features). Or numpy SVD directly.
+- Distance computation is `||X - seed_centroid||` (or min over seeds
+  for nearest). Vectorized; sub-100ms on 94k cells.
+- Frontend: a "Expand selection" action button in the summary panel,
+  opens a small picker (space + reduction + threshold/k). Result
+  populates a temporary cellList column + a CDF visualization in the
+  summary panel.
+
+**Where it lives in the UI**: a panel that appears in the summary bar
+when a selection is non-empty. Has:
+- Space picker (raw / PCA / UMAP)
+- Reduction picker (centroid vs nearest)
+- "Compute distances" button
+- Once computed: small CDF chart + a "set threshold at kink" affordance
+  + a "select top N most-similar" affordance.
+
+**Why this is meaningful for connectomics specifically**: morphology
+features cluster meaningfully but the clusters aren't always cleanly
+separable in 2D UMAP. The "lasso a kernel of obviously-similar cells,
+then grow by distance" workflow lets the user define a class by example
+rather than by feature thresholds. Especially useful when the user has
+a hunch ("these 5 cells I'm looking at are interesting") but no clean
+categorical column captures the pattern.
+
 ### 5. Two-selection comparison
 
 **State**: not implemented.
@@ -336,6 +423,12 @@ the feature explorer is going to be a regular part of someone's workflow.
 - (4) **Differential features panel** — "What features distinguish my
   selection?" Cheap (client-side t-stat per feature). High impact for
   the "I selected a cluster, what's it about?" workflow.
+- (4b) **Similarity-based selection expansion** — "More cells like
+  these," with PCA option + distance-as-column + CDF threshold
+  finding. One backend endpoint (`/distance_to_set`) + a small
+  summary-panel widget. Medium-low effort, very high impact — it's
+  the differentiating feature that turns the explorer from "browse"
+  into "discover."
 - (9) **Cell ID search** — input box; reverse-resolve if root_id;
   set as selection; fit-to-highlight. ~50 lines.
 - (10) **Modifier-key lasso (add/subtract from selection)** — same
@@ -381,8 +474,26 @@ the feature explorer is going to be a regular part of someone's workflow.
 ## Pattern transplants vs invented features
 
 Most of what's above is *transplanting* a single-cell-omics pattern
-into a connectomics context. The few things that don't come from
-single-cell tools and would be genuinely native to our domain:
+into a connectomics context. A few combinations are particularly
+synergistic in the connectomics setting:
+
+- **Similarity expansion (4b) + per-row NGL action**: lasso 3 cells
+  that "look interesting in EM" → expand by PCA distance to 200
+  similar cells → bulk-open all in NGL → visually verify the
+  morphological hypothesis. None of the genomics tools can close
+  this loop because they don't have a 3D segmentation to validate
+  against.
+- **Similarity expansion (4b) + recipes (3)**: save the seed +
+  expansion settings + threshold under a name. Reproducible
+  population definitions that are auditable and re-runnable as the
+  embedding gets retrained.
+- **Differential features (4) + spatial axes (7)**: discover which
+  morphology features distinguish a cluster → bind one of those
+  features to the y-axis as soma_depth → see whether the distinction
+  has an anatomical correlate.
+
+The features that don't come from single-cell tools and would be
+genuinely native to our domain:
 
 - **Per-row "→ /neuron" + "↗ NGL" cross-nav** (already shipped). The
   connectomics layer where every cell is also a graph node + a 3D
