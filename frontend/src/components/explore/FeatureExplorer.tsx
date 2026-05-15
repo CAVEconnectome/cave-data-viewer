@@ -150,11 +150,13 @@ export function FeatureExplorer() {
   const [emb] = useUrlParam("emb");
   const [decRaw] = useUrlParam("dec");
   const [cells] = useUrlParam("cells");
-  const [selUniverseRaw, setSelUniverse] = useUrlParam("sel_universe");
-  // Row-selection state for the cell-list table — lifted to the URL
-  // so reload preserves the selection and the scatter highlight can
-  // read it. Empty / absent = no row-selection active; the highlight
-  // then falls back to the filter/lasso intersection.
+  // Unified selection state: cell_ids the user has chosen, by either
+  // mechanism — row checkboxes in the table OR lassoing on the
+  // scatter. Lassoing is a *selection action*, not a table filter —
+  // a polygon over the scatter behaves the same as ticking each
+  // contained cell's checkbox. URL key kept as ?sel_table since it
+  // started life as the row-selection state; the name is incidental
+  // now that lasso and row-clicks share it.
   const [selTableRaw, setSelTable] = useUrlParam("sel_table");
   // Seaborn-style channel bindings. Each is the dotted column name
   // (parquet columns are prefixed with the feature_table id; decoration
@@ -173,6 +175,12 @@ export function FeatureExplorer() {
   // drawer handle to pull up the table.
   const [tableRaw, setTable] = useUrlParam("table");
   const tableOpen = tableRaw === "open";
+  // "Show only selected" — narrows the table to row-selected cells.
+  // Pure client-side filter (passed to PartnersTable as
+  // externalSelection); doesn't change the underlying /cells request
+  // or the cellList.cell_ids count surfaced in the drawer header.
+  const [onlySelectedRaw, setOnlySelected] = useUrlParam("only_selected");
+  const onlySelected = onlySelectedRaw === "1";
   // Size range falls back to client defaults when URL is silent.
   const sizeMinPx = sizeMinRaw ? parseFloat(sizeMinRaw) : 2.0;
   const sizeMaxPx = sizeMaxRaw ? parseFloat(sizeMaxRaw) : 18.0;
@@ -213,17 +221,10 @@ export function FeatureExplorer() {
     }
   }, [catalog.data, featureTables, ft, emb, setUrl]);
 
-  // Lasso selection: cell_ids in URL state. Parsed once here so both
-  // the highlight computation and the cell-list fetch reuse it.
-  const lassoCellIds = useMemo(
-    () => (selUniverseRaw ? selUniverseRaw.split(",").filter(Boolean) : []),
-    [selUniverseRaw],
-  );
-  // Row-selection: cell_ids the user explicitly clicked in the table.
-  // When non-empty, this overrides the filter/lasso-derived highlight
-  // on the scatter — the explicit click is what the user wants to
-  // focus on. Filter/lasso still control which rows are *visible*
-  // in the table.
+  // The unified selection set: cell_ids from row checkboxes AND
+  // lasso. One source of truth — populated by either mechanism,
+  // read by the scatter highlight, the table's row-checked state,
+  // and the NGL "selected" action.
   const rowSelectedCellIds = useMemo(
     () => (selTableRaw ? selTableRaw.split(",").filter(Boolean) : []),
     [selTableRaw],
@@ -267,10 +268,10 @@ export function FeatureExplorer() {
     return { lo, hi };
   }, [scatter.data?.color]);
 
-  // /cells fetch — the cell-list table reads from this. When a lasso
-  // is active, the request includes the cell_id subset so the table
-  // shows only lasso'd rows (ANDed with any active filter expression
-  // on the server). matched_count then reflects "filter ∩ lasso".
+  // /cells fetch — the cell-list table reads from this. With lasso
+  // now a selection mechanism (not a filter), the request is driven
+  // purely by the filter expression `?cells=` from CellFilterPanel.
+  // matched_count reflects "everything passing the filter."
   const cellList = useCellList(
     ds && ft
       ? {
@@ -279,29 +280,25 @@ export function FeatureExplorer() {
           matVersion,
           decorationTables,
           cells,
-          selCellIds: lassoCellIds.length > 0 ? lassoCellIds : null,
         }
       : null,
   );
 
   // Highlight set on the scatter, in priority order:
-  //   1. Row-selection from the table (explicit user clicks) — when
-  //      non-empty, that's the highlight. The user clicked these
-  //      specific rows; we surface them.
-  //   2. Filter / lasso intersection. /cells already applies both
-  //      server-side, so the response's `cell_ids` IS the
-  //      intersection — we just consume it.
-  //   3. Nothing active → no overlay (everything renders normally).
+  //   1. The unified selection (row-sel = lasso ∪ row-clicks). When
+  //      non-empty, that's the highlight.
+  //   2. Filter result. When the user has narrowed scope with the
+  //      CellFilterPanel but hasn't selected anything yet, the
+  //      filter result reads as the implicit highlight.
+  //   3. Nothing → no overlay.
   const highlightedCellIds = useMemo(() => {
     if (rowSelectedCellIds.length > 0) {
       return new Set(rowSelectedCellIds);
     }
-    const filterActive = !!cells;
-    const lassoActive = lassoCellIds.length > 0;
-    if (!filterActive && !lassoActive) return null;
+    if (!cells) return null;
     if (!cellList.data) return null;
     return new Set(cellList.data.cell_ids);
-  }, [rowSelectedCellIds, cells, lassoCellIds, cellList.data]);
+  }, [rowSelectedCellIds, cells, cellList.data]);
 
   // Batch cell_id → root_id resolution for the visible rows. The
   // resolver universe-caches per (ds, mv) server-side so a 94k-cell
@@ -525,9 +522,21 @@ export function FeatureExplorer() {
             decorationTables={decorationTables}
             matVersion={matVersion}
             highlightedCellIds={highlightedCellIds}
-            onLassoSelect={(ids) =>
-              setSelUniverse(ids.length > 0 ? ids.join(",") : null)
-            }
+            onLassoSelect={(polygonIds) => {
+              // Lasso writes into the unified selection. Intersect with
+              // the in-scope set so the user can't "select" cells that
+              // don't pass the current filter — out-of-scope cells
+              // wouldn't show in the table or have meaningful NGL
+              // resolution there anyway. When no filter is active the
+              // in-scope set is the full universe, so the intersection
+              // collapses to the polygon hit-test result.
+              const scope = cellList.data
+                ? new Set(cellList.data.cell_ids)
+                : null;
+              const inScope =
+                scope === null ? polygonIds : polygonIds.filter((id) => scope.has(id));
+              setSelTable(inScope.length > 0 ? inScope.join(",") : null);
+            }}
           />
         </div>
         {/* Drawer: handle always visible; body only when open. */}
@@ -591,17 +600,10 @@ export function FeatureExplorer() {
               liveDisabled={matVersion === "live"}
               onOpen={() => openInNgl(rowSelectedCellIds)}
             />
-            {/* Clear pills paired together — conceptually similar
-                ("undo the narrow") and visually grouped. Both always
-                rendered; greyed when nothing to clear. Separator
-                before them sets a visual break from the NGL actions. */}
+            {/* Single clear-selection pill — covers both lasso and
+                row-click selections now that they share the same
+                URL key. Greyed when there's nothing to clear. */}
             <span className="explore-pill-separator" aria-hidden />
-            <ClearPill
-              label="lasso"
-              active={!!selUniverseRaw}
-              onClear={() => setSelUniverse(null)}
-              variant="lasso"
-            />
             <ClearPill
               label="selection"
               active={rowSelectedCellIds.length > 0}
@@ -611,6 +613,33 @@ export function FeatureExplorer() {
           </button>
           {tableOpen && enrichedCells && enrichedCells.rows.length > 0 && (
             <div className="explore-drawer-body">
+              <div className="explore-drawer-toolbar">
+                <label
+                  className={`explore-only-selected${
+                    rowSelectedCellIds.length === 0 ? " disabled" : ""
+                  }`}
+                  title={
+                    rowSelectedCellIds.length === 0
+                      ? "Select some rows first to narrow the table to your selection"
+                      : "Hide non-selected rows from the table view"
+                  }
+                >
+                  <input
+                    type="checkbox"
+                    checked={onlySelected && rowSelectedCellIds.length > 0}
+                    disabled={rowSelectedCellIds.length === 0}
+                    onChange={(e) =>
+                      setOnlySelected(e.target.checked ? "1" : null)
+                    }
+                  />
+                  show only selected
+                  {rowSelectedCellIds.length > 0 && (
+                    <span className="explore-only-selected-count">
+                      &nbsp;({rowSelectedCellIds.length})
+                    </span>
+                  )}
+                </label>
+              </div>
               {segmentsLink.isError && (
                 <div className="explore-ngl-error">
                   NGL link failed: {String(segmentsLink.error)}
@@ -649,6 +678,11 @@ export function FeatureExplorer() {
                 selectedIds={rowSelectedCellIds}
                 onSelectedIdsChange={(ids) =>
                   setSelTable(ids.length > 0 ? ids.join(",") : null)
+                }
+                externalSelection={
+                  onlySelected && rowSelectedCellIds.length > 0
+                    ? rowSelectedCellIds
+                    : null
                 }
               />
             </div>
