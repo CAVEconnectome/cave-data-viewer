@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import DeckGL from "@deck.gl/react";
-import { OrthographicView } from "@deck.gl/core";
+import { OrthographicView, OrthographicViewport } from "@deck.gl/core";
 import { ScatterplotLayer } from "@deck.gl/layers";
 import { useEmbeddingScatter } from "../../api/embeddings";
 import type { EmbeddingScatterResponse } from "../../api/types";
@@ -129,10 +129,29 @@ export function UniverseScatter({
   decorationTables,
   matVersion,
   highlightedCellIds,
-  onLassoSelect: _onLassoSelect, // wired in the next commit
+  onLassoSelect,
   onPointClick,
   height = 480,
 }: Props) {
+  // Tool state — pan or lasso. Default pan so the very first
+  // interaction (explore the universe) feels right. Toggle in the
+  // top-right corner of the scatter; sticks until the user toggles
+  // back so repeated lassos don't require re-clicking.
+  const [tool, setTool] = useState<"pan" | "lasso">("pan");
+  // Active lasso polygon in canvas-pixel coordinates. `null` when not
+  // currently dragging. Points are accumulated as the user moves the
+  // pointer; on release we convert to data space and emit cell_ids.
+  const [lassoPx, setLassoPx] = useState<Array<[number, number]> | null>(null);
+  // Hover state — picked cell_id + the bound channel values at that
+  // point. Lazily computed once on hover so it doesn't recompute every
+  // mousemove.
+  const [hovered, setHovered] = useState<{
+    id: string;
+    px: number;
+    py: number;
+  } | null>(null);
+
+  const containerRef = useRef<HTMLDivElement | null>(null);
   const query = useEmbeddingScatter({
     ds,
     featureTableId,
@@ -232,6 +251,110 @@ export function UniverseScatter({
     [onPointClick],
   );
 
+  const handleHover = useCallback(
+    (info: { object?: unknown; x?: number; y?: number }) => {
+      if (!info?.object) {
+        setHovered(null);
+        return;
+      }
+      const row = info.object as RenderRow;
+      setHovered({ id: row.id, px: info.x ?? 0, py: info.y ?? 0 });
+    },
+    [],
+  );
+
+  // Lasso pointer handlers. Engaged only when `tool === "lasso"`; the
+  // sibling overlay div flips its `pointer-events` so deck.gl's
+  // controller never sees the drag (which would pan the view away
+  // mid-lasso). On pointerup, we project polygon vertices to data
+  // space and run point-in-polygon over the rendered partition to
+  // emit cell_ids.
+  const pointerStart = useCallback((ev: React.PointerEvent) => {
+    if (tool !== "lasso") return;
+    const rect = containerRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const px = ev.clientX - rect.left;
+    const py = ev.clientY - rect.top;
+    setLassoPx([[px, py]]);
+    (ev.target as Element).setPointerCapture(ev.pointerId);
+  }, [tool]);
+
+  const pointerMove = useCallback((ev: React.PointerEvent) => {
+    if (tool !== "lasso") return;
+    setLassoPx((prev) => {
+      if (!prev) return prev;
+      const rect = containerRef.current?.getBoundingClientRect();
+      if (!rect) return prev;
+      const px = ev.clientX - rect.left;
+      const py = ev.clientY - rect.top;
+      // Don't accumulate every event — coalesce to ~2px steps so the
+      // polygon stays light without losing shape fidelity.
+      const last = prev[prev.length - 1];
+      if (Math.hypot(px - last[0], py - last[1]) < 2) return prev;
+      return [...prev, [px, py]];
+    });
+  }, [tool]);
+
+  const pointerEnd = useCallback((ev: React.PointerEvent) => {
+    if (tool !== "lasso") return;
+    const polygon = lassoPx;
+    setLassoPx(null);
+    (ev.target as Element).releasePointerCapture(ev.pointerId);
+    if (!polygon || polygon.length < 3 || !partition || !viewState) return;
+    const rect = containerRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    // Build a viewport with the current view + canvas dimensions to
+    // unproject the polygon vertices into normalized data space.
+    const viewport = new OrthographicViewport({
+      width: rect.width,
+      height: rect.height,
+      target: viewState.target,
+      zoom: viewState.zoom,
+    });
+    const polyData: Array<[number, number]> = polygon.map(([px, py]) => {
+      const [x, y] = viewport.unproject([px, py]);
+      return [x, y];
+    });
+    // Test every rendered point against the polygon. ~94k × ~10
+    // polygon edges = 1M ops; sub-50ms in JS at this scale, fine
+    // without needing GPU-side picking.
+    const selected: string[] = [];
+    const all = [...partition.base, ...partition.highlight];
+    for (const row of all) {
+      if (pointInPolygon(row.position, polyData)) selected.push(row.id);
+    }
+    if (selected.length === 0) return; // suppress empty-lasso noise
+    onLassoSelect?.(selected);
+  }, [tool, lassoPx, partition, viewState, onLassoSelect]);
+
+  // Build SVG polygon path from current lasso points (while dragging).
+  const lassoPath = useMemo(() => {
+    if (!lassoPx || lassoPx.length < 2) return null;
+    return lassoPx.map(([x, y]) => `${x},${y}`).join(" ");
+  }, [lassoPx]);
+
+  // Hover tooltip content. Looks up the bound channel values for the
+  // hovered cell_id by index into the response arrays.
+  const tooltip = useMemo(() => {
+    if (!hovered || !query.data) return null;
+    const idx = query.data.cell_ids.indexOf(hovered.id);
+    if (idx < 0) return null;
+    const lines: string[] = [`cell_id: ${hovered.id}`];
+    const c = query.data.color;
+    if (c) {
+      const v = c.values[idx];
+      lines.push(`${c.column}: ${v === null || v === undefined ? "(null)" : v}`);
+    }
+    const s = query.data.size;
+    if (s) {
+      // The wire `size.values` is the px-scaled radius; surface raw_range
+      // bounds as a hint of where this point sits.
+      const px = s.values[idx];
+      lines.push(`${s.column}: ${px.toFixed(2)} px (range ${s.raw_range[0].toFixed(2)}–${s.raw_range[1].toFixed(2)})`);
+    }
+    return { lines, px: hovered.px, py: hovered.py };
+  }, [hovered, query.data]);
+
   if (query.isLoading) {
     return (
       <div className="universe-scatter loading" style={{ height }}>
@@ -255,13 +378,16 @@ export function UniverseScatter({
   }
 
   return (
-    <div className="universe-scatter" style={{ position: "relative", height }}>
+    <div
+      className="universe-scatter"
+      ref={containerRef}
+      style={{ position: "relative", height }}
+    >
       <DeckGL
         views={new OrthographicView({ id: "ortho" })}
         viewState={viewState ?? undefined}
-        controller={true}
+        controller={tool === "pan"}
         onViewStateChange={({ viewState: next }) => {
-          // OrthographicView's viewState shape is {target, zoom, ...}.
           setViewState({
             target: (next as { target: [number, number, number] }).target ?? [0, 0, 0],
             zoom: (next as { zoom: number }).zoom ?? FOCUSED_VIEW_ZOOM,
@@ -269,10 +395,103 @@ export function UniverseScatter({
         }}
         layers={layers}
         onClick={handleClick}
+        onHover={handleHover}
         style={{ position: "absolute", left: "0", top: "0", right: "0", bottom: "0" }}
       />
+      {/* Lasso overlay. `pointer-events: auto` only when in lasso mode
+          so the deck.gl controller is responsible for pointer events
+          during pan/zoom. */}
+      <div
+        className="universe-lasso-overlay"
+        style={{
+          position: "absolute",
+          left: 0,
+          top: 0,
+          right: 0,
+          bottom: 0,
+          pointerEvents: tool === "lasso" ? "auto" : "none",
+          cursor: tool === "lasso" ? "crosshair" : "default",
+        }}
+        onPointerDown={pointerStart}
+        onPointerMove={pointerMove}
+        onPointerUp={pointerEnd}
+        onPointerCancel={pointerEnd}
+      >
+        {lassoPath && (
+          <svg
+            width="100%"
+            height="100%"
+            style={{ position: "absolute", inset: 0, pointerEvents: "none" }}
+          >
+            <polyline
+              points={lassoPath}
+              fill="rgba(245, 158, 11, 0.12)"
+              stroke="#f59e0b"
+              strokeWidth={1.5}
+              strokeDasharray="4 4"
+            />
+          </svg>
+        )}
+      </div>
+      {/* Tool toggle — top-right, pan vs lasso. */}
+      <div className="universe-toolbar">
+        <button
+          type="button"
+          className={tool === "pan" ? "active" : ""}
+          onClick={() => setTool("pan")}
+          title="Pan / zoom"
+        >
+          ✥ pan
+        </button>
+        <button
+          type="button"
+          className={tool === "lasso" ? "active" : ""}
+          onClick={() => setTool("lasso")}
+          title="Lasso to select"
+        >
+          ⌒ lasso
+        </button>
+      </div>
+      {/* Hover tooltip. Anchored to the canvas position deck.gl reports
+          (info.x/y), offset so the cursor doesn't sit under it. */}
+      {tooltip && (
+        <div
+          className="universe-tooltip"
+          style={{
+            position: "absolute",
+            left: tooltip.px + 12,
+            top: tooltip.py + 12,
+            pointerEvents: "none",
+          }}
+        >
+          {tooltip.lines.map((line, i) => (
+            <div key={i}>{line}</div>
+          ))}
+        </div>
+      )}
     </div>
   );
+}
+
+// --- point-in-polygon (ray-casting) -----------------------------------------
+
+function pointInPolygon(
+  point: [number, number],
+  polygon: Array<[number, number]>,
+): boolean {
+  // Standard even-odd ray-casting. n^2 worst-case for nested polygons
+  // isn't a concern — the user draws a single simple-ish polygon.
+  const [x, y] = point;
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const [xi, yi] = polygon[i];
+    const [xj, yj] = polygon[j];
+    const intersect =
+      yi > y !== yj > y &&
+      x < ((xj - xi) * (y - yi)) / (yj - yi + 1e-12) + xi;
+    if (intersect) inside = !inside;
+  }
+  return inside;
 }
 
 // --- partition + extent helpers --------------------------------------------
