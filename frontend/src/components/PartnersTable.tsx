@@ -850,13 +850,18 @@ export function PartnersTable({ ds, rootId, matVersion, direction, rows, columnG
           {/* Second row: leaf columns (sortable). */}
           <tr>
             <th>
+              {/* Selects all *filtered* rows across pages, not just the
+                  current page. The pagination viewport doesn't visually
+                  bound the selection scope — "select all" reads as
+                  "everything the table is showing me", which is the
+                  full filtered set. */}
               <input
                 type="checkbox"
-                checked={table.getIsAllPageRowsSelected()}
+                checked={table.getIsAllRowsSelected()}
                 ref={(el) => {
-                  if (el) el.indeterminate = table.getIsSomePageRowsSelected() && !table.getIsAllPageRowsSelected();
+                  if (el) el.indeterminate = table.getIsSomeRowsSelected() && !table.getIsAllRowsSelected();
                 }}
-                onChange={table.getToggleAllPageRowsSelectedHandler()}
+                onChange={table.getToggleAllRowsSelectedHandler()}
               />
             </th>
             {table.getHeaderGroups()[1].headers.map((header) => {
