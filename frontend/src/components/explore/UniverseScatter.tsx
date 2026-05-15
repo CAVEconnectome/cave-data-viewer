@@ -816,15 +816,19 @@ function buildPartition(
       rgb = desaturate(rgb, BASE_DESATURATE_WHEN_HIGHLIGHT);
     }
 
-    // Size: client-rank-scaled to px when bound; otherwise small for
-    // base, slightly larger for highlight. Highlight bumps by +1px when
-    // size is bound so the highlight set still reads above the base.
+    // Size:
+    //   - Channel bound → client-rank-scaled to [sizeMinPx, sizeMaxPx]
+    //   - No channel → uniform user-set size from the slider's `min`
+    //     thumb (in single-thumb mode that's the only thumb).
+    // Highlight gets a small absolute bump regardless of mode so it
+    // still stands out from the base layer.
     let radius: number;
     if (sizePx) {
       radius = sizePx[i];
       if (isHighlight) radius += 1;
     } else {
-      radius = isHighlight ? 4 : hasHighlight ? 2 : 3;
+      const baseSize = opts.sizeMinPx;
+      radius = isHighlight ? baseSize + 1 : baseSize;
     }
 
     const nx = xScale > 0 ? ((x as number) - extent.xMin) * xScale : 0.5;

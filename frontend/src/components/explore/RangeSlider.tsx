@@ -1,9 +1,9 @@
 import { useCallback } from "react";
 
 interface Props {
-  /** Lower handle value. */
+  /** Lower handle value. Always shown. */
   min: number;
-  /** Upper handle value. */
+  /** Upper handle value. Ignored in `mode: "single"`. */
   max: number;
   /** Slider bounds — outer envelope the user can drag within. */
   bound: { lo: number; hi: number };
@@ -15,6 +15,11 @@ interface Props {
   /** Formatter for the readout under the slider. Receives a single
    *  numeric value; returns the user-facing string. */
   formatValue?: (n: number) => string;
+  /** "range" (default) renders two thumbs; "single" renders just the
+   *  `min` thumb (max is ignored). Used by ChannelPicker so the size
+   *  slider stays available even when no size channel is bound —
+   *  the single thumb then controls the uniform point size. */
+  mode?: "single" | "range";
   onChange: (next: { min?: number; max?: number }) => void;
 }
 
@@ -39,8 +44,10 @@ export function RangeSlider({
   step,
   label,
   formatValue = (n) => n.toFixed(2),
+  mode = "range",
   onChange,
 }: Props) {
+  const isSingle = mode === "single";
   // Compute a step from the bound span when one isn't supplied. ~1%
   // resolution is usually enough; finer slows the read-out flicker
   // without adding obvious precision.
@@ -48,10 +55,11 @@ export function RangeSlider({
 
   const handleMin = useCallback(
     (v: number) => {
-      const clamped = Math.min(v, max - effStep);
+      // In single mode there's no max thumb to clamp against.
+      const clamped = isSingle ? v : Math.min(v, max - effStep);
       onChange({ min: clamped });
     },
-    [max, effStep, onChange],
+    [isSingle, max, effStep, onChange],
   );
   const handleMax = useCallback(
     (v: number) => {
@@ -62,9 +70,15 @@ export function RangeSlider({
   );
 
   // Percent positions for the colored "active" segment of the track.
+  // In single mode the segment fills from 0% to the min thumb so the
+  // user sees a visual indicator of the current value's magnitude.
   const range = bound.hi - bound.lo;
   const leftPct = range > 0 ? ((min - bound.lo) / range) * 100 : 0;
-  const rightPct = range > 0 ? ((max - bound.lo) / range) * 100 : 100;
+  const rightPct = isSingle
+    ? leftPct
+    : range > 0 ? ((max - bound.lo) / range) * 100 : 100;
+  const activeLeft = isSingle ? 0 : leftPct;
+  const activeRight = 100 - rightPct;
 
   return (
     <div className="size-range-slider">
@@ -74,7 +88,7 @@ export function RangeSlider({
           <div className="size-range-slider-track" />
           <div
             className="size-range-slider-track-active"
-            style={{ left: `${leftPct}%`, right: `${100 - rightPct}%` }}
+            style={{ left: `${activeLeft}%`, right: `${activeRight}%` }}
           />
           <input
             type="range"
@@ -84,23 +98,25 @@ export function RangeSlider({
             value={min}
             onChange={(e) => handleMin(parseFloat(e.target.value))}
             className="size-range-thumb size-range-thumb-min"
-            aria-label={`${label} min`}
+            aria-label={isSingle ? label : `${label} min`}
           />
-          <input
-            type="range"
-            min={bound.lo}
-            max={bound.hi}
-            step={effStep}
-            value={max}
-            onChange={(e) => handleMax(parseFloat(e.target.value))}
-            className="size-range-thumb size-range-thumb-max"
-            aria-label={`${label} max`}
-          />
+          {!isSingle && (
+            <input
+              type="range"
+              min={bound.lo}
+              max={bound.hi}
+              step={effStep}
+              value={max}
+              onChange={(e) => handleMax(parseFloat(e.target.value))}
+              className="size-range-thumb size-range-thumb-max"
+              aria-label={`${label} max`}
+            />
+          )}
         </div>
       </div>
       <div className="size-range-slider-readout">
         <span>{formatValue(min)}</span>
-        <span>{formatValue(max)}</span>
+        {!isSingle && <span>{formatValue(max)}</span>}
       </div>
     </div>
   );

@@ -192,22 +192,27 @@ export function ChannelPicker({
         allowNone
         onChange={(v) => onChange({ sizeBy: v })}
       />
-      {sizeBy && (
-        <RangeSlider
-          label="size"
-          bound={{ lo: 1, hi: 24 }}
-          min={sizeMinPx}
-          max={sizeMaxPx}
-          step={0.5}
-          formatValue={(v) => `${v.toFixed(1)} px`}
-          onChange={(next) =>
-            onChange({
-              ...(next.min !== undefined ? { sizeMinPx: next.min } : {}),
-              ...(next.max !== undefined ? { sizeMaxPx: next.max } : {}),
-            })
-          }
-        />
-      )}
+      {/* Size slider is always present. Single-thumb when no size
+          channel is bound (controls uniform point size); dual-thumb
+          range when a channel is bound (rank-scaled px endpoints).
+          Floor is 0.25 — high-density displays render sub-pixel
+          sizes cleanly and dense embeddings benefit from very
+          small points. */}
+      <RangeSlider
+        label="size"
+        mode={sizeBy ? "range" : "single"}
+        bound={{ lo: 0.25, hi: 24 }}
+        min={sizeMinPx}
+        max={sizeMaxPx}
+        step={0.25}
+        formatValue={(v) => `${v.toFixed(2)} px`}
+        onChange={(next) =>
+          onChange({
+            ...(next.min !== undefined ? { sizeMinPx: next.min } : {}),
+            ...(next.max !== undefined ? { sizeMaxPx: next.max } : {}),
+          })
+        }
+      />
     </div>
   );
 }
