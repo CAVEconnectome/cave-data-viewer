@@ -9,6 +9,10 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@deck.gl/core": "^9.3.2",
+    "@deck.gl/extensions": "^9.3.2",
+    "@deck.gl/layers": "^9.3.2",
+    "@deck.gl/react": "^9.3.2",
     "@tanstack/react-query": "^5.50.0",
     "@tanstack/react-table": "^8.21.3",
     "@types/js-yaml": "^4.0.9",

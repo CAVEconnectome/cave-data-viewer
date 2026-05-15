@@ -1,69 +1,122 @@
-import { lazy, Suspense, useCallback, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import DeckGL from "@deck.gl/react";
+import { OrthographicView } from "@deck.gl/core";
+import { ScatterplotLayer } from "@deck.gl/layers";
 import { useEmbeddingScatter } from "../../api/embeddings";
+import type { EmbeddingScatterResponse } from "../../api/types";
 
-// Lazy-load react-plotly the same way PlotPanel does — keeps the ~2MB
-// plotly bundle out of the landing-page / partner-browsing critical path.
-// Same Plotly cartesian dist for parity; scattergl is included.
-const Plot = lazy(async () => {
-  const [{ default: createPlotlyComponent }, Plotly] = await Promise.all([
-    import("react-plotly.js/factory"),
-    import("plotly.js-cartesian-dist-min"),
-  ]);
-  return { default: createPlotlyComponent(Plotly.default) };
-});
-
-const PLOTLY_CONFIG = { displaylogo: false, responsive: true };
-const BASE_COLOR_NO_HIGHLIGHT = "#5b8bd1";
-const BASE_COLOR_WITH_HIGHLIGHT = "#d1d5db";
-const HIGHLIGHT_COLOR = "#f59e0b";
-const NUMERIC_COLORSCALE = "Viridis";
+// Color hexes used when no channel binding is active.
+const BASE_RGBA_NO_HIGHLIGHT: [number, number, number, number] = [91, 139, 209, 230];   // #5b8bd1
+const BASE_RGBA_WITH_HIGHLIGHT: [number, number, number, number] = [209, 213, 219, 200]; // #d1d5db
+const HIGHLIGHT_RGBA: [number, number, number, number] = [245, 158, 11, 255]; // #f59e0b
+const NULL_RGBA: [number, number, number, number] = [220, 220, 220, 220]; // #dcdcdc — null-color slot
+const FOCUSED_VIEW_ZOOM = 0; // initial zoom; deck.gl tunes to fit via fitBounds below.
 
 interface Props {
   ds: string;
   featureTableId: string;
   embeddingId: string;
-  /** Channel bindings forwarded to /scatter — passed through verbatim
-   *  to `useEmbeddingScatter`. The response carries the resolved
-   *  per-point arrays + (for categorical color) a color_map so the
-   *  same value lands on the same hex everywhere in the project. */
+  /** Channel bindings forwarded to /scatter. Same wire as before; the
+   *  response carries per-point arrays + (for categorical color) a
+   *  color_map so a value lands on the same hex as the rest of the
+   *  project. */
   x?: string | null;
   y?: string | null;
   colorBy?: string | null;
   sizeBy?: string | null;
   decorationTables?: string[];
   matVersion?: number | "live" | null;
-  /** Cell_ids to render in the highlight trace (orange, full opacity).
-   *  The complement (universe \ highlight) renders in the base trace
-   *  (gray, low opacity). Empty or null → everything is in the base. */
+  /** Cell_ids to render in the highlight layer (orange or, when color
+   *  is bound, the channel color). The complement renders in the base
+   *  layer (light gray when highlighting, solid blue otherwise).
+   *  Empty/null = no highlight; single base layer at full weight. */
   highlightedCellIds?: Set<string> | null;
-  /** Called with cell_ids when the user box/lasso selects on the
-   *  scatter. Suppressed when the selection is empty so a phantom
-   *  Plotly event doesn't clear a real selection. */
+  /** Called with the lasso-selected cell_ids. Suppressed on empty
+   *  selections so a phantom drag doesn't clear a real selection. */
   onLassoSelect?: (cellIds: string[]) => void;
-  /** Called when the user clicks a single point — typically used to
-   *  set a focal cell_id in URL state. */
+  /** Called when the user clicks a single point. */
   onPointClick?: (cellId: string) => void;
   height?: number;
 }
 
+// --- color helpers ----------------------------------------------------------
+
+/** Parse "#rrggbb" → [r, g, b]. Tolerates bad input by falling back to NULL. */
+function hexToRgb(hex: string | undefined | null): [number, number, number] {
+  if (!hex || typeof hex !== "string" || hex.charAt(0) !== "#" || hex.length < 7) {
+    return [NULL_RGBA[0], NULL_RGBA[1], NULL_RGBA[2]];
+  }
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  if (Number.isNaN(r) || Number.isNaN(g) || Number.isNaN(b)) {
+    return [NULL_RGBA[0], NULL_RGBA[1], NULL_RGBA[2]];
+  }
+  return [r, g, b];
+}
+
+/** Linear-interpolate a numeric value to a 3-stop Viridis approximation.
+ *  Not the official Viridis curve — a cheap stand-in until we want a real
+ *  colorscale. Three control points: low (purple), mid (green), high (yellow). */
+function numericToViridis(
+  v: number | null | undefined,
+  lo: number,
+  hi: number,
+): [number, number, number] {
+  if (v === null || v === undefined || !Number.isFinite(v)) {
+    return [NULL_RGBA[0], NULL_RGBA[1], NULL_RGBA[2]];
+  }
+  if (hi <= lo) return [99, 146, 67]; // mid-green for degenerate range
+  const t = Math.max(0, Math.min(1, (v - lo) / (hi - lo)));
+  const stops: [number, [number, number, number]][] = [
+    [0.0, [68, 1, 84]],     // dark purple
+    [0.5, [33, 144, 141]],  // teal-green
+    [1.0, [253, 231, 37]],  // yellow
+  ];
+  for (let i = 0; i < stops.length - 1; i++) {
+    const [t0, c0] = stops[i];
+    const [t1, c1] = stops[i + 1];
+    if (t >= t0 && t <= t1) {
+      const u = t1 === t0 ? 0 : (t - t0) / (t1 - t0);
+      return [
+        Math.round(c0[0] + (c1[0] - c0[0]) * u),
+        Math.round(c0[1] + (c1[1] - c0[1]) * u),
+        Math.round(c0[2] + (c1[2] - c0[2]) * u),
+      ];
+    }
+  }
+  return [253, 231, 37];
+}
+
+// --- main component ---------------------------------------------------------
+
+interface RenderRow {
+  id: string;
+  position: [number, number];
+  /** [r, g, b, a] in 0-255. */
+  color: [number, number, number, number];
+  /** Pre-scaled marker radius in pixels (server gives 3-10px; we add a
+   *  small bump for the highlight subset). */
+  radius: number;
+}
+
 /**
- * Universe scatter for the Feature Explorer.
+ * Universe scatter for the Feature Explorer, deck.gl edition.
  *
  * Renders every cell in a feature table at its 2D embedding coordinates
- * (or user-bound x/y channels), with optional per-point color/size
- * channels and a highlight overlay. Built around two scattergl traces:
+ * (or user-bound x/y channels). Uses two ScatterplotLayer instances —
+ * `base` (universe \ highlight) and `highlight` — so the highlight set
+ * renders on top with its own color + size.
  *
- * - **base** — universe \ highlight, lower visual weight.
- * - **highlight** — the active highlight set, saturated.
+ * The component owns:
+ *   - data fetch via `useEmbeddingScatter` (same hook as before)
+ *   - color/size resolution into per-point RGBA + radius
+ *   - viewport state (deck.gl OrthographicView, pan + zoom)
+ *   - hover / click via deck.gl's picking
  *
- * Splitting into two traces (rather than per-point opacity changes on a
- * single trace) lets Plotly skip re-layout on selection changes — only
- * the trace `x`/`y`/`customdata` arrays swap, which is cheap.
- *
- * Selection plumbing: each point's `customdata` carries the cell_id, so
- * the parent reads the lasso/click result without consulting any side
- * channel. Empty selections are suppressed (phantom event from Plotly's
- * deselect handler).
+ * Lasso is wired in a follow-up commit; this one focuses on getting
+ * the engine swap clean and the rendering equivalent to the Plotly
+ * version. Public props are unchanged so FeatureExplorer doesn't move.
  */
 export function UniverseScatter({
   ds,
@@ -76,7 +129,7 @@ export function UniverseScatter({
   decorationTables,
   matVersion,
   highlightedCellIds,
-  onLassoSelect,
+  onLassoSelect: _onLassoSelect, // wired in the next commit
   onPointClick,
   height = 480,
 }: Props) {
@@ -92,284 +145,75 @@ export function UniverseScatter({
     matVersion,
   });
 
-  // Resolve per-point marker color from the color channel, if bound.
-  // Categorical: map values → hex via the response's color_map (the
-  // backend builds this with resolve_categorical_color_map so the same
-  // value lands on the same color everywhere). Numeric: pass values
-  // through; Plotly applies a continuous colorscale.
-  const colorVector = useMemo<{
-    colors?: string[];
-    numeric?: Array<number | null>;
-    kind: "categorical" | "numeric" | null;
-  }>(() => {
-    const c = query.data?.color;
-    if (!c) return { kind: null };
-    if (c.kind === "categorical") {
-      const cm = c.color_map ?? {};
-      const nullColor = cm["(none)"] ?? "#dcdcdc";
-      const colors = c.values.map((v) =>
-        v === null || v === undefined ? nullColor : cm[String(v)] ?? nullColor,
-      );
-      return { colors, kind: "categorical" };
-    }
-    return {
-      numeric: c.values as Array<number | null>,
-      kind: "numeric",
-    };
-  }, [query.data?.color]);
-
-  const sizeVector = query.data?.size?.values ?? null;
-  // Hover should fire only when a channel binding gives the user
-  // something to read. With no color/size binding the base layer is a
-  // dense uniform cloud — hover hit-testing on 94k points is wasted
-  // every mousemove.
-  const hoverEnabledOnBase = !!(query.data?.color || query.data?.size);
-  const hoverTemplate = useMemo(() => {
-    const lines = ["cell_id: %{customdata}"];
-    const c = query.data?.color;
-    if (c) {
-      // %{marker.color} is the resolved hex, not the source value; the
-      // source value comes from customdata if we pack it. To keep things
-      // simple we surface the textual value via a parallel `text`
-      // attribute on each trace below (see {base,highlight}Trace).
-      lines.push(`${c.column}: %{text}`);
-    }
-    const s = query.data?.size;
-    if (s) {
-      lines.push(`${s.column}: (size-scaled)`);
-    }
-    return `${lines.join("<br>")}<extra></extra>`;
-  }, [query.data?.color, query.data?.size]);
-
-  // `text` field carries the textual color-channel value per point so
-  // the hover template can show it (`%{text}`). Falls back to empty
-  // strings when no color binding so the template degrades cleanly.
-  const colorText = useMemo<string[] | null>(() => {
-    const c = query.data?.color;
-    if (!c) return null;
-    return c.values.map((v) =>
-      v === null || v === undefined ? "(none)" : String(v),
-    );
-  }, [query.data?.color]);
-
-  const { baseTrace, highlightTrace, partitioned } = useMemo(() => {
-    const data = query.data;
-    if (!data) {
-      return { baseTrace: null, highlightTrace: null, partitioned: false };
-    }
-    const hl = highlightedCellIds;
-    const hasHighlight = hl != null && hl.size > 0;
-
-    if (!hasHighlight) {
-      // Single trace — channel bindings drive color/size; otherwise
-      // solid project blue + uniform 3px.
-      const baseMarker: Record<string, unknown> = { size: 3 };
-      if (colorVector.kind === "categorical" && colorVector.colors) {
-        baseMarker.color = colorVector.colors;
-      } else if (colorVector.kind === "numeric") {
-        baseMarker.color = colorVector.numeric;
-        baseMarker.colorscale = NUMERIC_COLORSCALE;
-        baseMarker.showscale = true;
-      } else {
-        baseMarker.color = BASE_COLOR_NO_HIGHLIGHT;
-      }
-      if (sizeVector) baseMarker.size = sizeVector;
-      // selected/unselected pinned so Plotly's lasso-completion fade
-      // doesn't fire. Critically, the pinned config must match the
-      // *shape* of `baseMarker` — color and size both pin to whatever
-      // the main marker uses (array or scalar). A shape mismatch
-      // (e.g. main marker uses size-array but pinned marker leaves
-      // size undefined) corrupts scattergl's WebGL buffer state and
-      // produces visual glitches when selection state toggles.
-      const pinnedColor =
-        colorVector.kind === "categorical" && colorVector.colors
-          ? colorVector.colors
-          : colorVector.kind === "numeric"
-            ? colorVector.numeric
-            : BASE_COLOR_NO_HIGHLIGHT;
-      const pinnedSize = sizeVector ?? 3;
-      const pinned = { color: pinnedColor, size: pinnedSize, opacity: 1 };
-      return {
-        baseTrace: {
-          type: "scattergl",
-          mode: "markers",
-          x: data.x,
-          y: data.y,
-          customdata: data.cell_ids,
-          text: colorText ?? undefined,
-          marker: baseMarker,
-          selected: { marker: pinned },
-          unselected: { marker: pinned },
-          hoverinfo: hoverEnabledOnBase ? undefined : "skip",
-          hovertemplate: hoverEnabledOnBase ? hoverTemplate : undefined,
-          name: "universe",
-        },
-        highlightTrace: null,
-        partitioned: false,
-      };
-    }
-
-    // Partition by cell_id into base + highlight. We carry the same
-    // channel arrays into each partition by index so colors/sizes stay
-    // aligned with their rows.
-    const baseIdx: number[] = [];
-    const hlIdx: number[] = [];
-    for (let i = 0; i < data.cell_ids.length; i++) {
-      if (hl!.has(data.cell_ids[i])) hlIdx.push(i);
-      else baseIdx.push(i);
-    }
-    const pick = <T,>(arr: ArrayLike<T>, idx: number[]): T[] =>
-      idx.map((i) => arr[i]);
-    const baseXs = pick(data.x as number[], baseIdx);
-    const baseYs = pick(data.y as number[], baseIdx);
-    const baseIds = pick(data.cell_ids, baseIdx);
-    const hlXs = pick(data.x as number[], hlIdx);
-    const hlYs = pick(data.y as number[], hlIdx);
-    const hlIds = pick(data.cell_ids, hlIdx);
-    const baseColors = colorVector.colors
-      ? pick(colorVector.colors, baseIdx)
-      : colorVector.numeric
-        ? pick(colorVector.numeric, baseIdx)
-        : null;
-    const hlColors = colorVector.colors
-      ? pick(colorVector.colors, hlIdx)
-      : colorVector.numeric
-        ? pick(colorVector.numeric, hlIdx)
-        : null;
-    const baseSizes = sizeVector ? pick(sizeVector, baseIdx) : null;
-    const hlSizes = sizeVector ? pick(sizeVector, hlIdx) : null;
-    const baseColorText = colorText ? pick(colorText, baseIdx) : undefined;
-    const hlColorText = colorText ? pick(colorText, hlIdx) : undefined;
-
-    // When color is bound, the base trace uses the resolved channel
-    // colors (slightly muted by Plotly's scale through grayscale isn't
-    // automatic — we keep the categorical hex as-is). When unbound,
-    // base goes light gray so the orange highlight reads on top.
-    const baseColor =
-      colorVector.kind === "categorical" && baseColors
-        ? baseColors
-        : colorVector.kind === "numeric" && baseColors
-          ? baseColors
-          : BASE_COLOR_WITH_HIGHLIGHT;
-    // When sizeBy is bound the size channel is the user's intended
-    // visual encoding — don't add a constant bump on top of it. When
-    // not bound, the highlight gets a 2× size step for visual lift.
-    const baseSize = baseSizes ?? 2;
-    const hlSize = hlSizes ?? 4;
-    const baseMarkerCfg: Record<string, unknown> = {
-      size: baseSize,
-      color: baseColor,
-    };
-    if (colorVector.kind === "numeric" && baseColors) {
-      baseMarkerCfg.colorscale = NUMERIC_COLORSCALE;
-    }
-    const hlColor =
-      colorVector.kind === "categorical" && hlColors
-        ? hlColors
-        : colorVector.kind === "numeric" && hlColors
-          ? hlColors
-          : HIGHLIGHT_COLOR;
-    const hlMarkerCfg: Record<string, unknown> = {
-      size: hlSize,
-      color: hlColor,
-    };
-    if (colorVector.kind === "numeric" && hlColors) {
-      hlMarkerCfg.colorscale = NUMERIC_COLORSCALE;
-    }
-    // Pin color AND size in selected/unselected so the scattergl
-    // WebGL buffer state stays consistent across selection toggles.
-    // A pinned-marker that lacks one of color/size while the main
-    // marker has it causes Plotly to construct a malformed buffer —
-    // observed as huge visual glitches on per-point size arrays.
-    return {
-      baseTrace: {
-        type: "scattergl",
-        mode: "markers",
-        x: baseXs,
-        y: baseYs,
-        customdata: baseIds,
-        text: baseColorText,
-        marker: baseMarkerCfg,
-        selected: { marker: { color: baseColor, size: baseSize, opacity: 1 } },
-        unselected: { marker: { color: baseColor, size: baseSize, opacity: 1 } },
-        hoverinfo: hoverEnabledOnBase ? undefined : "skip",
-        hovertemplate: hoverEnabledOnBase ? hoverTemplate : undefined,
-        name: "other",
-      },
-      highlightTrace: {
-        type: "scattergl",
-        mode: "markers",
-        x: hlXs,
-        y: hlYs,
-        customdata: hlIds,
-        text: hlColorText,
-        marker: hlMarkerCfg,
-        selected: { marker: { color: hlColor, size: hlSize, opacity: 1 } },
-        unselected: { marker: { color: hlColor, size: hlSize, opacity: 1 } },
-        hovertemplate: hoverTemplate,
-        name: "selected",
-      },
-      partitioned: true,
-    };
-  }, [
+  // Per-point resolved color/size arrays + base/highlight partition.
+  const partition = useMemo(() => buildPartition(query.data, highlightedCellIds), [
     query.data,
     highlightedCellIds,
-    colorVector,
-    sizeVector,
-    colorText,
-    hoverEnabledOnBase,
-    hoverTemplate,
   ]);
 
-  const traces = useMemo(() => {
-    const out: unknown[] = [];
-    if (baseTrace) out.push(baseTrace);
-    if (highlightTrace) out.push(highlightTrace);
-    return out;
-  }, [baseTrace, highlightTrace]);
+  // Initial view state — fit the universe's extent into the canvas the
+  // first time data lands. After the initial fit the controller drives
+  // viewState (pan/zoom interactions write back through
+  // `onViewStateChange`). A binding swap that changes the axis columns
+  // re-fits to the new data's extent.
+  const [viewState, setViewState] = useState<{
+    target: [number, number, number];
+    zoom: number;
+  } | null>(null);
+  const axesKey = `${query.data?.axes.x ?? ""}/${query.data?.axes.y ?? ""}`;
+  useEffect(() => {
+    if (!query.data) return;
+    const extent = computeExtent(query.data);
+    setViewState(extentToViewState(extent, height));
+    // axesKey changes when the user picks different x/y channels; that
+    // re-fires this effect and re-fits. `height` re-fits too if the
+    // container resizes, which is the right behavior.
+  }, [axesKey, height, query.data]);
 
-  const layout = useMemo(
-    () => ({
-      autosize: true,
-      height,
-      margin: { l: 40, r: 12, t: 8, b: 36 },
-      xaxis: { title: { text: query.data?.axes.x ?? "" }, zeroline: false },
-      yaxis: { title: { text: query.data?.axes.y ?? "" }, zeroline: false },
-      // `dragmode: 'lasso'` gives users selection on the first interaction
-      // — pan stays available via the toolbar.
-      dragmode: "lasso" as const,
-      hovermode: "closest" as const,
-      showlegend: false,
-      // `uirevision` keeps Plotly from resetting zoom/pan when the
-      // partition swaps between {only-base, base+highlight} on highlight
-      // set changes. Tying it to the axis columns means a real axis
-      // change (user picked different x/y) DOES reset the view.
-      uirevision: `${query.data?.axes.x ?? ""}/${query.data?.axes.y ?? ""}`,
-    }),
-    [height, query.data?.axes.x, query.data?.axes.y],
-  );
-  // suppress unused-var lint for `partitioned` (kept for future debug)
-  void partitioned;
-
-  const handleSelected = useCallback(
-    (ev: { points?: Array<{ customdata?: unknown } | undefined> } | undefined) => {
-      if (!ev || !ev.points) return;
-      const ids = new Set<string>();
-      for (const p of ev.points) {
-        const cd = p?.customdata;
-        if (typeof cd === "string") ids.add(cd);
-      }
-      if (ids.size === 0) return; // suppress phantom deselect events
-      onLassoSelect?.(Array.from(ids));
-    },
-    [onLassoSelect],
-  );
+  const layers = useMemo(() => {
+    if (!partition) return [];
+    const base = new ScatterplotLayer({
+      id: "universe-base",
+      data: partition.base,
+      pickable: true,
+      stroked: false,
+      filled: true,
+      radiusUnits: "pixels",
+      // `getPosition` returns native [x, y] from each row; ditto color/radius.
+      getPosition: (d: RenderRow) => d.position,
+      getFillColor: (d: RenderRow) => d.color,
+      getRadius: (d: RenderRow) => d.radius,
+      // Picking is cheap regardless of layer size — deck.gl reads a 1×1
+      // pixel from the picking buffer rather than iterating points in JS.
+      updateTriggers: {
+        getFillColor: partition.colorRevision,
+        getRadius: partition.sizeRevision,
+      },
+    });
+    if (partition.highlight.length === 0) return [base];
+    const hl = new ScatterplotLayer({
+      id: "universe-highlight",
+      data: partition.highlight,
+      pickable: true,
+      stroked: false,
+      filled: true,
+      radiusUnits: "pixels",
+      getPosition: (d: RenderRow) => d.position,
+      getFillColor: (d: RenderRow) => d.color,
+      getRadius: (d: RenderRow) => d.radius,
+      updateTriggers: {
+        getFillColor: partition.colorRevision,
+        getRadius: partition.sizeRevision,
+      },
+    });
+    return [base, hl];
+  }, [partition]);
 
   const handleClick = useCallback(
-    (ev: { points?: Array<{ customdata?: unknown } | undefined> } | undefined) => {
-      if (!ev || !ev.points || ev.points.length === 0) return;
-      const cd = ev.points[0]?.customdata;
-      if (typeof cd === "string") onPointClick?.(cd);
+    (info: { object?: unknown }) => {
+      if (!info?.object) return;
+      const row = info.object as RenderRow;
+      onPointClick?.(row.id);
     },
     [onPointClick],
   );
@@ -395,23 +239,185 @@ export function UniverseScatter({
       </div>
     );
   }
+
   return (
-    <Suspense
-      fallback={
-        <div className="universe-scatter loading" style={{ height }}>
-          Loading plotly…
-        </div>
-      }
-    >
-      <Plot
-        data={traces as Parameters<typeof Plot>[0]["data"]}
-        layout={layout}
-        config={PLOTLY_CONFIG}
-        style={{ width: "100%", height }}
-        useResizeHandler
-        onSelected={handleSelected}
+    <div className="universe-scatter" style={{ position: "relative", height }}>
+      <DeckGL
+        views={new OrthographicView({ id: "ortho" })}
+        viewState={viewState ?? undefined}
+        controller={true}
+        onViewStateChange={({ viewState: next }) => {
+          // OrthographicView's viewState shape is {target, zoom, ...}.
+          setViewState({
+            target: (next as { target: [number, number, number] }).target ?? [0, 0, 0],
+            zoom: (next as { zoom: number }).zoom ?? FOCUSED_VIEW_ZOOM,
+          });
+        }}
+        layers={layers}
         onClick={handleClick}
+        style={{ position: "absolute", left: "0", top: "0", right: "0", bottom: "0" }}
       />
-    </Suspense>
+    </div>
   );
+}
+
+// --- partition + extent helpers --------------------------------------------
+
+interface Partition {
+  base: RenderRow[];
+  highlight: RenderRow[];
+  /** Bumps when color resolution changes so deck.gl's updateTriggers
+   *  invalidate the GPU buffer. Identity-stable when color is unchanged. */
+  colorRevision: string;
+  sizeRevision: string;
+}
+
+function buildPartition(
+  data: EmbeddingScatterResponse | undefined,
+  highlight: Set<string> | null | undefined,
+): Partition | null {
+  if (!data) return null;
+  const n = data.cell_ids.length;
+  const colorBlock = data.color;
+  const sizeBlock = data.size;
+  const hasHighlight = !!highlight && highlight.size > 0;
+
+  // Precompute per-point color RGBA. Categorical → lookup color_map;
+  // numeric → continuous Viridis; unbound → fall back to base/highlight
+  // hexes depending on partition membership (decided per-point below).
+  let numericLo = 0;
+  let numericHi = 1;
+  if (colorBlock?.kind === "numeric") {
+    let lo = Number.POSITIVE_INFINITY;
+    let hi = Number.NEGATIVE_INFINITY;
+    for (const v of colorBlock.values) {
+      if (typeof v !== "number" || !Number.isFinite(v)) continue;
+      if (v < lo) lo = v;
+      if (v > hi) hi = v;
+    }
+    if (Number.isFinite(lo)) {
+      numericLo = lo;
+      numericHi = hi;
+    }
+  }
+
+  const base: RenderRow[] = [];
+  const hl: RenderRow[] = [];
+  for (let i = 0; i < n; i++) {
+    const id = data.cell_ids[i];
+    const x = data.x[i];
+    const y = data.y[i];
+    if (x === null || y === null || x === undefined || y === undefined) continue;
+    const isHighlight = hasHighlight && highlight!.has(id);
+
+    let rgb: [number, number, number];
+    if (colorBlock?.kind === "categorical") {
+      const value = colorBlock.values[i];
+      const hex = value === null || value === undefined
+        ? colorBlock.color_map?.["(none)"] ?? "#dcdcdc"
+        : colorBlock.color_map?.[String(value)] ?? "#dcdcdc";
+      rgb = hexToRgb(hex);
+    } else if (colorBlock?.kind === "numeric") {
+      rgb = numericToViridis(colorBlock.values[i] as number | null, numericLo, numericHi);
+    } else {
+      // No color binding: base layer uses one of the project's solid
+      // hexes; partition decides which.
+      const fallback = hasHighlight ? BASE_RGBA_WITH_HIGHLIGHT : BASE_RGBA_NO_HIGHLIGHT;
+      rgb = [fallback[0], fallback[1], fallback[2]];
+    }
+    // Highlight alpha is full; base alpha varies by mode.
+    let alpha: number;
+    if (isHighlight) {
+      alpha = 255;
+    } else if (hasHighlight) {
+      alpha = BASE_RGBA_WITH_HIGHLIGHT[3];
+    } else {
+      alpha = BASE_RGBA_NO_HIGHLIGHT[3];
+    }
+    // When color isn't bound and the point is in the highlight set,
+    // use the saturated orange highlight color instead of the channel-
+    // less base color so the highlight reads clearly.
+    if (isHighlight && !colorBlock) {
+      rgb = [HIGHLIGHT_RGBA[0], HIGHLIGHT_RGBA[1], HIGHLIGHT_RGBA[2]];
+      alpha = HIGHLIGHT_RGBA[3];
+    }
+
+    // Size: server-scaled value (3-10px) when bound; otherwise small for
+    // base, slightly larger for highlight. Highlight bumps by +1px when
+    // size is bound so the highlight set still reads above the base.
+    let radius: number;
+    if (sizeBlock) {
+      radius = sizeBlock.values[i] ?? 3;
+      if (isHighlight) radius += 1;
+    } else {
+      radius = isHighlight ? 4 : hasHighlight ? 2 : 3;
+    }
+
+    const row: RenderRow = {
+      id,
+      position: [x as number, y as number],
+      color: [rgb[0], rgb[1], rgb[2], alpha],
+      radius,
+    };
+    if (isHighlight) hl.push(row);
+    else base.push(row);
+  }
+
+  // Revision strings drive deck.gl's updateTriggers — change ⇒ rebuild
+  // the GPU buffers. Including the binding identity here is enough; the
+  // per-point arrays are immutable for a given binding set.
+  const colorRevision = `${colorBlock?.column ?? ""}|${colorBlock?.kind ?? ""}|${hasHighlight ? "hl" : "no-hl"}`;
+  const sizeRevision = `${sizeBlock?.column ?? ""}|${hasHighlight ? "hl" : "no-hl"}`;
+  return { base, highlight: hl, colorRevision, sizeRevision };
+}
+
+function computeExtent(data: EmbeddingScatterResponse): {
+  xMin: number;
+  xMax: number;
+  yMin: number;
+  yMax: number;
+} {
+  let xMin = Number.POSITIVE_INFINITY;
+  let xMax = Number.NEGATIVE_INFINITY;
+  let yMin = Number.POSITIVE_INFINITY;
+  let yMax = Number.NEGATIVE_INFINITY;
+  for (let i = 0; i < data.cell_ids.length; i++) {
+    const x = data.x[i];
+    const y = data.y[i];
+    if (x === null || x === undefined || !Number.isFinite(x)) continue;
+    if (y === null || y === undefined || !Number.isFinite(y)) continue;
+    if (x < xMin) xMin = x;
+    if (x > xMax) xMax = x;
+    if (y < yMin) yMin = y;
+    if (y > yMax) yMax = y;
+  }
+  if (!Number.isFinite(xMin)) {
+    return { xMin: -1, xMax: 1, yMin: -1, yMax: 1 };
+  }
+  return { xMin, xMax, yMin, yMax };
+}
+
+function extentToViewState(
+  ext: { xMin: number; xMax: number; yMin: number; yMax: number },
+  heightPx: number,
+): { target: [number, number, number]; zoom: number } {
+  // Center on the data; pick a zoom that fits the wider axis with a
+  // small padding margin. OrthographicView's `zoom` is log2-pixels-per-
+  // data-unit, so zoom = log2(viewportSize / dataSize).
+  const cx = (ext.xMin + ext.xMax) / 2;
+  const cy = (ext.yMin + ext.yMax) / 2;
+  const dx = Math.max(1e-6, ext.xMax - ext.xMin);
+  const dy = Math.max(1e-6, ext.yMax - ext.yMin);
+  // Approximate viewport: width unknown at this layer, but height is.
+  // Use height for the y-axis fit and trust the x-axis to follow once
+  // the canvas is sized (deck.gl handles aspect via the controller).
+  const padding = 0.1; // 10% margin around the data
+  const yPaddedSpan = dy * (1 + padding * 2);
+  const zoom = Math.log2(heightPx / yPaddedSpan);
+  // Clamp away from extreme values to keep the initial render sensible.
+  void dx;
+  return {
+    target: [cx, cy, 0],
+    zoom: Math.max(-10, Math.min(20, zoom)),
+  };
 }
