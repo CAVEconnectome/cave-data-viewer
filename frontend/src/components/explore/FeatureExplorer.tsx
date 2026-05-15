@@ -535,57 +535,11 @@ export function FeatureExplorer() {
           </button>
           {tableOpen && enrichedCells && enrichedCells.rows.length > 0 && (
             <div className="explore-drawer-body">
-              <div className="explore-drawer-actions">
-                <button
-                  type="button"
-                  className="explore-ngl-btn"
-                  onClick={() => openInNgl(enrichedCells.rows.map((r) => String(r.cell_id)))}
-                  disabled={
-                    segmentsLink.isPending ||
-                    matVersion === "live" ||
-                    resolveRoots(enrichedCells.rows.map((r) => String(r.cell_id))).length === 0
-                  }
-                  title={
-                    matVersion === "live"
-                      ? "Switch to a materialized version to open in Neuroglancer"
-                      : `Open up to ${NGL_LINK_CAP} visible cells (random sample if more)`
-                  }
-                >
-                  Open visible in NGL
-                  {enrichedCells.rows.length > NGL_LINK_CAP && (
-                    <span className="explore-ngl-sample">
-                      &nbsp;(sample of {NGL_LINK_CAP})
-                    </span>
-                  )}
-                </button>
-                <button
-                  type="button"
-                  className="explore-ngl-btn"
-                  onClick={() => openInNgl(rowSelectedCellIds)}
-                  disabled={
-                    rowSelectedCellIds.length === 0 ||
-                    segmentsLink.isPending ||
-                    matVersion === "live"
-                  }
-                  title={
-                    rowSelectedCellIds.length === 0
-                      ? "Select rows first"
-                      : `Open ${Math.min(rowSelectedCellIds.length, NGL_LINK_CAP)} selected cells in Neuroglancer`
-                  }
-                >
-                  Open selected ({rowSelectedCellIds.length}) in NGL
-                  {rowSelectedCellIds.length > NGL_LINK_CAP && (
-                    <span className="explore-ngl-sample">
-                      &nbsp;(sample of {NGL_LINK_CAP})
-                    </span>
-                  )}
-                </button>
-                {segmentsLink.isError && (
-                  <span className="explore-ngl-error">
-                    Failed: {String(segmentsLink.error)}
-                  </span>
-                )}
-              </div>
+              {segmentsLink.isError && (
+                <div className="explore-ngl-error">
+                  NGL link failed: {String(segmentsLink.error)}
+                </div>
+              )}
               <PartnersTable
                 ds={ds}
                 rootId={ft}
