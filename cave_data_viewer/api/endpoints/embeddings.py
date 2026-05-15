@@ -27,6 +27,7 @@ the API; ``CDV_DEV_AUTH_BYPASS=1`` covers local dev.
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import pandas as pd
@@ -546,6 +547,18 @@ def cells(ds: str, feature_table_id: str):
     frame = frame.copy()
     frame["cell_id"] = frame["cell_id"].astype(int).astype(str)
     rows = frame.to_dict(orient="records")
+    # `to_dict(orient="records")` emits numpy scalars as Python floats,
+    # which means NaN values arrive as Python `float('nan')` rather
+    # than np.float64. NumpyJSONProvider's `default()` only catches
+    # np.floating; Python floats are a default-encoder type and slip
+    # through, leaving the bare non-standard JSON token `NaN` in the
+    # response body. JSON.parse on the client then rejects with
+    # "Unexpected token 'N' in JSON". Replace in-place so the JSON
+    # boundary is clean. Negligible cost (single pass; ~µs per row).
+    for row in rows:
+        for k, v in row.items():
+            if isinstance(v, float) and not math.isfinite(v):
+                row[k] = None
 
     # column_groups mirror the partners-frame schema so the SPA's column
     # visibility / collapsed-group machinery works unchanged. Parquet
