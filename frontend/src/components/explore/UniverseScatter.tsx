@@ -194,20 +194,23 @@ export function UniverseScatter({
   // small padding margin. Independent of `extent` because the data is
   // pre-normalized; pan/zoom write back through `onViewStateChange`
   // after the initial fit. Re-fits when the axes change (binding swap)
-  // even though the destination view is identical — keeps the user
-  // oriented when they swap embedding-vs-feature views.
+  // or the container resizes — NOT on color/size/highlight changes,
+  // which would yank the user's view back to default every time they
+  // touched a channel.
   const [viewState, setViewState] = useState<{
     target: [number, number, number];
     zoom: number;
   } | null>(null);
   const axesKey = `${query.data?.axes.x ?? ""}/${query.data?.axes.y ?? ""}`;
+  const dataReady = !!query.data;
   useEffect(() => {
-    if (!extent) return;
+    if (!dataReady) return;
     setViewState(unitSquareViewState(height));
-    // axesKey changes when the user picks different x/y channels; that
-    // re-fires this effect and re-fits. `height` re-fits too if the
-    // container resizes, which is the right behavior.
-  }, [axesKey, height, extent]);
+    // Deps: axesKey (axis-channel swap), dataReady (first load), height
+    // (container resize). Notably absent: query.data, extent — those
+    // change identity on every response (new color/size/etc.) but
+    // shouldn't reset the user's pan/zoom.
+  }, [axesKey, dataReady, height]);
 
   const layers = useMemo(() => {
     if (!partition) return [];
