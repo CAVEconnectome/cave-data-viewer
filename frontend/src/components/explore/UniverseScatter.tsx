@@ -223,7 +223,6 @@ export function UniverseScatter({
     zoom: number;
   } | null>(null);
   const axesKey = `${query.data?.axes.x ?? ""}/${query.data?.axes.y ?? ""}`;
-  const dataReady = !!query.data;
   // `heightForFit` is the latest measured height; used inside the fit
   // effect but not a dep (changes don't trigger re-fit on container
   // resize). When measured is 0 (not measured yet) we fall back to
@@ -231,21 +230,22 @@ export function UniverseScatter({
   const heightForFitRef = useRef<number>(height ?? 480);
   if (measuredHeight > 0) heightForFitRef.current = measuredHeight;
   else if (height) heightForFitRef.current = height;
+
+  // Auto-fit policy: fit once per distinct axesKey, *not* every time
+  // `query.data` becomes truthy. TanStack Query's queryKey changes
+  // when channel bindings change (color, size, etc.) — that briefly
+  // flips data to undefined and back as the refetch lands, which used
+  // to retrigger the fit and snap the user's pan/zoom to default on
+  // every channel change. lastFittedAxesRef gates the fit so we only
+  // re-fit on a real axis swap.
+  const lastFittedAxesRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!dataReady) return;
+    if (!query.data) return;
+    if (measuredHeight <= 0) return; // wait for first measurement
+    if (lastFittedAxesRef.current === axesKey) return; // already fitted this axis pair
+    lastFittedAxesRef.current = axesKey;
     setViewState(unitSquareViewState(heightForFitRef.current));
-  }, [axesKey, dataReady]);
-  // Separate effect: when we get our first non-zero measurement,
-  // re-fit. Avoids the "fit zoom based on 0px height" race on initial
-  // render before ResizeObserver has fired.
-  const firstMeasureRef = useRef(false);
-  useEffect(() => {
-    if (measuredHeight <= 0) return;
-    if (firstMeasureRef.current) return;
-    firstMeasureRef.current = true;
-    if (!dataReady) return;
-    setViewState(unitSquareViewState(measuredHeight));
-  }, [measuredHeight, dataReady]);
+  }, [axesKey, query.data, measuredHeight]);
 
   const fitView = useCallback(() => {
     setViewState(unitSquareViewState(heightForFitRef.current));
