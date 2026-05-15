@@ -4,6 +4,7 @@ import { OrthographicView, OrthographicViewport } from "@deck.gl/core";
 import { ScatterplotLayer } from "@deck.gl/layers";
 import { useEmbeddingScatter } from "../../api/embeddings";
 import type { EmbeddingScatterResponse } from "../../api/types";
+import { ColorLegend } from "./ColorLegend";
 
 // Color hexes used when no channel binding is active.
 const BASE_RGBA_NO_HIGHLIGHT: [number, number, number, number] = [91, 139, 209, 230];   // #5b8bd1
@@ -487,6 +488,13 @@ export function UniverseScatter({
           </svg>
         )}
       </div>
+      {/* Color legend — top-left overlay, mirrors the toolbar. Only
+          renders when a color channel is bound. */}
+      {query.data?.color && (
+        <div className="universe-legend">
+          <ColorLegend color={query.data.color} />
+        </div>
+      )}
       {/* Tool toggle — top-right, pan vs lasso, plus a fit-view shortcut. */}
       <div className="universe-toolbar">
         <button

@@ -1,5 +1,9 @@
 import { useEffect, useMemo } from "react";
-import { useCellList, useEmbeddingList } from "../../api/embeddings";
+import {
+  useCellList,
+  useEmbeddingList,
+  useEmbeddingScatter,
+} from "../../api/embeddings";
 import {
   parseMatVersion,
   useSetUrlParams,
@@ -11,6 +15,7 @@ import { ChannelPicker } from "./ChannelPicker";
 import { DecorationPicker } from "./DecorationPicker";
 import { EmbeddingPicker } from "./EmbeddingPicker";
 import { FeatureTablePicker } from "./FeatureTablePicker";
+import { SummaryPanel } from "./SummaryPanel";
 import { UniverseScatter } from "./UniverseScatter";
 
 /**
@@ -93,6 +98,28 @@ export function FeatureExplorer() {
   const lassoCellIds = useMemo(
     () => (selUniverseRaw ? selUniverseRaw.split(",").filter(Boolean) : []),
     [selUniverseRaw],
+  );
+
+  // Scatter response — fetched by UniverseScatter too, but TanStack
+  // Query dedupes by queryKey so there's only one network call. We
+  // read it here to feed the SummaryPanel's universe counts without
+  // prop-drilling from UniverseScatter.
+  const scatter = useEmbeddingScatter(
+    ds && ft && emb
+      ? {
+          ds,
+          featureTableId: ft,
+          embeddingId: emb,
+          x: xBinding,
+          y: yBinding,
+          colorBy: colorBinding,
+          sizeBy: sizeBinding,
+          sizeMinPx,
+          sizeMaxPx,
+          decorationTables,
+          matVersion,
+        }
+      : null,
   );
 
   // /cells fetch — the cell-list table reads from this. When a lasso
@@ -233,6 +260,10 @@ export function FeatureExplorer() {
         <CellFilterPanel
           columnGroups={cellList.data?.column_groups}
           sampleRows={cellList.data?.rows}
+        />
+        <SummaryPanel
+          scatter={scatter.data}
+          highlightedCellIds={highlightedCellIds}
         />
       </aside>
       <section className={`explore-center${tableOpen ? " table-open" : ""}`}>
