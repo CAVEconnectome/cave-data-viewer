@@ -3361,3 +3361,23 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   font-size: 11px;
   color: #b00020;
 }
+
+/* "Open in NGL" pill in the drawer header — operates on the
+   currently-highlighted set so it stays useful whether the drawer is
+   collapsed or open. */
+.explore-ngl-pill {
+  margin-left: 8px;
+  font-size: 11px;
+  padding: 2px 10px;
+  background: rgba(99, 102, 241, 0.12);
+  color: #4338ca;
+  border: 1px solid #818cf8;
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.explore-ngl-pill:hover { background: rgba(99, 102, 241, 0.22); }
+.explore-ngl-pill[aria-disabled="true"] {
+  opacity: 0.55;
+  cursor: progress;
+}

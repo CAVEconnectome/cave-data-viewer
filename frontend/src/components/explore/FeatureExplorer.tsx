@@ -501,6 +501,37 @@ export function FeatureExplorer() {
                 clear selection ({rowSelectedCellIds.length})
               </span>
             )}
+            {/* Contextual "open in NGL" — operates on whatever the
+                scatter is currently highlighting (row-sel if set,
+                else filter ∩ lasso). Lives in the handle strip so
+                it stays accessible whether the drawer is open or
+                collapsed; the body's two explicit buttons (visible /
+                selected) are still there for power-user clarity. */}
+            {highlightedCellIds &&
+              highlightedCellIds.size > 0 &&
+              matVersion !== "live" && (
+                <span
+                  role="button"
+                  className="explore-ngl-pill"
+                  aria-disabled={segmentsLink.isPending}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (segmentsLink.isPending) return;
+                    openInNgl(Array.from(highlightedCellIds));
+                  }}
+                  title={
+                    highlightedCellIds.size > NGL_LINK_CAP
+                      ? `Open a random sample of ${NGL_LINK_CAP} cells from the ${highlightedCellIds.size.toLocaleString()} highlighted`
+                      : `Open ${highlightedCellIds.size} highlighted cells in Neuroglancer`
+                  }
+                >
+                  ↗ open {Math.min(highlightedCellIds.size, NGL_LINK_CAP)}
+                  {highlightedCellIds.size > NGL_LINK_CAP && (
+                    <>&nbsp;of {highlightedCellIds.size.toLocaleString()}</>
+                  )}{" "}
+                  in NGL
+                </span>
+              )}
           </button>
           {tableOpen && enrichedCells && enrichedCells.rows.length > 0 && (
             <div className="explore-drawer-body">
