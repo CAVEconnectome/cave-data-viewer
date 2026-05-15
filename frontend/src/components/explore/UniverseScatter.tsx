@@ -8,10 +8,17 @@ import { ColorLegend } from "./ColorLegend";
 
 // Color hexes used when no channel binding is active.
 const BASE_RGBA_NO_HIGHLIGHT: [number, number, number, number] = [91, 139, 209, 230];   // #5b8bd1
-const BASE_RGBA_WITH_HIGHLIGHT: [number, number, number, number] = [209, 213, 219, 200]; // #d1d5db
+const BASE_RGBA_WITH_HIGHLIGHT: [number, number, number, number] = [209, 213, 219, 150]; // light gray
 const HIGHLIGHT_RGBA: [number, number, number, number] = [245, 158, 11, 255]; // #f59e0b
 const NULL_RGBA: [number, number, number, number] = [220, 220, 220, 220]; // #dcdcdc — null-color slot
 const FOCUSED_VIEW_ZOOM = 0; // initial zoom; deck.gl tunes to fit via fitBounds below.
+
+/** Amount to desaturate base-layer points toward grayscale when a
+ *  highlight is active. 0 = full color, 1 = pure gray. Heavy
+ *  desaturation makes the highlight read cleanly even when the base
+ *  has channel colors bound. */
+const BASE_DESATURATE_WHEN_HIGHLIGHT = 0.88;
+const BASE_ALPHA_WHEN_HIGHLIGHT = 110;
 
 interface Props {
   ds: string;
@@ -59,6 +66,24 @@ function hexToRgb(hex: string | undefined | null): [number, number, number] {
     return [NULL_RGBA[0], NULL_RGBA[1], NULL_RGBA[2]];
   }
   return [r, g, b];
+}
+
+/** Mix an RGB triple toward its grayscale luminance. `amount` is the
+ *  fraction of gray (0 = unchanged, 1 = pure gray). Used to wash out
+ *  non-highlighted points so the highlight reads cleanly. */
+function desaturate(
+  rgb: [number, number, number],
+  amount: number,
+): [number, number, number] {
+  const [r, g, b] = rgb;
+  // BT.601 luma — closer to perceived brightness than equal weights.
+  const gray = 0.299 * r + 0.587 * g + 0.114 * b;
+  const k = 1 - amount;
+  return [
+    Math.round(r * k + gray * amount),
+    Math.round(g * k + gray * amount),
+    Math.round(b * k + gray * amount),
+  ];
 }
 
 /** Linear-interpolate a numeric value to a 3-stop Viridis approximation.
@@ -682,7 +707,7 @@ function buildPartition(
     if (isHighlight) {
       alpha = 255;
     } else if (hasHighlight) {
-      alpha = BASE_RGBA_WITH_HIGHLIGHT[3];
+      alpha = BASE_ALPHA_WHEN_HIGHLIGHT;
     } else {
       alpha = BASE_RGBA_NO_HIGHLIGHT[3];
     }
@@ -692,6 +717,15 @@ function buildPartition(
     if (isHighlight && !colorBlock) {
       rgb = [HIGHLIGHT_RGBA[0], HIGHLIGHT_RGBA[1], HIGHLIGHT_RGBA[2]];
       alpha = HIGHLIGHT_RGBA[3];
+    }
+    // When highlight is active AND a color channel is bound, the
+    // base layer's channel color competes with the highlight for
+    // attention. Desaturate the non-highlighted points heavily so
+    // the highlight (which keeps full saturation) reads as the
+    // dominant signal. No-op when there's no color binding — base
+    // is already gray.
+    if (!isHighlight && hasHighlight && colorBlock) {
+      rgb = desaturate(rgb, BASE_DESATURATE_WHEN_HIGHLIGHT);
     }
 
     // Size: client-rank-scaled to px when bound; otherwise small for
