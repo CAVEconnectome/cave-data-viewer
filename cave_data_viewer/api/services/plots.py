@@ -44,8 +44,12 @@ class DataQuery(BaseModel):
       - `partners_both` — unified frame: one row per unique partner root_id,
         synapse counts and aggregations split into _in / _out columns
         (mirrors the SPA's "Both" tab; computed by `_build_unified_frame`).
+      - `embedding_cells` — Feature Explorer source: one row per cell_id
+        in a feature-table parquet, joined with any requested decoration
+        columns through the resolver. Driven by a ``FeatureTableQuery``
+        passed alongside (or in place of) the ``NeuronQuery``.
     """
-    source: Literal["partners_in", "partners_out", "partners_both"]
+    source: Literal["partners_in", "partners_out", "partners_both", "embedding_cells"]
 
 
 # ----- cell filter ------------------------------------------------------------
@@ -1251,7 +1255,8 @@ def _build_unified_frame(nq: NeuronQuery) -> pd.DataFrame:
 def resolve_plot(
     *,
     spec: PlotSpec,
-    nq: NeuronQuery,
+    nq: NeuronQuery | None = None,
+    ft_query=None,
     decoration_tables: list[str] | None,
     column_override: str | None,
     bindings: dict[str, str | None] | None = None,
@@ -1260,8 +1265,17 @@ def resolve_plot(
     cell_filters: list[CellFilter] | None = None,
     show_cell_depth: bool = True,
 ) -> dict:
-    """Materialize `spec.data_query` against `nq` (with optional decoration),
-    dispatch to the kind-specific builder, return Plotly figure JSON.
+    """Materialize `spec.data_query` against the supplied row context
+    (with optional decoration), dispatch to the kind-specific builder,
+    return Plotly figure JSON.
+
+    Exactly one of ``nq`` (NeuronQuery — partners frames) or ``ft_query``
+    (FeatureTableQuery — feature parquet) must be supplied, matching
+    ``spec.data_query.source``. The two contexts share an informal
+    interface (``datastack``, ``mat_version``, ``key_column``) so the
+    rest of this function can branch only at the points where the
+    asymmetry matters (frame source; whether to run the partner-side
+    decoration merge / spatial features / cell-marker pass).
 
     Two override paths:
       - Legacy `column_override` — drops onto `spec.x` (single-axis column-
@@ -1275,19 +1289,45 @@ def resolve_plot(
     `bindings` wins when present; `column_override` is honored only when
     `bindings` doesn't supply an `x`. This keeps existing callers working.
     """
-    if spec.data_query.source == "partners_in":
-        df = nq.partners_in().copy()
-    elif spec.data_query.source == "partners_out":
-        df = nq.partners_out().copy()
-    else:  # partners_both — unified frame spanning both directions
-        with timer("build_unified_frame"):
-            df = _build_unified_frame(nq)
-        # Synthetic 'direction' column on the unified frame so the SPA can
-        # bind hue to it; values are the direction-class buckets ('in only',
-        # 'out only', 'reciprocal'). With panel scope=both, this lets the
-        # user split a single chart by direction visually.
-        if not df.empty:
-            df["direction"] = df.apply(_direction_class, axis=1)
+    source = spec.data_query.source
+    if source == "embedding_cells":
+        if ft_query is None:
+            raise ValueError(
+                "resolve_plot: source 'embedding_cells' requires ft_query."
+            )
+        if nq is not None:
+            raise ValueError(
+                "resolve_plot: source 'embedding_cells' is incompatible with nq; "
+                "pass only ft_query."
+            )
+        # The feature-table frame is decoration-merged inside ft_query.frame()
+        # — the partners-frame decoration path below is skipped for this source.
+        with timer("load_feature_table_frame"):
+            df = ft_query.frame(decoration_tables=decoration_tables or []).copy()
+    else:
+        if nq is None:
+            raise ValueError(
+                f"resolve_plot: source {source!r} requires nq."
+            )
+        if source == "partners_in":
+            df = nq.partners_in().copy()
+        elif source == "partners_out":
+            df = nq.partners_out().copy()
+        else:  # partners_both — unified frame spanning both directions
+            with timer("build_unified_frame"):
+                df = _build_unified_frame(nq)
+            # Synthetic 'direction' column on the unified frame so the SPA can
+            # bind hue to it; values are the direction-class buckets ('in only',
+            # 'out only', 'reciprocal'). With panel scope=both, this lets the
+            # user split a single chart by direction visually.
+            if not df.empty:
+                df["direction"] = df.apply(_direction_class, axis=1)
+
+    # Single row-context handle for everything downstream that previously
+    # reached for `nq.datastack` / `nq.mat_version`. Both contexts expose
+    # the same field names; spatial / soma-only attributes are still
+    # read from `nq` directly inside the partner-frame branches below.
+    ctx = nq if nq is not None else ft_query
 
     # Merge legacy + new override paths into a single bindings map.
     bindings = bindings or {}
@@ -1307,7 +1347,7 @@ def resolve_plot(
     #   - "both"       — no filter; binding `hue=direction` recovers the
     #                    direction split visually on a single chart.
     scope = (bindings.get("scope") or "both") if bindings else "both"
-    if spec.data_query.source == "partners_both" and not df.empty:
+    if source == "partners_both" and not df.empty:
         df = _apply_scope_filter(df, scope)
     # Kind auto-pick for dynamic specs is deferred until after the decoration
     # merge — we need to know whether `bound["x"]` is numeric on the resolved
@@ -1332,7 +1372,11 @@ def resolve_plot(
             decoration_tables.append(f.table)
 
     served: dict[int, dict] = {}
-    needs_decoration = bool(nq.soma_table or decoration_tables)
+    # Partner-frame decoration merge: keyed on root_id, drives the partner-
+    # decoration columns + spatial features + cell-marker pass below. The
+    # embedding_cells path has already merged decoration columns inside
+    # FeatureTableQuery.frame(), so this branch is skipped wholesale there.
+    needs_decoration = nq is not None and bool(nq.soma_table or decoration_tables)
     if needs_decoration:
         from .decoration import lookup_decorations
         # Pass the datastack's soma_table so num_soma / cell_id columns are
@@ -1513,8 +1557,8 @@ def resolve_plot(
             return None
         universe = get_unique_values(
             client_factory=client_factory,
-            ds=nq.datastack,
-            mat_version=nq.mat_version,
+            ds=ctx.datastack,
+            mat_version=ctx.mat_version,
             table=table,
             column=bare,
         )
@@ -1625,7 +1669,10 @@ def resolve_plot(
             provider_meta.get("layer_boundaries"),
             provider_meta.get("layer_names"),
         )
-        if show_cell_depth and spatial_provider is not None:
+        # The cell-depth marker is anchored to the queried neuron's soma —
+        # only meaningful when there *is* a focal neuron (NeuronQuery
+        # path). The embedding_cells path has no focal cell, so skip.
+        if show_cell_depth and spatial_provider is not None and nq is not None:
             target_pos = _target_oriented_position(nq, spatial_provider)
             _apply_cell_position_marker(fig, spec, target_pos)
     # Plotly's to_json returns a JSON string; parse it back so Flask jsonify

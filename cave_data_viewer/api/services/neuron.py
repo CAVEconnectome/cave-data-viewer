@@ -24,6 +24,12 @@ _NULL_SPATIAL_CFG = SimpleNamespace(provider="null", provider_module=None, param
 
 
 class NeuronQuery:
+    # `key_column` lets resolve_plot treat NeuronQuery and the explorer's
+    # FeatureTableQuery as interchangeable row contexts. Partner frames are
+    # always keyed on `root_id`; the field is class-level rather than
+    # instance-level because it never varies.
+    key_column: str = "root_id"
+
     def __init__(
         self,
         client,

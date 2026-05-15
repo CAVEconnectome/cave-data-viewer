@@ -22,6 +22,7 @@ reader are implementation details.
 from .decoration_join import get_decoration_table_snapshot, join_decoration_column
 from .knn import EmbeddingIndex, build_index, get_index
 from .loader import load_feature_table_frame
+from .query import FeatureTableQuery
 from .manifest import (
     EmbeddingSpec,
     FeatureTableAudit,
@@ -58,6 +59,8 @@ __all__ = [
     "get_manifest",
     # Parquet loader.
     "load_feature_table_frame",
+    # Row context for ``embedding_cells``-sourced plots.
+    "FeatureTableQuery",
     # kNN index.
     "EmbeddingIndex",
     "build_index",
