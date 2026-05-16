@@ -47,9 +47,12 @@ logger = logging.getLogger(__name__)
 
 # v1 was a flat ``embeddings:`` list with each entry carrying its own
 # source/id_column/feature_columns. v2 splits data (FeatureTableSpec) from
-# view (EmbeddingSpec). No real users on v1 yet, so no migration path —
-# the manifests in the repo and on GCS get updated to v2 directly.
-SUPPORTED_SCHEMA_VERSIONS: frozenset[int] = frozenset({2})
+# view (EmbeddingSpec). v3 adds an optional top-level ``datastacks:`` list
+# declaring the datastacks this manifest spans — empty/absent means
+# "single-ds, parent datastack" and is the default for v2 → v3 upgrades.
+# The lift is forward-compatible: v2 manifests load under v3 semantics
+# unchanged because the new field is optional.
+SUPPORTED_SCHEMA_VERSIONS: frozenset[int] = frozenset({2, 3})
 
 
 class FeatureTableSourceRef(BaseModel):
@@ -75,6 +78,31 @@ class FeatureTableAudit(BaseModel):
 
     source_root_column: str | None = None
     source_mat_version_column: str | None = None
+
+
+class FeatureCategorySpec(BaseModel):
+    """A named subset of a feature table's columns, used purely for UI
+    organization (channel-picker optgroups, "+ add plot" menus, bulk
+    select/deselect).
+
+    ``columns`` references bare parquet column names — the same namespace
+    ``feature_columns`` and ``categorical_columns`` live in. A column may
+    appear in multiple categories (overlap is allowed and useful: a depth
+    column can sit in both ``morphology`` and ``spatial``). Columns not
+    listed in any category render under an implicit "Uncategorized" group
+    on the frontend; categories that reference columns not present in
+    the parquet are pruned at the picker layer with a warning.
+
+    No backend semantics depend on categories — they're projected through
+    ``_feature_table_summary`` and consumed by the SPA's picker UI. That
+    keeps the manifest one-way: edit categories in GCS, reload the
+    catalog, organization updates without a redeploy.
+    """
+
+    id: str
+    title: str
+    description: str | None = None
+    columns: list[str] = Field(default_factory=list)
 
 
 class EmbeddingSpec(BaseModel):
@@ -146,6 +174,7 @@ class FeatureTableSpec(BaseModel):
     categorical_columns: list[str] = Field(default_factory=list)
     depth_columns: list[str] = Field(default_factory=list)
     audit: FeatureTableAudit | None = None
+    categories: list[FeatureCategorySpec] = Field(default_factory=list)
     embeddings: list[EmbeddingSpec] = Field(default_factory=list)
 
 
@@ -158,12 +187,75 @@ class KnnDefaults(BaseModel):
     standardize: bool = True
 
 
+class DatastackEntry(BaseModel):
+    """One datastack participating in a manifest.
+
+    Phase 1 of the multi-dataset generalization uses only ``name``; the
+    field exists so a single-ds manifest can be authored explicitly
+    (``datastacks: [{name: foo}]``) and so the loader has a stable place
+    to read per-ds metadata when phase 2 adds ``cell_id_source_table``
+    overrides and decoration-column aliases.
+
+    ``cell_id_source_table``, when set, overrides the parent datastack
+    YAML's ``feature_explorer.cell_id_source_table``. Multi-ds manifests
+    need this because the datastack YAML can only declare one source
+    table per datastack — but a joint manifest can span datastacks with
+    different source tables, and the per-row resolution path needs to
+    pick the right one. Not exercised by the v1 single-ds endpoints
+    (phase 1 keeps them on the YAML-declared value); the field is in
+    place for phase 2.
+    """
+
+    name: str
+    cell_id_source_table: str | None = None
+
+
 class Manifest(BaseModel):
-    """Parsed + validated manifest."""
+    """Parsed + validated manifest.
+
+    ``datastacks`` declares the set of datastacks this manifest spans.
+    Empty list (the default, and the v2-manifest shape) means "single-ds,
+    inferred from the parent datastack that referenced this manifest" —
+    every consumer that needs the effective list passes the parent
+    datastack name through :func:`effective_datastacks`. Multi-ds
+    manifests (phase 2) list each participant explicitly.
+    """
 
     schema_version: int
+    datastacks: list[DatastackEntry] = Field(default_factory=list)
     knn: KnnDefaults = Field(default_factory=KnnDefaults)
     feature_tables: list[FeatureTableSpec]
+
+
+def effective_datastacks(
+    manifest: Manifest, parent_datastack: str
+) -> list[DatastackEntry]:
+    """Return the declared datastacks, defaulting to ``[parent_datastack]``.
+
+    Single-ds (or v2) manifests omit the ``datastacks`` block; this helper
+    fills in the implicit single-element list so downstream code can
+    treat every manifest as having an explicit datastack set.
+    """
+    if manifest.datastacks:
+        return manifest.datastacks
+    return [DatastackEntry(name=parent_datastack)]
+
+
+def effective_cell_id_source_table(
+    manifest: Manifest, datastack: str, fallback: str | None
+) -> str | None:
+    """Pick the cell_id source table for a given datastack within this manifest.
+
+    Precedence: manifest's per-datastack override > datastack YAML's
+    ``feature_explorer.cell_id_source_table`` (``fallback``). The YAML
+    field stays the canonical place to declare it for the single-ds
+    case; the manifest override exists for joint manifests where one
+    datastack YAML can't represent the right source for every row.
+    """
+    for entry in manifest.datastacks:
+        if entry.name == datastack and entry.cell_id_source_table:
+            return entry.cell_id_source_table
+    return fallback
 
 
 def fetch_and_parse_manifest(uri: str, *, project: str | None = None) -> Manifest:
@@ -243,7 +335,70 @@ def fetch_and_parse_manifest(uri: str, *, project: str | None = None) -> Manifes
         )
         knn = KnnDefaults()
 
-    return Manifest(schema_version=schema_version, knn=knn, feature_tables=valid)
+    datastacks = _coerce_datastacks(data.get("datastacks"), manifest_uri=uri)
+
+    return Manifest(
+        schema_version=schema_version,
+        datastacks=datastacks,
+        knn=knn,
+        feature_tables=valid,
+    )
+
+
+def _coerce_datastacks(
+    raw, *, manifest_uri: str
+) -> list[DatastackEntry]:
+    """Parse the optional ``datastacks:`` block into ``DatastackEntry`` rows.
+
+    YAML ergonomics: a participant may be written as a bare name string
+    (``- minnie65_public``) or as a mapping (``- {name: minnie65_public,
+    cell_id_source_table: nucleus_detection_v0}``). Both forms coerce to
+    the same model. An invalid entry is dropped with a warning (mirrors
+    the soft-fail policy for feature_tables / embeddings).
+
+    Returns an empty list when ``raw`` is absent / null; the caller falls
+    back to ``[parent_datastack]`` via :func:`effective_datastacks`.
+    """
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        logger.warning(
+            "manifest %s: `datastacks` must be a list, got %s; ignoring",
+            manifest_uri, type(raw).__name__,
+        )
+        return []
+
+    valid: list[DatastackEntry] = []
+    seen: set[str] = set()
+    for i, item in enumerate(raw):
+        if isinstance(item, str):
+            payload = {"name": item}
+        elif isinstance(item, dict):
+            payload = item
+        else:
+            logger.warning(
+                "manifest %s: skipping datastacks entry %d "
+                "(expected str or mapping, got %s)",
+                manifest_uri, i, type(item).__name__,
+            )
+            continue
+        try:
+            entry = DatastackEntry.model_validate(payload)
+        except ValidationError as e:
+            logger.warning(
+                "manifest %s: skipping datastacks entry %d (%s)",
+                manifest_uri, i, e,
+            )
+            continue
+        if entry.name in seen:
+            logger.warning(
+                "manifest %s: duplicate datastacks entry %r, keeping first",
+                manifest_uri, entry.name,
+            )
+            continue
+        seen.add(entry.name)
+        valid.append(entry)
+    return valid
 
 
 def _validate_feature_table(
@@ -264,10 +419,36 @@ def _validate_feature_table(
         FeatureTableSpec.model_validate(entry)  # raises
 
     raw_embeddings = entry.get("embeddings") or []
-    skeleton = {k: v for k, v in entry.items() if k != "embeddings"}
-    # Validate the parent (with embeddings=[] so the model field is
-    # present); we'll attach the validated embeddings below.
-    parent = FeatureTableSpec.model_validate({**skeleton, "embeddings": []})
+    raw_categories = entry.get("categories") or []
+    skeleton = {
+        k: v for k, v in entry.items() if k not in ("embeddings", "categories")
+    }
+    # Validate the parent (with embeddings/categories=[] so the model
+    # fields are present); we'll attach the validated lists below.
+    parent = FeatureTableSpec.model_validate(
+        {**skeleton, "embeddings": [], "categories": []}
+    )
+
+    valid_categories: list[FeatureCategorySpec] = []
+    seen_cat_ids: set[str] = set()
+    for j, raw in enumerate(raw_categories):
+        try:
+            cat = FeatureCategorySpec.model_validate(raw)
+        except ValidationError as e:
+            logger.warning(
+                "manifest %s: feature_table %r — skipping categories entry %d (%s)",
+                manifest_uri, parent.id, j, e,
+            )
+            continue
+        if cat.id in seen_cat_ids:
+            logger.warning(
+                "manifest %s: feature_table %r — duplicate category id %r, "
+                "keeping first occurrence",
+                manifest_uri, parent.id, cat.id,
+            )
+            continue
+        seen_cat_ids.add(cat.id)
+        valid_categories.append(cat)
 
     valid_embeddings: list[EmbeddingSpec] = []
     seen_emb_ids: set[str] = set()
@@ -290,7 +471,9 @@ def _validate_feature_table(
         seen_emb_ids.add(emb.id)
         valid_embeddings.append(emb)
 
-    return parent.model_copy(update={"embeddings": valid_embeddings})
+    return parent.model_copy(
+        update={"embeddings": valid_embeddings, "categories": valid_categories}
+    )
 
 
 def get_manifest(

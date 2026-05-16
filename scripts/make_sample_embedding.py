@@ -150,6 +150,28 @@ def _build_manifest(parquet_path: Path) -> dict:
                     "source_root_column": "source_root_id",
                     "source_mat_version_column": "source_mat_version",
                 },
+                # Categories group columns for the channel picker and
+                # the manual-histogram menu. A column may appear in
+                # multiple categories; columns not listed here render
+                # under an implicit "Uncategorized" group.
+                "categories": [
+                    {
+                        "id": "morphology",
+                        "title": "Morphology",
+                        "description": "Soma + nucleus geometry",
+                        "columns": [
+                            "soma_depth_y",
+                            "nucleus_volume_um",
+                            "soma_area_um",
+                        ],
+                    },
+                    {
+                        "id": "classifier",
+                        "title": "Classifier",
+                        "description": "Predicted class labels",
+                        "columns": ["predicted_class", "predicted_subclass"],
+                    },
+                ],
                 "embeddings": [
                     {
                         "id": "umap",

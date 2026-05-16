@@ -24,13 +24,17 @@ from .knn import EmbeddingIndex, build_index, get_index
 from .loader import load_feature_table_frame
 from .query import FeatureTableQuery
 from .manifest import (
+    DatastackEntry,
     EmbeddingSpec,
+    FeatureCategorySpec,
     FeatureTableAudit,
     FeatureTableSourceRef,
     FeatureTableSpec,
     KnnDefaults,
     Manifest,
     SUPPORTED_SCHEMA_VERSIONS,
+    effective_cell_id_source_table,
+    effective_datastacks,
     fetch_and_parse_manifest,
     get_manifest,
 )
@@ -38,6 +42,7 @@ from .resolver import (
     Resolution,
     ResolutionStatus,
     resolve_cell_ids_to_root_ids,
+    resolve_pairs_to_root_ids,
     reverse_resolve_root_id_to_cell_id,
 )
 from .source import FeatureTableSource, ManifestFeatureTableSource, source_for
@@ -48,13 +53,17 @@ __all__ = [
     "ManifestFeatureTableSource",
     "source_for",
     # Manifest schema + helpers.
+    "DatastackEntry",
     "EmbeddingSpec",
+    "FeatureCategorySpec",
     "FeatureTableAudit",
     "FeatureTableSourceRef",
     "FeatureTableSpec",
     "KnnDefaults",
     "Manifest",
     "SUPPORTED_SCHEMA_VERSIONS",
+    "effective_cell_id_source_table",
+    "effective_datastacks",
     "fetch_and_parse_manifest",
     "get_manifest",
     # Parquet loader.
@@ -69,6 +78,7 @@ __all__ = [
     "Resolution",
     "ResolutionStatus",
     "resolve_cell_ids_to_root_ids",
+    "resolve_pairs_to_root_ids",
     "reverse_resolve_root_id_to_cell_id",
     # Decoration projection onto cell_id-positional order.
     "get_decoration_table_snapshot",

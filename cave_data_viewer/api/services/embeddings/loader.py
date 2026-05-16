@@ -12,6 +12,14 @@ of that table), but the universally-correct path is to surface mismatches
 at resolver time (cell_id → root_id returns ``status: missing`` for unknown
 ids). Active load-time validation can be a future hardening pass; v1 trusts
 the manifest.
+
+Multi-dataset note: parquets may carry an optional ``source_ds`` column
+that tags each row with the datastack it originates from. When absent
+(every single-ds manifest authored before phase 1) the loader fills the
+column with the request's ``datastack`` so downstream code sees a
+uniformly-tagged frame regardless of whether the parquet itself encodes
+the origin. The column is normalized to ``str`` so JSON serialization
+and per-row routing don't have to special-case numpy types.
 """
 
 from __future__ import annotations
@@ -78,8 +86,35 @@ def load_feature_table_frame(
 
     df = _read_parquet(ft.source.uri)
     _validate_frame(df, ft)
+    df = _ensure_source_ds(df, datastack)
     if cache is not None:
         cache.set(key, df)
+    return df
+
+
+SOURCE_DS_COLUMN: str = "source_ds"
+"""Canonical name for the per-row datastack-tag column.
+
+Parquets may already carry this column (multi-ds manifests); when absent
+the loader synthesizes it from the request's datastack so every consumer
+reads a uniformly-tagged frame.
+"""
+
+
+def _ensure_source_ds(df: pd.DataFrame, default_ds: str) -> pd.DataFrame:
+    """Return ``df`` with a ``source_ds`` string column populated.
+
+    Existing column is left in place (multi-ds parquets) but coerced to
+    ``str`` so downstream JSON serialization doesn't trip on bytes /
+    numpy types. Missing column is filled with ``default_ds`` — the
+    single-ds case that every v2 manifest hits.
+    """
+    if SOURCE_DS_COLUMN in df.columns:
+        df = df.copy()
+        df[SOURCE_DS_COLUMN] = df[SOURCE_DS_COLUMN].astype(str)
+        return df
+    df = df.copy()
+    df[SOURCE_DS_COLUMN] = default_ds
     return df
 
 

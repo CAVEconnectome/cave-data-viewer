@@ -279,11 +279,24 @@ class FeatureExplorerConfig(BaseModel):
 
     `cell_id_source_table` names the CAVE table that defines the cell_id
     namespace used by every parquet discoverable through the manifest. It is
-    required when `enabled` is True. Kept as a distinct field from
-    `root_id_lookup_main_table` (rather than reusing it) so a future datastack
-    with a multi-table reverse-lookup chain doesn't ambiguate which table
-    anchors the embedding namespace. In practice they will usually point at
-    the same table.
+    the *default* source table for this datastack — multi-dataset manifests
+    can override it per-datastack via a `datastacks:` block (see
+    `services/embeddings/manifest.py::DatastackEntry`), and the resolver
+    prefers the manifest's override when both are set. Single-datastack
+    manifests omit the override and inherit from this field.
+
+    Optional even when `enabled` is True: the multi-dataset path lets a
+    manifest declare the source table itself (useful when the same manifest
+    spans datastacks whose source-table conventions differ). When neither
+    the YAML nor the manifest names a source table, downstream resolution
+    paths surface a clean 422; the field is checked at resolve time rather
+    than at config-load time so the explorer can come up for datastacks
+    that participate as data-only (no resolver needed) in a joint manifest.
+
+    Kept as a distinct field from `root_id_lookup_main_table` (rather than
+    reusing it) so a future datastack with a multi-table reverse-lookup
+    chain doesn't ambiguate which table anchors the embedding namespace.
+    In practice they will usually point at the same table.
 
     `manifest_uri` supports `gs://`, `file://`, and `http(s)://` schemes. The
     backend fetches it through a SWR cache (soft TTL ~5 min) so manifest edits

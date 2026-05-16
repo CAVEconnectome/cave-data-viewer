@@ -31,7 +31,7 @@ from typing import Any, Callable
 import pandas as pd
 
 from .decoration_join import get_decoration_table_snapshot
-from .loader import load_feature_table_frame
+from .loader import SOURCE_DS_COLUMN, load_feature_table_frame
 from .manifest import FeatureTableSpec
 from .resolver import resolve_cell_ids_to_root_ids
 
@@ -106,11 +106,15 @@ class FeatureTableQuery:
         # `<table>.<col>:<op>:<val>`, so without this the user would have no
         # way to write a predicate on a parquet column. The id stays bare —
         # it's the primary key, treated specially by PartnersTable's
-        # getRowId + by the resolver's cell_id resolution.
+        # getRowId + by the resolver's cell_id resolution. ``source_ds`` is
+        # also kept unprefixed: it's a row-level identity tag (the cell's
+        # home datastack), not a feature, and cross-nav code reads it
+        # directly off the row.
         ft_id = self.feature_table.id
+        unprefixed = {"cell_id", SOURCE_DS_COLUMN}
         rename: dict[str, str] = {}
         for col in df.columns:
-            if col == "cell_id":
+            if col in unprefixed:
                 continue
             rename[col] = f"{ft_id}.{col}"
         if rename:
