@@ -1,8 +1,28 @@
 import { useMemo } from "react";
 import type { EmbeddingColorBlock } from "../../api/types";
+import {
+  type Colormap,
+  colormapCss,
+  colormapCssCentered,
+  getColormap,
+} from "./colormaps";
 
 interface Props {
   color: EmbeddingColorBlock;
+  /** Colormap id chosen by the user. Drives the gradient in the
+   *  numeric legend. Categorical legend ignores this — its swatches
+   *  come from the server's `color_map`. */
+  colormapId?: string | null;
+  /** Numeric-color clipping endpoints. When set, the legend gradient
+   *  spans [colorMin, colorMax] rather than the raw data extent — so
+   *  the colorbar tracks the slider rather than ignoring it. Null
+   *  falls back to data min/max. */
+  colorMin?: number | null;
+  colorMax?: number | null;
+  /** Data value anchored to the colormap midpoint. Renders a tick on
+   *  the gradient when the active colormap is diverging. Null defers
+   *  to the linear-stretch default — no tick, gradient renders evenly. */
+  colorCenter?: number | null;
 }
 
 /**
@@ -14,16 +34,29 @@ interface Props {
  *   `resolve_categorical_color_map` uses. Caps at a reasonable count
  *   to avoid stealing the canvas; long category lists collapse to
  *   "+N more".
- * - **numeric**: gradient bar with min / max ticks, matching the
- *   client-side Viridis approximation in UniverseScatter.
- *
- * Mounts in `UniverseScatter` as a top-right overlay (below the
- * pan/lasso toolbar). The parent decides positioning; this
- * component just renders content + sizing.
+ * - **numeric**: gradient bar with min / max ticks. The gradient mirrors
+ *   whatever colormap the user picked in the ChannelPicker; the ticks
+ *   mirror whatever clipping range they set with the range slider.
+ *   For diverging colormaps, a center tick marks where the colormap's
+ *   midpoint sits on the value axis.
  */
-export function ColorLegend({ color }: Props) {
+export function ColorLegend({
+  color,
+  colormapId,
+  colorMin,
+  colorMax,
+  colorCenter,
+}: Props) {
   if (color.kind === "categorical") return <CategoricalLegend color={color} />;
-  return <NumericLegend color={color} />;
+  return (
+    <NumericLegend
+      color={color}
+      colormap={getColormap(colormapId)}
+      colorMin={colorMin ?? null}
+      colorMax={colorMax ?? null}
+      colorCenter={colorCenter ?? null}
+    />
+  );
 }
 
 function CategoricalLegend({ color }: { color: EmbeddingColorBlock }) {
@@ -58,9 +91,23 @@ function CategoricalLegend({ color }: { color: EmbeddingColorBlock }) {
   );
 }
 
-function NumericLegend({ color }: { color: EmbeddingColorBlock }) {
-  // Compute min/max from the (potentially null-laden) values array.
-  // Match the client-side 3-stop Viridis stand-in in UniverseScatter.
+function NumericLegend({
+  color,
+  colormap,
+  colorMin,
+  colorMax,
+  colorCenter,
+}: {
+  color: EmbeddingColorBlock;
+  colormap: Colormap;
+  colorMin: number | null;
+  colorMax: number | null;
+  colorCenter: number | null;
+}) {
+  // Compute the displayed range: explicit slider endpoints win over
+  // the data extent, so the legend always matches what the scatter
+  // shows (values outside the slider range clamp to the endpoint
+  // colors on the canvas, so labeling the slider range is honest).
   const { lo, hi } = useMemo(() => {
     let mn = Number.POSITIVE_INFINITY;
     let mx = Number.NEGATIVE_INFINITY;
@@ -69,22 +116,66 @@ function NumericLegend({ color }: { color: EmbeddingColorBlock }) {
       if (v < mn) mn = v;
       if (v > mx) mx = v;
     }
-    return Number.isFinite(mn) ? { lo: mn, hi: mx } : { lo: 0, hi: 1 };
-  }, [color.values]);
+    const dataLo = Number.isFinite(mn) ? mn : 0;
+    const dataHi = Number.isFinite(mn) ? mx : 1;
+    return {
+      lo: colorMin !== null && Number.isFinite(colorMin) ? colorMin : dataLo,
+      hi: colorMax !== null && Number.isFinite(colorMax) ? colorMax : dataHi,
+    };
+  }, [color.values, colorMin, colorMax]);
+
+  // Only show the center tick when the colormap is actually diverging —
+  // a center marker on viridis would be misleading because the renderer
+  // ignores the center for non-diverging maps.
+  const isDiverging = colormap.category === "diverging";
+  const effectiveCenter = isDiverging
+    ? (colorCenter !== null && Number.isFinite(colorCenter)
+        ? colorCenter
+        : (lo + hi) / 2)
+    : null;
+  const centerPct = useMemo(() => {
+    if (effectiveCenter === null || hi <= lo) return null;
+    const pct = ((effectiveCenter - lo) / (hi - lo)) * 100;
+    // Clamp inside the bar so an out-of-range center still shows up
+    // at the appropriate edge rather than disappearing.
+    return Math.max(0, Math.min(100, pct));
+  }, [effectiveCenter, lo, hi]);
+
+  // Gradient choice: a diverging map at its anchored center needs the
+  // centered gradient so the visual midpoint matches where the data
+  // center sits. Non-diverging maps just use the canonical gradient.
+  const gradient = isDiverging
+    ? colormapCssCentered(colormap, lo, hi, effectiveCenter)
+    : colormapCss(colormap);
   return (
     <div className="color-legend">
       <div className="color-legend-title" title={color.column}>
         {bareCol(color.column)}
       </div>
-      <div
-        className="color-legend-gradient"
-        style={{
-          background:
-            "linear-gradient(to right, rgb(68, 1, 84), rgb(33, 144, 141), rgb(253, 231, 37))",
-        }}
-      />
+      <div className="color-legend-gradient-wrap">
+        <div
+          className="color-legend-gradient"
+          style={{ background: gradient }}
+        />
+        {centerPct !== null && (
+          <span
+            className="color-legend-center-tick"
+            style={{ left: `${centerPct}%` }}
+            title={`center @ ${formatNum(effectiveCenter as number)}`}
+            aria-hidden
+          />
+        )}
+      </div>
       <div className="color-legend-numeric-ticks">
         <span>{formatNum(lo)}</span>
+        {centerPct !== null && (
+          <span
+            className="color-legend-numeric-center"
+            style={{ left: `${centerPct}%` }}
+          >
+            {formatNum(effectiveCenter as number)}
+          </span>
+        )}
         <span>{formatNum(hi)}</span>
       </div>
     </div>

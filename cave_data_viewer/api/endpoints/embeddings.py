@@ -37,20 +37,24 @@ from ..auth import auth_required, current_token, is_dev_bypass
 from ..cave import request_client
 from ..errors import ApiError
 from ..services.datastack_config import check_live_allowed, load_datastack_config
+from ..services.cell_id import root_ids_to_cell_ids
 from ..services.embeddings import (
     EmbeddingSpec,
     FeatureTableQuery,
     FeatureTableSpec,
+    effective_datastacks,
     get_index,
     load_feature_table_frame,
     resolve_cell_ids_to_root_ids,
     reverse_resolve_root_id_to_cell_id,
     source_for,
 )
+from ..services.embeddings.loader import SOURCE_DS_COLUMN
 from ..services.categorical import (
     get_unique_values as _categorical_get_unique_values,
     resolve_categorical_color_map,
 )
+from ..services.neuron import suggest_current_roots
 from ..services.plots import _apply_cell_filters, _parse_cells_param
 
 
@@ -104,10 +108,22 @@ def list_feature_tables(ds: str):
             f"could not load feature explorer manifest: {exc}",
         ) from exc
 
+    # ``datastacks`` surfaces the manifest's declared participant set so
+    # the SPA can detect multi-ds manifests up front (phase 2 surface).
+    # Single-ds and v2 manifests fall back to ``[ds]`` via
+    # ``effective_datastacks`` so the field is always populated.
+    declared_datastacks = effective_datastacks(manifest, ds)
     return jsonify(
         {
             "enabled": True,
             "cell_id_source_table": cfg.feature_explorer.cell_id_source_table,
+            "datastacks": [
+                {
+                    "name": entry.name,
+                    "cell_id_source_table": entry.cell_id_source_table,
+                }
+                for entry in declared_datastacks
+            ],
             "knn": manifest.knn.model_dump(),
             "feature_tables": [_feature_table_summary(ft) for ft in manifest.feature_tables],
         }
@@ -371,6 +387,13 @@ def scatter(ds: str, feature_table_id: str, embedding_id: str):
     return jsonify(
         {
             "cell_ids": [str(int(c)) for c in frame["cell_id"].tolist()],
+            # Parallel per-row datastack tag. Uniform on single-ds
+            # manifests (every value equals ``ds``); diverges per row
+            # on multi-ds manifests. Read by the SPA to route cross-nav
+            # back to each cell's home datastack.
+            "source_ds": [
+                str(v) for v in frame[SOURCE_DS_COLUMN].tolist()
+            ],
             "x": [
                 None if pd.isna(v) else float(v)
                 for v in frame[x_col].tolist()
@@ -382,6 +405,205 @@ def scatter(ds: str, feature_table_id: str, embedding_id: str):
             "axes": {"x": x_col, "y": y_col},
             "color": color_block,
             "size": size_block,
+            "n_cells": int(len(frame)),
+        }
+    )
+
+
+@bp.route(
+    "/<ds>/feature_tables/<feature_table_id>/column/<path:column>",
+    methods=["GET"],
+)
+@auth_required
+def column(ds: str, feature_table_id: str, column: str):
+    """Universe-aligned values for one column.
+
+    Same ``cell_ids`` order as ``/scatter`` so the SPA can index the
+    response by position when overlaying with the scatter's selection
+    mask or with row-level data from ``/cells``.
+
+    Feeds:
+    - **Manual histograms** in the summary panel (universe-vs-selection
+      density requires the full universe values, not just the current
+      table page).
+    - **Differential features** (Welch's t-stat / chi-squared between
+      a selection and the complement, computed client-side).
+    - **Similarity expansion** (distance-to-set in raw / PCA / UMAP
+      space — needs the feature matrix).
+
+    Path-routed ``<path:column>`` so dotted column names
+    (``<table>.<col>``) survive without query-string escaping. The
+    column must resolve to one of:
+
+    - a parquet column on the active feature table
+      (``<feature_table_id>.<col>``),
+    - a decoration column (``<table>.<col>`` where ``<table>`` is named
+      in ``?dec=`` or auto-attached because the column reference
+      requires it),
+    - a synthetic nucleus position (``nucleus.x`` / ``nucleus.y`` /
+      ``nucleus.z``).
+
+    Query params:
+    - ``mat_version`` — required when the column is a decoration or
+      nucleus position (those go through the resolver).
+    - ``dec`` — comma-separated decoration tables to attach. Auto-
+      extended to include the column's table when not listed.
+
+    Response::
+
+        {
+          "column": "<resolved column>",
+          "kind": "numeric" | "categorical",
+          "values": [...],
+          "raw_range": [min, max],     // numeric only
+          "color_map": {...}            // categorical only — same
+                                        //   palette resolution as
+                                        //   /scatter
+        }
+
+    Backed by the same ``FeatureTableQuery.frame()`` as ``/scatter`` —
+    parquet content is immutably cached, decoration joins reuse the
+    SWR-cached snapshot, so warm requests are ~ms.
+    """
+    cfg = load_datastack_config(ds)
+    src = source_for(ds, cfg)
+    if src is None:
+        raise ApiError(
+            404,
+            "feature_explorer_disabled",
+            f"datastack {ds!r} does not enable the feature explorer",
+        )
+    try:
+        ft = src.resolve_feature_table(feature_table_id)
+    except KeyError as exc:
+        raise ApiError(404, "feature_table_not_found", str(exc)) from exc
+
+    mv_raw = request.args.get("mat_version")
+    mat_version: int | str | None
+    if mv_raw is None or mv_raw == "":
+        mat_version = None
+    elif mv_raw == "live":
+        mat_version = "live"
+    else:
+        try:
+            mat_version = int(mv_raw)
+        except ValueError as exc:
+            raise ApiError(
+                422, "invalid_mat_version",
+                f"mat_version must be an integer or 'live', got {mv_raw!r}",
+            ) from exc
+
+    decoration_tables: list[str] = []
+    dec_raw = request.args.get("dec") or ""
+    if dec_raw:
+        decoration_tables = [t.strip() for t in dec_raw.split(",") if t.strip()]
+
+    # Auto-attach the column's table if it's a decoration reference.
+    # Same convention as /scatter — feature_table_id and `nucleus` are
+    # native to the frame and don't need a decoration join.
+    if "." in column:
+        table = column.split(".", 1)[0]
+        if table not in (ft.id, "nucleus") and table not in decoration_tables:
+            decoration_tables.append(table)
+
+    if decoration_tables and mat_version is None:
+        raise ApiError(
+            422,
+            "missing_mat_version",
+            "mat_version is required when the column lives in a "
+            "decoration table or synthetic nucleus space",
+        )
+    if decoration_tables:
+        try:
+            check_live_allowed(ds, mat_version)
+        except ValueError as exc:
+            raise ApiError(422, "live_mode_disallowed", str(exc)) from exc
+
+    def _client_factory():
+        return request_client(
+            datastack_name=ds,
+            server_address=current_app.config["GLOBAL_SERVER_ADDRESS"],
+            auth_token=current_token(),
+            dev_bypass=is_dev_bypass(),
+            materialize_version=mat_version,
+        )
+
+    ft_query = FeatureTableQuery(
+        datastack=ds,
+        mat_version=mat_version,
+        feature_table=ft,
+        cfg=cfg,
+        client_factory=_client_factory,
+    )
+    frame = ft_query.frame(decoration_tables=decoration_tables or None)
+
+    if column not in frame.columns:
+        raise ApiError(
+            422,
+            "column_not_found",
+            f"column {column!r} not present in feature_table frame "
+            f"(have {list(frame.columns)[:20]}…)",
+        )
+
+    source_ds_values = [str(v) for v in frame[SOURCE_DS_COLUMN].tolist()]
+    series = frame[column]
+    if pd.api.types.is_numeric_dtype(series):
+        coerced = pd.to_numeric(series, errors="coerce")
+        finite = coerced.dropna()
+        raw_range = (
+            [float(finite.min()), float(finite.max())]
+            if not finite.empty
+            else [0.0, 0.0]
+        )
+        return jsonify(
+            {
+                "column": column,
+                "kind": "numeric",
+                "values": [
+                    None if pd.isna(v) else float(v) for v in coerced.tolist()
+                ],
+                "raw_range": raw_range,
+                "cell_ids": [str(int(c)) for c in frame["cell_id"].tolist()],
+                "source_ds": source_ds_values,
+                "n_cells": int(len(frame)),
+            }
+        )
+
+    # Categorical: build the same color_map /scatter does so universe
+    # palettes line up everywhere. Parquet columns: universe is the
+    # column's distinct values. Decoration columns: ask CAVE for the
+    # column's universe so the palette is stable across materializations.
+    table_name = column.split(".", 1)[0] if "." in column else None
+    bare_col = column.split(".", 1)[1] if "." in column else column
+    universe: list[str]
+    if table_name == ft.id or table_name is None:
+        universe = series.dropna().astype(str).unique().tolist()
+    elif table_name == "nucleus":
+        # `nucleus.x/y/z` are always numeric — categorical shouldn't
+        # arrive here, but degrade gracefully if it does.
+        universe = series.dropna().astype(str).unique().tolist()
+    else:
+        universe = _categorical_get_unique_values(
+            client_factory=_client_factory,
+            ds=ds,
+            mat_version=mat_version,
+            table=table_name,
+            column=bare_col,
+        )
+        if not universe:
+            universe = series.dropna().astype(str).unique().tolist()
+    color_map = resolve_categorical_color_map(
+        universe=universe,
+        observed=series.dropna().tolist(),
+    )
+    return jsonify(
+        {
+            "column": column,
+            "kind": "categorical",
+            "values": [None if pd.isna(v) else str(v) for v in series.tolist()],
+            "color_map": {str(k): v for k, v in color_map.items() if k is not None},
+            "cell_ids": [str(int(c)) for c in frame["cell_id"].tolist()],
+            "source_ds": source_ds_values,
             "n_cells": int(len(frame)),
         }
     )
@@ -589,8 +811,17 @@ def cells(ds: str, feature_table_id: str):
         f"{ft.id}.{c}" for c in (ft.categorical_columns or [])
         if f"{ft.id}.{c}" in frame.columns
     ]
+    # ``source_ds`` joins ``cell_id`` in the intrinsic ``id`` group so it
+    # rides alongside the primary key and isn't picked up by per-table
+    # column-visibility / filter logic. Single-ds manifests have a
+    # constant column (every value equals ``ds``) — still shipped so
+    # the shape is uniform and the SPA can route cross-nav from row
+    # data without a special case.
+    id_columns: list[str] = ["cell_id"]
+    if SOURCE_DS_COLUMN in frame.columns:
+        id_columns.append(SOURCE_DS_COLUMN)
     column_groups: list[dict] = [
-        {"name": "id", "kind": "intrinsic", "columns": ["cell_id"]},
+        {"name": "id", "kind": "intrinsic", "columns": id_columns},
     ]
     parquet_cols = feature_cols + categorical_cols
     if parquet_cols:
@@ -694,11 +925,17 @@ def knn(ds: str, feature_table_id: str):
     except KeyError as exc:
         raise ApiError(404, "cell_id_not_in_index", str(exc)) from exc
 
+    # ``source_ds`` per neighbor — phase 1 single-ds parquets have a
+    # uniform tag equal to the request's ``ds``. Phase 2 will need the
+    # kNN index to carry a per-row source_ds when multi-ds parquets are
+    # supported; for now the shape is in place so the SPA can decode it
+    # the same way for every manifest.
     return jsonify(
         {
             "query_cell_id": str(cell_id),
+            "query_source_ds": ds,
             "neighbors": [
-                {"cell_id": str(cid), "distance": d}
+                {"cell_id": str(cid), "source_ds": ds, "distance": d}
                 for cid, d in neighbors
             ],
         }
@@ -789,7 +1026,290 @@ def resolve_roots(ds: str, feature_table_id: str):
     return jsonify(
         {
             "mat_version": str(mat_version) if mat_version is not None else None,
-            "resolutions": [_resolution_to_json(r) for r in resolutions],
+            "resolutions": [_resolution_to_json(r, ds=ds) for r in resolutions],
+        }
+    )
+
+
+@bp.route("/<ds>/feature_tables/<feature_table_id>/find_cells", methods=["POST"])
+@auth_required
+def find_cells(ds: str, feature_table_id: str):
+    """Cross-version root_id → cell_id lookup for the explorer's search box.
+
+    Universe-first pipeline per input:
+
+    1. **Direct lookup against the universe.** ``root_ids_to_cell_ids``
+       hits the in-process ``dcv_cell_id_universe_cache`` snapshot of
+       the datastack's nucleus lookup view at ``mat_version``. For
+       inputs that are already canonical at this mat_version (the
+       common case — root_ids copied straight out of a Neuroglancer URL
+       or a notebook against the current snapshot), this is an O(1)
+       dict lookup with zero CAVE calls. The lookup-view CAVE query
+       only fires as a fallback for misses on a cold universe.
+    2. **Chunkedgraph alignment for the misses.** Inputs that didn't
+       resolve in step 1 (proofread-since-mv, axon-only without a
+       nucleus, or garbage) go through ``suggest_current_roots`` —
+       ``is_latest_roots`` first to filter then ``suggest_latest_roots``
+       for any genuinely stale subset — to find the current root.
+    3. **Re-lookup the aligned roots.** Whichever current roots came
+       out of step 2 get a second pass through ``root_ids_to_cell_ids``
+       to find their cell_id. Per-root caching makes this near-free.
+
+    For a paste where every input is already canonical at this mv, the
+    whole request resolves on a warm universe in <1ms with no CAVE
+    round-trips.
+
+    The endpoint exists only for root_id input; the explorer's search
+    box validates ``cell_id`` mode locally against the universe
+    cell_ids array already loaded in the SPA, so this endpoint stays
+    single-purpose.
+
+    Body::
+
+        {"root_ids": ["864691...", ...], "mat_version": 1718}
+
+    Returns one result per input in input order::
+
+        {
+          "mat_version": "1718",
+          "results": [
+            {
+              "original_root_id": "864691...",
+              "root_id": "864691...",     // aligned at mv; null on unaligned
+              "cell_id": "294101",         // null on unaligned / unresolved
+              "aligned": true,             // chunkedgraph returned a new root
+              "status": "ok"               // "ok" | "unaligned" | "unresolved"
+            },
+            ...
+          ]
+        }
+
+    Per-input failures (status ``unaligned`` or ``unresolved``) are
+    **not** top-level errors; partial-success batches are the common
+    case (e.g. paste 50 root_ids copied from a Neuroglancer
+    ``segments=`` fragment, 47 land on the embedding, 3 are stale
+    beyond the lineage walk).
+
+    Same chunkedgraph code path as ``/connectivity``'s stale-root
+    recovery — both go through ``suggest_current_roots`` — so a root
+    that ``/explore`` reports as aligned will produce the same
+    ``root_id_updated.current`` in ``/connectivity`` when used as
+    ``?root=``.
+    """
+    cfg = load_datastack_config(ds)
+    src = source_for(ds, cfg)
+    if src is None:
+        raise ApiError(
+            404,
+            "feature_explorer_disabled",
+            f"datastack {ds!r} does not enable the feature explorer",
+        )
+
+    try:
+        src.resolve_feature_table(feature_table_id)
+    except KeyError as exc:
+        raise ApiError(404, "feature_table_not_found", str(exc)) from exc
+
+    body = request.get_json(silent=True) or {}
+
+    raw_ids = body.get("root_ids")
+    if not isinstance(raw_ids, list) or not raw_ids:
+        raise ApiError(
+            422,
+            "missing_root_ids",
+            "body must include a non-empty `root_ids` list",
+        )
+    try:
+        original_root_ids = [int(r) for r in raw_ids]
+    except (TypeError, ValueError) as exc:
+        raise ApiError(
+            422,
+            "invalid_root_ids",
+            f"all root_ids must be integers: {exc}",
+        ) from exc
+
+    if "mat_version" not in body:
+        raise ApiError(
+            422,
+            "missing_mat_version",
+            "body must include `mat_version` (int or \"live\")",
+        )
+    mat_version_raw = body["mat_version"]
+    if mat_version_raw == "live":
+        mat_version: int | str = "live"
+    else:
+        try:
+            mat_version = int(mat_version_raw)
+        except (TypeError, ValueError) as exc:
+            raise ApiError(
+                422,
+                "invalid_mat_version",
+                f"mat_version must be an integer or 'live', got {mat_version_raw!r}",
+            ) from exc
+
+    try:
+        check_live_allowed(ds, mat_version)
+    except ValueError as exc:
+        raise ApiError(422, "live_mode_disallowed", str(exc)) from exc
+
+    client = _cave_client(ds, mat_version)
+
+    # Step 1 — universe-first lookup. The Feature Explorer's universe
+    # cache (`dcv_cell_id_universe_cache`) holds the snapshot of the
+    # datastack's nucleus lookup view at `mat_version`, with a reverse
+    # `root_to_cell` map. For the common case — user pastes root_ids
+    # copied straight from a Neuroglancer URL or a notebook against the
+    # current snapshot — every input is already canonical at this
+    # mat_version and `root_ids_to_cell_ids` resolves the whole batch
+    # via O(1) dict lookups with zero CAVE calls.
+    #
+    # Only inputs that miss the universe (proofread-since-mv, axon-only
+    # without a nucleus, or just garbage) fall through to the
+    # chunkedgraph alignment in step 2.
+    try:
+        direct_lookup = root_ids_to_cell_ids(
+            client=client,
+            cfg=cfg,
+            mat_version=mat_version,
+            datastack=ds,
+            root_ids=original_root_ids,
+        )
+    except ValueError as exc:
+        raise ApiError(422, "lookup_unavailable", str(exc)) from exc
+    except Exception as exc:
+        raise ApiError(
+            502,
+            "cave_upstream",
+            f"universe lookup failed: {type(exc).__name__}: {exc}",
+        ) from exc
+
+    # Step 2 — chunkedgraph alignment for the misses only. is_latest_roots
+    # + suggest_latest_roots inside `suggest_current_roots` handles the
+    # "this root was edited since mv" case. Skips entirely when every
+    # input landed in step 1 — the happy-path zero-CAVE-call promise.
+    missing_inputs = [
+        r for r in original_root_ids if direct_lookup.get(r) is None
+    ]
+    alignment: dict[int, int | None] = {}
+    aligned_lookup: dict[int, int | None] = {}
+    if missing_inputs:
+        try:
+            alignment = suggest_current_roots(
+                client, missing_inputs, mat_version=mat_version
+            )
+        except Exception as exc:
+            raise ApiError(
+                502,
+                "cave_upstream",
+                f"chunkedgraph alignment failed: {type(exc).__name__}: {exc}",
+            ) from exc
+
+        # Step 3 — lookup the aligned roots produced by step 2. The
+        # per-root cache inside `root_ids_to_cell_ids` makes a second
+        # call cheap; for aligned roots that already passed through the
+        # universe (e.g. two stale inputs that merged into the same
+        # current root) the cache returns the answer instantly.
+        aligned_to_lookup: list[int] = []
+        seen: set[int] = set()
+        for orig in missing_inputs:
+            aligned = alignment.get(orig)
+            if aligned is None or aligned in seen:
+                continue
+            # Skip inputs whose aligned root is the same as the input —
+            # those already missed step 1, so re-asking won't change the
+            # answer. They're genuinely unresolved.
+            if aligned == orig:
+                continue
+            aligned_to_lookup.append(aligned)
+            seen.add(aligned)
+
+        if aligned_to_lookup:
+            try:
+                aligned_lookup = root_ids_to_cell_ids(
+                    client=client,
+                    cfg=cfg,
+                    mat_version=mat_version,
+                    datastack=ds,
+                    root_ids=aligned_to_lookup,
+                )
+            except ValueError as exc:
+                raise ApiError(422, "lookup_unavailable", str(exc)) from exc
+            except Exception as exc:
+                raise ApiError(
+                    502,
+                    "cave_upstream",
+                    f"nucleus lookup failed: {type(exc).__name__}: {exc}",
+                ) from exc
+
+    # Stitch per-input results in input order.
+    results: list[dict[str, Any]] = []
+    for orig in original_root_ids:
+        direct_cid = direct_lookup.get(orig)
+        if direct_cid is not None:
+            results.append(
+                {
+                    "original_root_id": str(orig),
+                    "root_id": str(orig),
+                    "cell_id": str(int(direct_cid)),
+                    "aligned": False,
+                    "status": "ok",
+                }
+            )
+            continue
+        aligned = alignment.get(orig)
+        if aligned is None:
+            results.append(
+                {
+                    "original_root_id": str(orig),
+                    "root_id": None,
+                    "cell_id": None,
+                    "aligned": False,
+                    "status": "unaligned",
+                }
+            )
+            continue
+        # `aligned == orig` only reaches here when step 1 missed but
+        # the chunkedgraph said the root is current — i.e. the
+        # chunkedgraph and the nucleus lookup view disagree. Treat as
+        # unresolved (cell present in chunkedgraph but with no nucleus
+        # mapping in the lookup view at this mv).
+        if aligned == orig:
+            results.append(
+                {
+                    "original_root_id": str(orig),
+                    "root_id": str(aligned),
+                    "cell_id": None,
+                    "aligned": False,
+                    "status": "unresolved",
+                }
+            )
+            continue
+        cell_id = aligned_lookup.get(aligned)
+        if cell_id is None:
+            results.append(
+                {
+                    "original_root_id": str(orig),
+                    "root_id": str(aligned),
+                    "cell_id": None,
+                    "aligned": True,
+                    "status": "unresolved",
+                }
+            )
+            continue
+        results.append(
+            {
+                "original_root_id": str(orig),
+                "root_id": str(aligned),
+                "cell_id": str(int(cell_id)),
+                "aligned": True,
+                "status": "ok",
+            }
+        )
+
+    return jsonify(
+        {
+            "mat_version": str(mat_version) if mat_version is not None else None,
+            "results": results,
         }
     )
 
@@ -900,9 +1420,15 @@ def _cave_client(ds: str, mat_version: int | str | None):
         raise ApiError(401, "no_auth_token", str(exc)) from exc
 
 
-def _resolution_to_json(r) -> dict[str, Any]:
+def _resolution_to_json(r, *, ds: str) -> dict[str, Any]:
+    # ``source_ds`` per resolution — phase 1 path-scoped endpoint emits a
+    # uniform tag equal to the request's ``ds``. Phase 2's body-scoped
+    # /resolve_roots will accept per-row (ds, cell_id) input and emit
+    # per-row source_ds on the response, at which point Resolution gains
+    # the field directly and this helper drops the ds= keyword.
     out: dict[str, Any] = {
         "cell_id": str(r.cell_id),
+        "source_ds": ds,
         "root_id": str(r.root_id) if r.root_id is not None else None,
         "status": r.status,
     }
@@ -915,6 +1441,12 @@ def _feature_table_summary(ft: FeatureTableSpec) -> dict[str, Any]:
     """Public-API projection of a FeatureTableSpec — drops the storage URI
     (internal) and renders the audit block as a boolean flag (the audit
     *values* per cell ship through the rows endpoint, not the catalog).
+
+    Categories are projected as-is so the SPA can render category-grouped
+    pickers (channel selector, "+ add plot" menu, kNN feature subset).
+    Validation that the referenced columns exist in the parquet happens
+    on the SPA side (it already has the column list); the catalog
+    response just relays the declared structure.
     """
     return {
         "id": ft.id,
@@ -925,6 +1457,15 @@ def _feature_table_summary(ft: FeatureTableSpec) -> dict[str, Any]:
         "categorical_columns": ft.categorical_columns,
         "depth_columns": ft.depth_columns,
         "has_audit": ft.audit is not None,
+        "categories": [
+            {
+                "id": c.id,
+                "title": c.title,
+                "description": c.description,
+                "columns": list(c.columns),
+            }
+            for c in ft.categories
+        ],
         "embeddings": [_embedding_summary(e) for e in ft.embeddings],
     }
 

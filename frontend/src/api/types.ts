@@ -108,6 +108,12 @@ export interface PartnerRecord {
   num_syn?: number;
   num_soma?: number;
   cell_id?: string | null;  // present only when num_soma == 1 (unique nucleus)
+  // Per-row datastack tag. Always present on Feature Explorer cell rows
+  // (the loader fills it with the request's ds when the parquet doesn't
+  // already declare it); absent on /neuron partner rows, which are
+  // single-ds by construction. Cross-nav prefers row.source_ds when
+  // present, falling back to the URL's ?ds.
+  source_ds?: string;
   // Annotation-table columns land as `<table>.<col>` (e.g.
   // `cell_type_multifeature_combo.cell_type`); aggregation columns from
   // `synapse_aggregation_rules` are bare. The index signature covers both.
@@ -369,6 +375,22 @@ export interface EmbeddingListItem {
   depth_axis: "x" | "y" | null;
 }
 
+/** A manifest-declared category — a named subset of a feature table's
+ *  columns used purely for UI organization (channel-picker optgroups,
+ *  "+ add plot" menus, mass select/deselect). Columns may appear in
+ *  multiple categories; columns not referenced by any category render
+ *  under an implicit "Uncategorized" group. */
+export interface FeatureCategory {
+  id: string;
+  title: string;
+  description: string | null;
+  /** Bare parquet column names (same namespace as `feature_columns`
+   *  and `categorical_columns`). The SPA prefixes them with the
+   *  feature_table id when matching against the dotted channel
+   *  namespace. */
+  columns: string[];
+}
+
 /** One feature table — the data unit; owns rows, features, and a list
  *  of embeddings (views) declared over those rows. */
 export interface FeatureTableListItem {
@@ -380,6 +402,10 @@ export interface FeatureTableListItem {
   categorical_columns: string[];
   depth_columns: string[];
   has_audit: boolean;
+  /** Optional manifest-declared categories. Empty array = no
+   *  categorization declared; the SPA falls back to grouping by
+   *  feature/categorical kind. */
+  categories: FeatureCategory[];
   embeddings: EmbeddingListItem[];
 }
 
@@ -389,11 +415,28 @@ export interface EmbeddingKnnDefaults {
   standardize: boolean;
 }
 
+/** One participant in a manifest's datastack set. Single-ds manifests have
+ *  exactly one entry (the parent datastack). Multi-ds manifests (phase 2)
+ *  list every participating datastack so the SPA can detect joint-embedding
+ *  mode up front and toggle multi-select / per-row routing UI without a
+ *  manifest re-fetch. */
+export interface ManifestDatastackEntry {
+  name: string;
+  /** Per-datastack override for `cell_id_source_table`. When set, takes
+   *  precedence over the datastack YAML's value — used by joint manifests
+   *  where different participants anchor on different source tables. */
+  cell_id_source_table: string | null;
+}
+
 export interface FeatureTableListResponse {
   /** When false, every other field is omitted — the explorer is not
    *  configured for this datastack and the SPA should hide /explore. */
   enabled: boolean;
   cell_id_source_table?: string;
+  /** Manifest-declared participating datastacks. Always populated when
+   *  `enabled` is true; single-ds (or pre-phase-1) manifests collapse to a
+   *  one-element list naming the request's `ds`. */
+  datastacks?: ManifestDatastackEntry[];
   knn?: EmbeddingKnnDefaults;
   feature_tables?: FeatureTableListItem[];
 }
@@ -406,10 +449,20 @@ export type EmbeddingListResponse = FeatureTableListResponse;
 export interface EmbeddingKnnNeighbor {
   cell_id: string;
   distance: number;
+  /** Datastack tag for the neighbor. Single-ds parquets emit a uniform
+   *  value (every neighbor inherits the query's ds); phase-2 multi-ds
+   *  parquets carry the actual per-row source. Always present on
+   *  responses from phase-1+ servers. */
+  source_ds?: string;
 }
 
 export interface EmbeddingKnnResponse {
   query_cell_id: string;
+  /** Datastack the query cell_id resolves under. Used by the SPA when
+   *  the kNN result feeds cross-nav, so the destination /neuron URL
+   *  picks the query's home ds even if the SPA's active datastack
+   *  scope is broader. */
+  query_source_ds?: string;
   neighbors: EmbeddingKnnNeighbor[];
 }
 
@@ -419,6 +472,11 @@ export interface CellRootResolution {
   cell_id: string;
   root_id: string | null;
   status: ResolutionStatus;
+  /** Datastack the cell_id was resolved in. Single-ds path-scoped
+   *  /resolve_roots emits a uniform value (the URL's ds); phase-2
+   *  body-scoped /resolve_roots will emit per-row source_ds so a
+   *  multi-ds batch resolves correctly in one round trip. */
+  source_ds?: string;
   /** Only populated when status === "ambiguous". */
   candidates?: string[];
 }
@@ -426,6 +484,40 @@ export interface CellRootResolution {
 export interface ResolveRootsResponse {
   mat_version: string | null;
   resolutions: CellRootResolution[];
+}
+
+/** Per-input status from `POST /feature_tables/<ft>/find_cells`:
+ *  - `ok`: chunkedgraph aligned + nucleus reverse-resolved cleanly.
+ *  - `unaligned`: chunkedgraph couldn't walk the lineage at the
+ *    request's mat_version (root unknown to the chunkedgraph or no
+ *    usable timestamp).
+ *  - `unresolved`: alignment succeeded but the aligned root has no
+ *    nucleus mapping in the datastack's lookup view at this
+ *    mat_version (cell deleted, or root_id_lookup_main_table is stale).
+ */
+export type FindCellStatus = "ok" | "unaligned" | "unresolved";
+
+export interface FindCellResult {
+  /** Echo of the input root_id (string, since chunkedgraph root_ids
+   *  exceed JS Number precision). */
+  original_root_id: string;
+  /** Aligned root_id at the request's mat_version. `null` when
+   *  `status === "unaligned"`. */
+  root_id: string | null;
+  /** Resolved cell_id on the explorer's universe. `null` when
+   *  `status !== "ok"`. */
+  cell_id: string | null;
+  /** `true` when the chunkedgraph swapped the input for a different
+   *  current root (i.e. the input was stale). `false` when the input
+   *  was already current at this mat_version. */
+  aligned: boolean;
+  status: FindCellStatus;
+}
+
+export interface FindCellsResponse {
+  mat_version: string | null;
+  /** One result per input, in input order. */
+  results: FindCellResult[];
 }
 
 export interface EmbeddingColorBlock {
@@ -454,6 +546,12 @@ export interface EmbeddingSizeBlock {
 /** Scatter (universe) payload for one embedding view. */
 export interface EmbeddingScatterResponse {
   cell_ids: string[];
+  /** Parallel per-row datastack tag. Single-ds manifests emit a uniform
+   *  array (every value equals the request's ds); multi-ds manifests
+   *  (phase 2) diverge per row. The SPA reads this when routing
+   *  cross-nav or coloring by source dataset; phase-1 readers can ignore
+   *  it since every entry equals the workspace's active ds. */
+  source_ds?: string[];
   /** Per-point x and y values. Nullable because a parquet column
    *  (e.g. a subset-embedding axis) may be null for cells outside the
    *  subset; the scatter drops those points. */
@@ -463,6 +561,32 @@ export interface EmbeddingScatterResponse {
   color: EmbeddingColorBlock | null;
   size: EmbeddingSizeBlock | null;
   n_cells: number;
+}
+
+/** Universe-aligned values for a single column. Same `cell_ids` order
+ *  as `EmbeddingScatterResponse`, so selection masks built against the
+ *  scatter index in directly to this response's `values`. Used by the
+ *  manual-histogram surface in SummaryPanel and (eventually) by the
+ *  differential-features + similarity-expansion features. */
+export interface EmbeddingColumnResponse {
+  column: string;
+  cell_ids: string[];
+  /** Parallel per-row datastack tag (same shape as on
+   *  `EmbeddingScatterResponse`). Optional for forward compatibility
+   *  with older servers. */
+  source_ds?: string[];
+  n_cells: number;
+  kind: "numeric" | "categorical";
+  /** Same length + order as `cell_ids`. Numeric → numbers or null;
+   *  categorical → strings or null. */
+  values: Array<number | null> | Array<string | null>;
+  /** Numeric only. [min, max] over the finite values; 0/0 when the
+   *  column is entirely null. */
+  raw_range?: [number, number];
+  /** Categorical only. Value → hex; same palette resolution as the
+   *  scatter's `color_map` so a category lands on the same hex
+   *  everywhere. */
+  color_map?: Record<string, string>;
 }
 
 /** Cell-list rows for the explorer's PartnersTable mounting. Shape

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { isSelKey } from "../plots/urlState";
+import { useCrossNavHref } from "../hooks/useCrossNavHref";
 import { useSetUrlParams } from "../hooks/useUrlState";
 import {
   type ColumnDef,
@@ -15,7 +15,7 @@ import {
   getSortedRowModel,
   useReactTable,
 } from "@tanstack/react-table";
-import { useMakeLinkMutation } from "../api/queries";
+import { useNglLink } from "../hooks/useNglLink";
 import type { ColumnGroup, PartnerRecord } from "../api/types";
 import { CopyableId, FilterInput, displayName, formatCell, inferKind, type ColumnKind } from "./tableColumns";
 
@@ -186,7 +186,7 @@ function csvCell(value: unknown): string {
 export function PartnersTable({ ds, rootId, matVersion, direction, rows, columnGroups, decorationTables, defaultHiddenColumns, externalSelection, onClearSelection, labelOverrides, keyColumn = "root_id", crossNavHref, enableNglAction = true, rowsLabel = "partners", selectedIds, onSelectedIdsChange, onRowNglClick, extraActions }: Props) {
   const [searchParams] = useSearchParams();
   const setUrlParams = useSetUrlParams();
-  const makeLink = useMakeLinkMutation();
+  const ngl = useNglLink();
   const [sorting, setSorting] = useState<SortingState>([]);
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
   // Row selection is *controlled* when both `selectedIds` and
@@ -448,14 +448,17 @@ export function PartnersTable({ ds, rootId, matVersion, direction, rows, columnG
   // `open` is shared with the action-bar buttons below — single source of truth
   // for "go to Neuroglancer" navigation.
   const open = useCallback(
-    async (template: string, partnerIds?: string[]) => {
-      const result = await makeLink.mutateAsync({
-        ds, rootId, matVersion, template,
-        selectedPartnerIds: partnerIds && partnerIds.length > 0 ? partnerIds : undefined,
-      });
-      window.open(result.url, "_blank");
-    },
-    [ds, matVersion, makeLink, rootId],
+    (template: string, partnerIds?: string[]) =>
+      ngl.open({
+        kind: "template",
+        ds,
+        rootId,
+        matVersion,
+        template,
+        selectedPartnerIds:
+          partnerIds && partnerIds.length > 0 ? partnerIds : undefined,
+      }),
+    [ds, matVersion, ngl, rootId],
   );
 
   // URL builder for the per-row "view this partner" Link. Carries the active
@@ -469,36 +472,16 @@ export function PartnersTable({ ds, rootId, matVersion, direction, rows, columnG
   // Returns a `to=` value (not an imperative `navigate()` call) so the
   // `<Link>` renders a real `<a href>` — that lets cmd-click / middle-click
   // open the partner in a new tab natively without any extra event plumbing.
-  const defaultPartnerHref = useCallback(
-    (partnerRoot: string) => {
-      const next = new URLSearchParams(searchParams);
-      for (const key of [...next.keys()]) {
-        if (isSelKey(key)) next.delete(key);
-      }
-      next.set("root", partnerRoot);
-      next.set("from", `neuron:${rootId}`);
-      // Defensive: the table can render with stale `searchParams` if the user
-      // changed datastack/mv via another control mid-render. Reassert these
-      // from props so the partner link is always self-consistent.
-      next.set("ds", ds);
-      // Preserve the explicit "live" choice across cross-nav. Deleting
-      // `?mv=` would let the destination's auto-default-to-latest effect
-      // overwrite the user's preference; setting the literal "live" keeps
-      // it intact (and any view that disallows live mode surfaces a clean
-      // error rather than silently switching versions).
-      next.set("mv", matVersion === "live" ? "live" : String(matVersion));
-      if (decorationTables && decorationTables.length > 0) {
-        next.set("dec", decorationTables.join(","));
-      } else {
-        next.delete("dec");
-      }
-      return `/neuron?${next.toString()}`;
-    },
-    [searchParams, rootId, ds, matVersion, decorationTables],
-  );
-  // Caller may inject a different builder (the explorer routes through
-  // useResolveRoots so the destination uses a fresh root_id at the current
-  // mv). When unset, the partner→/neuron path stays the default.
+  // Default neuron → neuron cross-nav. Intra-view so view state (plot
+  // bindings, column hide/show) carries via `inheritParams`. Callers
+  // (the explorer's cell list) supply their own builder for routes
+  // that need surface-key → root resolution.
+  const defaultPartnerHref = useCrossNavHref({
+    ds,
+    matVersion,
+    from: `neuron:${rootId}`,
+    decorationTables: decorationTables ?? [],
+  });
   const hrefFor = crossNavHref ?? defaultPartnerHref;
 
   // Direction → link-template resolution lifted up here so the per-row NGL
@@ -962,7 +945,7 @@ export function PartnersTable({ ds, rootId, matVersion, direction, rows, columnG
         </tbody>
       </table>
       </div>
-      {makeLink.isError && <p className="error">{makeLink.error.message}</p>}
+      {ngl.isError && ngl.error && <p className="error">{ngl.error.message}</p>}
     </div>
   );
 }

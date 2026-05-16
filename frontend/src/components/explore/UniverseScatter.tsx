@@ -1,24 +1,38 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  forwardRef,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import DeckGL from "@deck.gl/react";
 import { OrthographicView, OrthographicViewport } from "@deck.gl/core";
 import { ScatterplotLayer } from "@deck.gl/layers";
 import { useEmbeddingScatter } from "../../api/embeddings";
 import type { EmbeddingScatterResponse } from "../../api/types";
 import { ColorLegend } from "./ColorLegend";
+import {
+  type Colormap,
+  getColormap,
+  piecewiseT,
+  sampleColormap,
+} from "./colormaps";
 
 // Color hexes used when no channel binding is active.
 const BASE_RGBA_NO_HIGHLIGHT: [number, number, number, number] = [91, 139, 209, 230];   // #5b8bd1
-const BASE_RGBA_WITH_HIGHLIGHT: [number, number, number, number] = [209, 213, 219, 150]; // light gray
+const BASE_RGBA_WITH_HIGHLIGHT: [number, number, number, number] = [229, 231, 235, 90]; // pale gray, low alpha — recedes
 const HIGHLIGHT_RGBA: [number, number, number, number] = [245, 158, 11, 255]; // #f59e0b
 const NULL_RGBA: [number, number, number, number] = [220, 220, 220, 220]; // #dcdcdc — null-color slot
 const FOCUSED_VIEW_ZOOM = 0; // initial zoom; deck.gl tunes to fit via fitBounds below.
 
 /** Amount to desaturate base-layer points toward grayscale when a
- *  highlight is active. 0 = full color, 1 = pure gray. Heavy
- *  desaturation makes the highlight read cleanly even when the base
- *  has channel colors bound. */
-const BASE_DESATURATE_WHEN_HIGHLIGHT = 0.88;
-const BASE_ALPHA_WHEN_HIGHLIGHT = 110;
+ *  highlight is active. 0 = full color, 1 = pure gray. Pushed close
+ *  to fully gray — selection should emerge via the background
+ *  receding, not via the foreground screaming. */
+const BASE_DESATURATE_WHEN_HIGHLIGHT = 0.94;
+const BASE_ALPHA_WHEN_HIGHLIGHT = 70;
 
 interface Props {
   ds: string;
@@ -39,6 +53,15 @@ interface Props {
    *  outliers can't blow out the full colorscale onto a few cells. */
   colorMin?: number | null;
   colorMax?: number | null;
+  /** Colormap id from the registry in `./colormaps`. Numeric color
+   *  channels sample from this colormap; unknown ids fall back to the
+   *  default (viridis). Ignored for categorical color. */
+  colormapId?: string | null;
+  /** Data value anchored to the colormap's midpoint when the active
+   *  colormap is diverging. Null defers to (colorMin + colorMax) / 2 —
+   *  the no-op midpoint that renders identically to the linear stretch.
+   *  Ignored for non-diverging colormaps. */
+  colorCenter?: number | null;
   decorationTables?: string[];
   matVersion?: number | "live" | null;
   /** Cell_ids to render in the highlight layer (orange or, when color
@@ -55,6 +78,17 @@ interface Props {
    *  parent (use this in flex layouts where the parent owns sizing).
    *  Required when the parent has no intrinsic height. */
   height?: number;
+}
+
+/** Imperative handle exposed via `forwardRef`. Lets parents trigger the
+ *  scatter's internal "fit to current highlight (or full unit square)"
+ *  pass without duplicating its layout maths. Used by `<CellIdSearch>`:
+ *  after `replaceSelection([...])` lands, calling `fitView()` zooms the
+ *  scatter onto the cells the user just searched for. */
+export interface UniverseScatterHandle {
+  /** Re-fit the camera. Frames the highlight set when one is active;
+   *  otherwise fits the full unit square (default extent). */
+  fitView: () => void;
 }
 
 // --- color helpers ----------------------------------------------------------
@@ -91,37 +125,26 @@ function desaturate(
   ];
 }
 
-/** Linear-interpolate a numeric value to a 3-stop Viridis approximation.
- *  Not the official Viridis curve — a cheap stand-in until we want a real
- *  colorscale. Three control points: low (purple), mid (green), high (yellow). */
-function numericToViridis(
+/** Map a numeric value into the chosen colormap. Null/NaN → NULL_RGBA so
+ *  missing values render distinctly from the low end of the scale; a
+ *  degenerate range (hi ≤ lo) collapses to the colormap's midpoint.
+ *
+ *  `center` is the data value anchored to t = 0.5; only meaningful for
+ *  diverging colormaps (the caller decides whether to pass it). Null
+ *  center is the linear stretch — equivalent to a center at (lo+hi)/2. */
+function numericToColor(
   v: number | null | undefined,
   lo: number,
   hi: number,
+  cmap: Colormap,
+  center: number | null,
 ): [number, number, number] {
   if (v === null || v === undefined || !Number.isFinite(v)) {
     return [NULL_RGBA[0], NULL_RGBA[1], NULL_RGBA[2]];
   }
-  if (hi <= lo) return [99, 146, 67]; // mid-green for degenerate range
-  const t = Math.max(0, Math.min(1, (v - lo) / (hi - lo)));
-  const stops: [number, [number, number, number]][] = [
-    [0.0, [68, 1, 84]],     // dark purple
-    [0.5, [33, 144, 141]],  // teal-green
-    [1.0, [253, 231, 37]],  // yellow
-  ];
-  for (let i = 0; i < stops.length - 1; i++) {
-    const [t0, c0] = stops[i];
-    const [t1, c1] = stops[i + 1];
-    if (t >= t0 && t <= t1) {
-      const u = t1 === t0 ? 0 : (t - t0) / (t1 - t0);
-      return [
-        Math.round(c0[0] + (c1[0] - c0[0]) * u),
-        Math.round(c0[1] + (c1[1] - c0[1]) * u),
-        Math.round(c0[2] + (c1[2] - c0[2]) * u),
-      ];
-    }
-  }
-  return [253, 231, 37];
+  if (hi <= lo) return sampleColormap(cmap, 0.5);
+  const t = Math.max(0, Math.min(1, piecewiseT(v, lo, hi, center)));
+  return sampleColormap(cmap, t);
 }
 
 // --- main component ---------------------------------------------------------
@@ -154,25 +177,31 @@ interface RenderRow {
  * the engine swap clean and the rendering equivalent to the Plotly
  * version. Public props are unchanged so FeatureExplorer doesn't move.
  */
-export function UniverseScatter({
-  ds,
-  featureTableId,
-  embeddingId,
-  x: xBinding,
-  y: yBinding,
-  colorBy,
-  sizeBy,
-  sizeMinPx,
-  sizeMaxPx,
-  colorMin,
-  colorMax,
-  decorationTables,
-  matVersion,
-  highlightedCellIds,
-  onLassoSelect,
-  onPointClick,
-  height,
-}: Props) {
+export const UniverseScatter = forwardRef<UniverseScatterHandle, Props>(function UniverseScatter(
+  {
+    ds,
+    featureTableId,
+    embeddingId,
+    x: xBinding,
+    y: yBinding,
+    colorBy,
+    sizeBy,
+    sizeMinPx,
+    sizeMaxPx,
+    colorMin,
+    colorMax,
+    colormapId,
+    colorCenter,
+    decorationTables,
+    matVersion,
+    highlightedCellIds,
+    onLassoSelect,
+    onPointClick,
+    height,
+  },
+  ref,
+) {
+  const colormap = useMemo(() => getColormap(colormapId), [colormapId]);
   // Tool state — pan or lasso. Default pan so the very first
   // interaction (explore the universe) feels right. Toggle in the
   // top-right corner of the scatter; sticks until the user toggles
@@ -226,6 +255,8 @@ export function UniverseScatter({
         sizeMaxPx: sizeMaxPx ?? 18,
         colorMin: colorMin ?? null,
         colorMax: colorMax ?? null,
+        colormap,
+        colorCenter: colorCenter ?? null,
       }),
     [
       query.data,
@@ -235,6 +266,8 @@ export function UniverseScatter({
       sizeMaxPx,
       colorMin,
       colorMax,
+      colormap,
+      colorCenter,
     ],
   );
 
@@ -327,10 +360,21 @@ export function UniverseScatter({
         if (y < minY) minY = y;
         if (y > maxY) maxY = y;
       }
-      // Handle the single-point case — give it a small finite span
-      // so the zoom doesn't go to infinity.
-      const spanX = Math.max(maxX - minX, 0.02);
-      const spanY = Math.max(maxY - minY, 0.02);
+      // Minimum effective span for the framing rectangle. A single-cell
+      // highlight (the common case after a Cell ID search) has spanX =
+      // spanY = 0, which without a floor produces a 14+ zoom that frames
+      // the cell at extreme magnification — the user sees the cell at
+      // its raw size with no surrounding context and reasonably reports
+      // "fit zoomed in and I can't see anything." 0.15 of the unit
+      // square frames ~15% of the embedding around the point, which is
+      // dense enough to read morphology-bearing structure and sparse
+      // enough that the highlighted cell stands out within it.
+      //
+      // For larger highlight sets the natural bounding box is wider
+      // than 0.15 and the floor doesn't kick in.
+      const MIN_FIT_SPAN = 0.15;
+      const spanX = Math.max(maxX - minX, MIN_FIT_SPAN);
+      const spanY = Math.max(maxY - minY, MIN_FIT_SPAN);
       const cx = (minX + maxX) / 2;
       const cy = (minY + maxY) / 2;
       const padding = 1.3;
@@ -346,6 +390,15 @@ export function UniverseScatter({
     }
     setViewState(unitSquareViewState(heightForFitRef.current));
   }, [partition]);
+
+  // Expose `fitView` to parents via the forwardRef handle. The
+  // CellIdSearch component uses this to zoom to a freshly-resolved cell
+  // (or set of cells) after `replaceSelection(...)` populates the
+  // highlight set. Re-runs of useImperativeHandle pick up the latest
+  // `fitView` closure (which already depends on `partition`), so a
+  // ref.current.fitView() right after a state change reads the
+  // up-to-date highlight bounds on the next render commit.
+  useImperativeHandle(ref, () => ({ fitView }), [fitView]);
 
   const layers = useMemo(() => {
     if (!partition) return [];
@@ -368,12 +421,11 @@ export function UniverseScatter({
       },
     });
     if (partition.highlight.length === 0) return [base];
-    // Contrasting white stroke on every highlight marker. Tiny visual
-    // cost at high count (a thin ring on each dot), large win at low
-    // count: a few highlighted cells in 94k now read as crisp rings
-    // rather than indistinguishable dots. Combined with the
-    // exponential size bonus in `buildPartition`, single-cell
-    // highlights are findable without manual zoom.
+    // Thin black stroke on every selected marker. The fill carries
+    // most of the selection signal against a heavily-recessed base
+    // layer; the stroke is just enough edge to keep marks legible at
+    // any fill color, including pale colormap ends. The exponential
+    // size bonus in `buildPartition` handles single-cell findability.
     const hl = new ScatterplotLayer({
       id: "universe-highlight",
       data: partition.highlight,
@@ -385,8 +437,8 @@ export function UniverseScatter({
       getPosition: (d: RenderRow) => d.position,
       getFillColor: (d: RenderRow) => d.color,
       getRadius: (d: RenderRow) => d.radius,
-      getLineColor: [255, 255, 255, 230],
-      getLineWidth: 1.5,
+      getLineColor: [0, 0, 0, 200],
+      getLineWidth: 1,
       updateTriggers: {
         getFillColor: partition.colorRevision,
         getRadius: partition.sizeRevision,
@@ -622,7 +674,13 @@ export function UniverseScatter({
           renders when a color channel is bound. */}
       {query.data?.color && (
         <div className="universe-legend">
-          <ColorLegend color={query.data.color} />
+          <ColorLegend
+            color={query.data.color}
+            colormapId={colormap.id}
+            colorMin={colorMin ?? null}
+            colorMax={colorMax ?? null}
+            colorCenter={colorCenter ?? null}
+          />
         </div>
       )}
       {/* Tool toggle — top-right, pan vs lasso, plus a fit-view shortcut. */}
@@ -672,7 +730,7 @@ export function UniverseScatter({
       )}
     </div>
   );
-}
+});
 
 // --- point-in-polygon (ray-casting) -----------------------------------------
 
@@ -718,6 +776,13 @@ function buildPartition(
      *  colors. */
     colorMin: number | null;
     colorMax: number | null;
+    /** Colormap to sample for numeric color. Ignored for categorical
+     *  or unbound color. */
+    colormap: Colormap;
+    /** Anchor value for the colormap midpoint. Only applied when the
+     *  colormap's category is "diverging" — non-diverging maps render
+     *  linearly regardless. Null falls back to the linear stretch. */
+    colorCenter: number | null;
   },
 ): Partition | null {
   if (!data || !extent) return null;
@@ -750,6 +815,10 @@ function buildPartition(
   // colorMax) overrides the data extent — values outside the clipped
   // range clamp to the endpoint hex so a long-tail outlier doesn't
   // blow the colorscale onto two extreme dots.
+  // Diverging colormaps anchor their visual midpoint at `colorCenter`
+  // (defaulting to (lo+hi)/2, which is a no-op — the user has to move
+  // it). Non-diverging maps ignore the center and render linearly.
+  const isDiverging = opts.colormap.category === "diverging";
   let numericLo = 0;
   let numericHi = 1;
   if (colorBlock?.kind === "numeric") {
@@ -783,7 +852,13 @@ function buildPartition(
         : colorBlock.color_map?.[String(value)] ?? "#dcdcdc";
       rgb = hexToRgb(hex);
     } else if (colorBlock?.kind === "numeric") {
-      rgb = numericToViridis(colorBlock.values[i] as number | null, numericLo, numericHi);
+      rgb = numericToColor(
+        colorBlock.values[i] as number | null,
+        numericLo,
+        numericHi,
+        opts.colormap,
+        isDiverging ? opts.colorCenter : null,
+      );
     } else {
       // No color binding: base layer uses one of the project's solid
       // hexes; partition decides which.
@@ -864,7 +939,7 @@ function buildPartition(
   // Revision strings drive deck.gl's updateTriggers — change ⇒ rebuild
   // the GPU buffers. Including the binding identity here is enough; the
   // per-point arrays are immutable for a given binding set.
-  const colorRevision = `${colorBlock?.column ?? ""}|${colorBlock?.kind ?? ""}|${hasHighlight ? "hl" : "no-hl"}`;
+  const colorRevision = `${colorBlock?.column ?? ""}|${colorBlock?.kind ?? ""}|${opts.colormap.id}|${opts.colorMin ?? ""}|${opts.colorMax ?? ""}|${isDiverging ? opts.colorCenter ?? "" : ""}|${hasHighlight ? "hl" : "no-hl"}`;
   const sizeRevision = `${sizeBlock?.column ?? ""}|${opts.sizeMinPx}|${opts.sizeMaxPx}|${hl.length}|${hasHighlight ? "hl" : "no-hl"}`;
   return { base, highlight: hl, colorRevision, sizeRevision };
 }

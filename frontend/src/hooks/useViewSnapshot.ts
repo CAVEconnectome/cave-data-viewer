@@ -6,7 +6,7 @@ import { migrateStorageKey } from "./storageMigration";
 /**
  * Per-tab cached URL state for the major views, so navigating away
  * (e.g. to the landing page or applying a recipe) and back doesn't destroy
- * a complex Neuron view or Table browser configuration.
+ * a complex Neuron view, Table browser, or Feature Explorer configuration.
  *
  * Stored in sessionStorage rather than localStorage — per-tab semantics are
  * the right default: two tabs don't fight over a shared cached URL, and a
@@ -16,20 +16,25 @@ import { migrateStorageKey } from "./storageMigration";
  * `tables` collapses both `/tables` and `/tables/<name>` because the
  * "Table browser" nav button is a single entry point — restoring to the
  * specific table the user was on is friendlier than dumping them back to
- * the list.
+ * the list. `explore` is a single route but the URL carries a substantial
+ * lens (feature_table, embedding, channel bindings, decoration tables,
+ * filter, manual histograms) so snapshotting it is just as useful.
  */
-export type ViewFamily = "neuron" | "tables";
+export type ViewFamily = "neuron" | "tables" | "explore";
 
 export function pathFamily(pathname: string): ViewFamily | null {
   if (pathname === "/neuron") return "neuron";
   if (pathname === "/tables" || pathname.startsWith("/tables/")) return "tables";
+  if (pathname === "/explore") return "explore";
   return null;
 }
 
 const VIEW_SNAPSHOT_PREFIX = "cdv:v1:view:";
 
-// One-shot forward-migration of the two known view families from the
+// One-shot forward-migration of the known view families from the
 // unversioned prefix. Runs at module load — idempotent and best-effort.
+// `explore` is new in this revision and has no unversioned predecessor
+// to migrate, but listing it here keeps the parallel structure clear.
 migrateStorageKey("cdv:view:neuron", "cdv:v1:view:neuron", sessionStorage);
 migrateStorageKey("cdv:view:tables", "cdv:v1:view:tables", sessionStorage);
 
@@ -95,7 +100,12 @@ export function useViewSnapshot(
   }, [location.pathname, location.search]);
 
   const navigateToView = (family: ViewFamily) => {
-    const fallbackPath = family === "neuron" ? "/neuron" : "/tables";
+    const fallbackPath =
+      family === "neuron"
+        ? "/neuron"
+        : family === "tables"
+          ? "/tables"
+          : "/explore";
     const snapshot = readViewSnapshot(family);
     const snapshotDs = snapshot
       ? new URLSearchParams(snapshot.search).get("ds")

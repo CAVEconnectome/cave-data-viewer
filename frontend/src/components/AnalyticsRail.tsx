@@ -33,6 +33,7 @@ import {
   vizParamKey,
 } from "../plots/urlState";
 import { listVizColumns } from "../plots/vizColumns";
+import { CellFilterMenu } from "./CellFilterMenu";
 import { DynamicPlotPanel } from "./DynamicPlotPanel";
 import { PlotPanel } from "./PlotPanel";
 import {
@@ -232,6 +233,14 @@ export function AnalyticsRail({ ds, rootId, matVersion, bundle, decorationTables
     });
   }, []);
 
+  // Sample rows for the cell-filter column-kind inference. The filter
+  // scopes every plot in the rail, so its column-type evidence comes
+  // from the same connectivity bundle the plots themselves render.
+  const filterSampleRows = useMemo(
+    () => [...(bundle.partners_in ?? []), ...(bundle.partners_out ?? [])],
+    [bundle.partners_in, bundle.partners_out],
+  );
+
   return (
     <div className="plots">
       <div className="rail-header">
@@ -250,6 +259,14 @@ export function AnalyticsRail({ ds, rootId, matVersion, bundle, decorationTables
             ? "No brushes"
             : `Clear ${activeBrushPanels} brush${activeBrushPanels === 1 ? "" : "es"}`}
         </button>
+        {/* Cell filter sits in the rail's header because the filter
+            scopes the plots — every panel in this rail respects the
+            current `?cells=`. The popover keeps the editing UI compact
+            so it doesn't displace the plots themselves. */}
+        <CellFilterMenu
+          columnGroups={bundle.column_groups}
+          sampleRows={filterSampleRows}
+        />
       </div>
       {resolvedRegistry.map((d) =>
         d.kind === "static" ? (

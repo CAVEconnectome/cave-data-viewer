@@ -1,21 +1,63 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { useUrlParam } from "../hooks/useUrlState";
-import type { ColumnGroup, PartnerRecord } from "../api/types";
+import type { ColumnGroup, FeatureCategory, PartnerRecord } from "../api/types";
 
 const OPS = ["eq", "ne", "gt", "gte", "lt", "lte", "in", "notin", "nonnull", "null"] as const;
 type Op = (typeof OPS)[number];
 
+// "between" exists only in the UI: in the builder as a pseudo-op for
+// numeric columns, and in the chip rendering as a merged display of an
+// adjacent (gte, lte) pair. On the wire it remains two clauses, so the
+// backend parser doesn't need to learn anything new.
+type BuilderOp = Op | "between";
+
 // Ops the picker exposes per inferred column kind. Numeric gets the full
-// comparator set; strings get equality + membership only (range filters on
-// strings are rarely useful and trip users up); booleans collapse to four
-// pseudo-ops in the UI (handled separately, not in this map).
+// comparator set plus "between"; strings get equality + membership only
+// (range filters on strings are rarely useful and trip users up);
+// booleans collapse to four pseudo-ops in the UI (handled separately).
 type ColumnKind = "boolean" | "numeric" | "string" | "unknown";
 
-const OPS_FOR_KIND: Record<Exclude<ColumnKind, "boolean">, readonly Op[]> = {
-  numeric: ["eq", "ne", "gt", "gte", "lt", "lte", "in", "notin", "null", "nonnull"],
+const OPS_FOR_KIND: Record<Exclude<ColumnKind, "boolean">, readonly BuilderOp[]> = {
+  numeric: ["eq", "ne", "gt", "gte", "lt", "lte", "between", "in", "notin", "null", "nonnull"],
   string: ["eq", "ne", "in", "notin", "null", "nonnull"],
-  // No type evidence — show everything so the user can still build a predicate.
-  unknown: OPS,
+  // No type evidence — show everything so the user can still build a
+  // predicate. We include "between" too, since the user may know more
+  // about the column kind than our sampler can infer.
+  unknown: [...OPS, "between"],
+};
+
+// Symbols + plain-language for display. Wire format stays as the keys.
+// The wordy suffix in the builder dropdown lets non-programmers read
+// the math symbols ("≥" with "(at least)") without first decoding them.
+const OP_SYMBOL: Record<BuilderOp, string> = {
+  eq: "=",
+  ne: "≠",
+  gt: ">",
+  gte: "≥",
+  lt: "<",
+  lte: "≤",
+  in: "in",
+  notin: "not in",
+  nonnull: "is not null",
+  null: "is null",
+  between: "between",
+};
+
+// Builder dropdown uses plain-language labels so users don't have to
+// decode math symbols at edit time — the chip is where compactness
+// matters and the symbols pay off.
+const OP_DROPDOWN_LABEL: Record<BuilderOp, string> = {
+  eq: "equals",
+  ne: "not equal",
+  gt: "greater than",
+  gte: "at least",
+  lt: "less than",
+  lte: "at most",
+  in: "is one of",
+  notin: "is none of",
+  nonnull: "is not null",
+  null: "is null",
+  between: "between",
 };
 
 // Boolean columns get a single "predicate" select with four mutually-exclusive
@@ -108,6 +150,64 @@ function encodeCells(preds: Predicate[]): string | null {
     .join(",");
 }
 
+// Display items: either a single predicate, or a merged "between" pair.
+// The merge is purely cosmetic — under the hood there are still two
+// predicates in URL state, and removing/toggling a "between" affects
+// both. Detected for adjacent same-column (gte, lte) pairs in either
+// order so the user-facing chip stays compact regardless of which side
+// they entered first.
+type DisplayItem =
+  | { kind: "single"; indices: [number]; pred: Predicate }
+  | {
+      kind: "between";
+      indices: [number, number];
+      table: string;
+      column: string;
+      lo: string;
+      hi: string;
+      enabled: boolean;
+    };
+
+function mergeBetween(preds: Predicate[]): DisplayItem[] {
+  const out: DisplayItem[] = [];
+  for (let i = 0; i < preds.length; i++) {
+    const a = preds[i];
+    const b = preds[i + 1];
+    const pair = matchBetweenPair(a, b);
+    if (pair) {
+      out.push({
+        kind: "between",
+        indices: [i, i + 1],
+        table: a.table,
+        column: a.column,
+        lo: pair.lo,
+        hi: pair.hi,
+        enabled: a.enabled,
+      });
+      i += 1; // skip the partner
+    } else {
+      out.push({ kind: "single", indices: [i], pred: a });
+    }
+  }
+  return out;
+}
+
+/** Match a (gte, lte) or (lte, gte) pair on the same column with the same
+ *  enabled state into a between-display. Returns {lo, hi} string values
+ *  (the URL representation — kept as strings since we don't need numeric
+ *  arithmetic on them for display) or null if the pair doesn't qualify. */
+function matchBetweenPair(
+  a: Predicate | undefined,
+  b: Predicate | undefined,
+): { lo: string; hi: string } | null {
+  if (!a || !b) return null;
+  if (a.table !== b.table || a.column !== b.column) return null;
+  if (a.enabled !== b.enabled) return null;
+  if (a.op === "gte" && b.op === "lte") return { lo: a.value, hi: b.value };
+  if (a.op === "lte" && b.op === "gte") return { lo: b.value, hi: a.value };
+  return null;
+}
+
 interface Props {
   // The connectivity bundle's column_groups; we surface decoration / cell-type
   // groups as the picker's table choices. Synapse / intrinsic / soma columns
@@ -118,6 +218,14 @@ interface Props {
   // (or any subset). Used purely to decide which ops the picker exposes —
   // the actual filter still runs server-side.
   sampleRows?: PartnerRecord[];
+  /** Optional manifest-declared categories per table, keyed by the
+   *  table name in `columnGroups`. When the active table has
+   *  categories declared, the column dropdown renders as optgroups —
+   *  matching the channel pickers' optgroup behavior so the user sees
+   *  the same organization in both surfaces. Tables not in this map
+   *  (decoration tables, partners-frame intrinsic tables) render flat
+   *  as before. */
+  categoriesByTable?: Record<string, FeatureCategory[]>;
 }
 
 /**
@@ -129,9 +237,10 @@ interface Props {
  * op → value). The full predicate text is the chip label so users learn the
  * grammar by reading their own filters.
  */
-export function CellFilterPanel({ columnGroups, sampleRows }: Props) {
+export function CellFilterPanel({ columnGroups, sampleRows, categoriesByTable }: Props) {
   const [raw, setRaw] = useUrlParam("cells");
   const preds = useMemo(() => parseCells(raw), [raw]);
+  const items = useMemo(() => mergeBetween(preds), [preds]);
   const [adding, setAdding] = useState(false);
 
   // Annotation-table groups own the dotted column names that the backend
@@ -142,18 +251,27 @@ export function CellFilterPanel({ columnGroups, sampleRows }: Props) {
     [columnGroups],
   );
 
-  const removePredicate = (i: number) => {
-    const next = preds.filter((_, j) => j !== i);
+  // Remove a set of indices from preds (so removing a "between" drops
+  // both clauses in one URL write).
+  const removeIndices = (indices: number[]) => {
+    const drop = new Set(indices);
+    const next = preds.filter((_, j) => !drop.has(j));
     setRaw(encodeCells(next));
   };
-  const togglePredicate = (i: number) => {
-    const next = preds.map((p, j) => (j === i ? { ...p, enabled: !p.enabled } : p));
+  const toggleIndices = (indices: number[]) => {
+    const flip = new Set(indices);
+    // Use the first index's current state to compute the new state, so
+    // a "between" pair toggles atomically rather than each clause
+    // flipping independently if they ever drifted out of sync.
+    const newEnabled = !preds[indices[0]].enabled;
+    const next = preds.map((p, j) =>
+      flip.has(j) ? { ...p, enabled: newEnabled } : p,
+    );
     setRaw(encodeCells(next));
   };
-  // New predicates default to enabled — the typical workflow is "build a
-  // filter, see the result". Disable is a follow-up action via chip click.
-  const addPredicate = (p: Omit<Predicate, "enabled">) => {
-    setRaw(encodeCells([...preds, { ...p, enabled: true }]));
+  const addPredicates = (toAdd: Omit<Predicate, "enabled">[]) => {
+    const enabled = toAdd.map((p) => ({ ...p, enabled: true }));
+    setRaw(encodeCells([...preds, ...enabled]));
     setAdding(false);
   };
 
@@ -175,32 +293,18 @@ export function CellFilterPanel({ columnGroups, sampleRows }: Props) {
           >+</button>
         )}
       </div>
-      {preds.length === 0 && !adding && (
+      {items.length === 0 && !adding && (
         <div className="cell-filter-empty">no filter</div>
       )}
-      {preds.length > 0 && (
+      {items.length > 0 && (
         <div className="cell-filter-chips">
-          {preds.map((p, i) => (
-            <span
+          {items.map((item, i) => (
+            <ChipView
               key={i}
-              className={`cell-filter-chip${p.enabled ? "" : " disabled"}`}
-            >
-              <button
-                type="button"
-                className="chip-text"
-                onClick={() => togglePredicate(i)}
-                title={p.enabled ? "Click to disable" : "Click to enable"}
-              >
-                {p.table}.{p.column} {p.op}
-                {p.op !== "nonnull" && p.op !== "null" ? ` ${p.value}` : ""}
-              </button>
-              <button
-                type="button"
-                onClick={() => removePredicate(i)}
-                aria-label="remove"
-                title="Remove this predicate"
-              >×</button>
-            </span>
+              item={item}
+              onToggle={() => toggleIndices(item.indices)}
+              onRemove={() => removeIndices(item.indices)}
+            />
           ))}
         </div>
       )}
@@ -208,19 +312,107 @@ export function CellFilterPanel({ columnGroups, sampleRows }: Props) {
         <PredicateBuilder
           tableGroups={tableGroups}
           sampleRows={sampleRows ?? []}
+          categoriesByTable={categoriesByTable}
           onCancel={() => setAdding(false)}
-          onAdd={addPredicate}
+          onAdd={addPredicates}
         />
       )}
     </div>
   );
 }
 
+/** Render a single chip — single predicate or merged between. Both share
+ *  the same outer structure (text + delete) so they line up visually. */
+function ChipView({
+  item,
+  onToggle,
+  onRemove,
+}: {
+  item: DisplayItem;
+  onToggle: () => void;
+  onRemove: () => void;
+}) {
+  const enabled = item.kind === "single" ? item.pred.enabled : item.enabled;
+  return (
+    <span className={`cell-filter-chip${enabled ? "" : " disabled"}`}>
+      <button
+        type="button"
+        className="chip-text"
+        onClick={onToggle}
+        title={enabled ? "Click to disable" : "Click to enable"}
+      >
+        {item.kind === "between" ? (
+          <>
+            <ColumnPath table={item.table} column={item.column} /> between {item.lo}{" "}
+            and {item.hi}
+          </>
+        ) : (
+          renderSinglePredicate(item.pred)
+        )}
+      </button>
+      <button
+        type="button"
+        onClick={onRemove}
+        aria-label="remove"
+        title="Remove this predicate"
+      >×</button>
+    </span>
+  );
+}
+
+/** Render `table/column` as a styled span — slash separator matches the
+ *  plot-label convention and reads as a path the user can parse at a
+ *  glance, where a dot tends to vanish next to long identifiers. */
+function ColumnPath({ table, column }: { table: string; column: string }) {
+  return (
+    <span className="cell-filter-colpath">
+      <span className="cell-filter-colpath-table">{table}</span>
+      <span className="cell-filter-colpath-sep">/</span>
+      <span className="cell-filter-colpath-col">{column}</span>
+    </span>
+  );
+}
+
+/** Build the body of a single-predicate chip. Boolean-looking values
+ *  (eq true / eq false) get the "is true" / "is false" phrasing
+ *  instead of the bare comparator since that's how users describe a
+ *  flag. Other comparators get the symbol from OP_SYMBOL. Membership
+ *  ops translate to "is one of {…}" / "is none of {…}" with the
+ *  pipe-separated wire values rendered as a comma list. */
+function renderSinglePredicate(p: Predicate): ReactNode {
+  const path = <ColumnPath table={p.table} column={p.column} />;
+  if (p.op === "nonnull") return <>{path} is not null</>;
+  if (p.op === "null") return <>{path} is null</>;
+  if (p.op === "eq" && (p.value === "true" || p.value === "false")) {
+    return <>{path} is {p.value}</>;
+  }
+  if (p.op === "ne" && (p.value === "true" || p.value === "false")) {
+    return <>{path} is not {p.value}</>;
+  }
+  if (p.op === "in" || p.op === "notin") {
+    const verb = p.op === "in" ? "is one of" : "is none of";
+    const display = p.value.split("|").filter(Boolean).join(", ");
+    return (
+      <>
+        {path} {verb} {"{"}
+        {display}
+        {"}"}
+      </>
+    );
+  }
+  const sym = OP_SYMBOL[p.op as BuilderOp] ?? p.op;
+  return <>{path} {sym} {p.value}</>;
+}
+
 interface BuilderProps {
   tableGroups: ColumnGroup[];
   sampleRows: PartnerRecord[];
+  /** Optional category structure per table. When the active table has
+   *  categories, the column select renders as optgroups; otherwise
+   *  flat (the legacy behavior). */
+  categoriesByTable?: Record<string, FeatureCategory[]>;
   onCancel: () => void;
-  onAdd: (p: Omit<Predicate, "enabled">) => void;
+  onAdd: (preds: Omit<Predicate, "enabled">[]) => void;
 }
 
 // Bare column name from a possibly-dotted column key. Decoration columns ship
@@ -229,7 +421,7 @@ function bareColumn(c: string): string {
   return c.includes(".") ? c.split(".").slice(1).join(".") : c;
 }
 
-function PredicateBuilder({ tableGroups, sampleRows, onCancel, onAdd }: BuilderProps) {
+function PredicateBuilder({ tableGroups, sampleRows, categoriesByTable, onCancel, onAdd }: BuilderProps) {
   const [table, setTable] = useState(tableGroups[0]?.name ?? "");
   const tableCols = useMemo(() => {
     const group = tableGroups.find((g) => g.name === table);
@@ -237,8 +429,13 @@ function PredicateBuilder({ tableGroups, sampleRows, onCancel, onAdd }: BuilderP
     return group.columns.map(bareColumn);
   }, [tableGroups, table]);
   const [column, setColumn] = useState(tableCols[0] ?? "");
-  const [op, setOp] = useState<Op>("eq");
+  const [op, setOp] = useState<BuilderOp>("eq");
   const [value, setValue] = useState("");
+  // Between-mode lo/hi inputs. Only consulted when op === "between"; the
+  // single `value` state stays untouched so the user's typing in one
+  // mode doesn't leak into another.
+  const [betweenLo, setBetweenLo] = useState("");
+  const [betweenHi, setBetweenHi] = useState("");
   // Boolean-mode pseudo-op index (into BOOL_PREDICATES). Only consulted when
   // the picked column's inferred kind is "boolean".
   const [boolIdx, setBoolIdx] = useState(0);
@@ -248,12 +445,47 @@ function PredicateBuilder({ tableGroups, sampleRows, onCancel, onAdd }: BuilderP
     return inferColumnKind(sampleRows, `${table}.${column}`);
   }, [sampleRows, table, column]);
 
+  // Build the column dropdown's optgroup layout. When the active
+  // table has manifest-declared categories, group by category title
+  // + an implicit "Uncategorized" bucket for parquet columns the
+  // manifest didn't file; otherwise render flat (a single anonymous
+  // group). Parallels the ChannelPicker grouping so the two surfaces
+  // present the column universe identically.
+  const columnSections = useMemo<{ title: string | null; columns: string[] }[]>(() => {
+    const categories = categoriesByTable?.[table];
+    if (!categories || categories.length === 0) {
+      return [{ title: null, columns: tableCols }];
+    }
+    const available = new Set(tableCols);
+    const referenced = new Set<string>();
+    const sections: { title: string | null; columns: string[] }[] = [];
+    for (const cat of categories) {
+      const cols = cat.columns.filter((c) => available.has(c));
+      // Track referenced columns regardless of section emission so the
+      // Uncategorized bucket doesn't double-count an empty section's
+      // members. Columns referenced by a category but absent from the
+      // table count as "claimed" — they just won't render anywhere
+      // since they don't exist on the active frame.
+      for (const c of cat.columns) referenced.add(c);
+      if (cols.length > 0) {
+        sections.push({ title: cat.title, columns: cols });
+      }
+    }
+    const leftovers = tableCols.filter((c) => !referenced.has(c));
+    if (leftovers.length > 0) {
+      sections.push({ title: "Uncategorized", columns: leftovers });
+    }
+    return sections;
+  }, [categoriesByTable, table, tableCols]);
+
   const onTableChange = (next: string) => {
     setTable(next);
     const cols = (tableGroups.find((g) => g.name === next)?.columns ?? []).map(bareColumn);
     setColumn(cols[0] ?? "");
     setOp("eq");
     setValue("");
+    setBetweenLo("");
+    setBetweenHi("");
     setBoolIdx(0);
   };
 
@@ -261,15 +493,33 @@ function PredicateBuilder({ tableGroups, sampleRows, onCancel, onAdd }: BuilderP
     setColumn(next);
     setOp("eq");
     setValue("");
+    setBetweenLo("");
+    setBetweenHi("");
     setBoolIdx(0);
   };
 
   const valueDisabled = op === "nonnull" || op === "null";
   const isBoolean = columnKind === "boolean";
-  const canSubmit = table && column && (isBoolean || op && (valueDisabled || value !== ""));
-  const allowedOps = isBoolean
+  const isBetween = op === "between";
+  const isNumeric = columnKind === "numeric";
+  // Between needs both endpoints. Comparison ops need a value unless
+  // they're nullish. Boolean uses its own widget and is always "ready".
+  const betweenOk =
+    isBetween &&
+    betweenLo.trim() !== "" &&
+    betweenHi.trim() !== "" &&
+    Number.isFinite(Number(betweenLo)) &&
+    Number.isFinite(Number(betweenHi));
+  const canSubmit =
+    !!table &&
+    !!column &&
+    (isBoolean ||
+      (isBetween
+        ? betweenOk
+        : op && (valueDisabled || value !== "")));
+  const allowedOps: BuilderOp[] = isBoolean
     ? []  // boolean uses the BOOL_PREDICATES select instead of an op + value pair
-    : OPS_FOR_KIND[columnKind];
+    : [...OPS_FOR_KIND[columnKind]];
 
   return (
     <form
@@ -279,10 +529,23 @@ function PredicateBuilder({ tableGroups, sampleRows, onCancel, onAdd }: BuilderP
         if (!canSubmit) return;
         if (isBoolean) {
           const choice = BOOL_PREDICATES[boolIdx];
-          onAdd({ table, column, op: choice.op, value: choice.value });
-        } else {
-          onAdd({ table, column, op, value: valueDisabled ? "" : value });
+          onAdd([{ table, column, op: choice.op, value: choice.value }]);
+          return;
         }
+        if (isBetween) {
+          // Canonicalise so lo ≤ hi on the wire regardless of input
+          // order — the merged "between" display reads correctly either
+          // way, but ordered wire values are easier to reason about.
+          const lo = Number(betweenLo);
+          const hi = Number(betweenHi);
+          const [a, b] = lo <= hi ? [betweenLo, betweenHi] : [betweenHi, betweenLo];
+          onAdd([
+            { table, column, op: "gte", value: a },
+            { table, column, op: "lte", value: b },
+          ]);
+          return;
+        }
+        onAdd([{ table, column, op: op as Op, value: valueDisabled ? "" : value }]);
       }}
     >
       <select value={table} onChange={(e) => onTableChange(e.target.value)}>
@@ -291,9 +554,19 @@ function PredicateBuilder({ tableGroups, sampleRows, onCancel, onAdd }: BuilderP
         ))}
       </select>
       <select value={column} onChange={(e) => onColumnChange(e.target.value)}>
-        {tableCols.map((c) => (
-          <option key={c} value={c}>{c}</option>
-        ))}
+        {columnSections.length === 1 && columnSections[0].title === null
+          ? // Flat layout — no optgroups so a one-table partners-frame
+            // filter doesn't get a single anonymous-group wrapper.
+            columnSections[0].columns.map((c) => (
+              <option key={c} value={c}>{c}</option>
+            ))
+          : columnSections.map((s) => (
+              <optgroup key={s.title ?? "_flat"} label={s.title ?? ""}>
+                {s.columns.map((c) => (
+                  <option key={c} value={c}>{c}</option>
+                ))}
+              </optgroup>
+            ))}
       </select>
       {isBoolean ? (
         // Boolean: a single 4-option select replaces the op+value pair. Reads
@@ -305,21 +578,45 @@ function PredicateBuilder({ tableGroups, sampleRows, onCancel, onAdd }: BuilderP
         </select>
       ) : (
         <>
-          <select value={op} onChange={(e) => setOp(e.target.value as Op)}>
+          <select value={op} onChange={(e) => setOp(e.target.value as BuilderOp)}>
             {allowedOps.map((o) => (
-              <option key={o} value={o}>{o}</option>
+              <option key={o} value={o}>{OP_DROPDOWN_LABEL[o]}</option>
             ))}
           </select>
-          <input
-            type={columnKind === "numeric" && op !== "in" && op !== "notin" ? "number" : "text"}
-            value={value}
-            onChange={(e) => setValue(e.target.value)}
-            disabled={valueDisabled}
-            placeholder={op === "in" || op === "notin" ? "a|b|c" : "value"}
-            size={10}
-            // Numeric inputs accept any precision; don't force step.
-            step={columnKind === "numeric" && op !== "in" && op !== "notin" ? "any" : undefined}
-          />
+          {isBetween ? (
+            <span className="cell-filter-between">
+              <input
+                type="number"
+                step="any"
+                className="cell-filter-between-input"
+                value={betweenLo}
+                onChange={(e) => setBetweenLo(e.target.value)}
+                placeholder="low"
+                aria-label="lower bound"
+              />
+              <span className="cell-filter-between-sep">and</span>
+              <input
+                type="number"
+                step="any"
+                className="cell-filter-between-input"
+                value={betweenHi}
+                onChange={(e) => setBetweenHi(e.target.value)}
+                placeholder="high"
+                aria-label="upper bound"
+              />
+            </span>
+          ) : (
+            <input
+              type={isNumeric && op !== "in" && op !== "notin" ? "number" : "text"}
+              value={value}
+              onChange={(e) => setValue(e.target.value)}
+              disabled={valueDisabled}
+              placeholder={op === "in" || op === "notin" ? "a|b|c" : "value"}
+              size={10}
+              // Numeric inputs accept any precision; don't force step.
+              step={isNumeric && op !== "in" && op !== "notin" ? "any" : undefined}
+            />
+          )}
         </>
       )}
       <button type="submit" disabled={!canSubmit}>add</button>

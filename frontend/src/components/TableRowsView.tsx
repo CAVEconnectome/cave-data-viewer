@@ -14,12 +14,13 @@ import {
 } from "@tanstack/react-table";
 import {
   useDatastackInfo,
-  useMakeSegmentsLinkMutation,
   useTableRows,
   useTableUniqueValues,
   useTables,
 } from "../api/queries";
 import { migrateStorageKey } from "../hooks/storageMigration";
+import { useCrossNavHref } from "../hooks/useCrossNavHref";
+import { useNglLink } from "../hooks/useNglLink";
 import { parseMatVersion, useUrlParam } from "../hooks/useUrlState";
 import {
   CopyableId,
@@ -436,29 +437,38 @@ export function TableRowsView() {
     return options;
   }, [columnNames, columnKinds, rows, uniqueValues.data]);
 
+  // Cross-nav builder for the row-action "→" button. Inter-view (table
+  // → neuron) so URL state doesn't carry across — the user's table
+  // filters / pagination / column visibility don't belong on the
+  // destination neuron page.
+  const buildNeuronHref = useCrossNavHref({
+    ds: ds ?? "",
+    matVersion,
+    from: `table:${name ?? ""}`,
+    inheritParams: false,
+  });
   const goToNeuron = useCallback(
     (rid: string) => {
       if (!ds || !name) return;
-      const params = new URLSearchParams({ ds, root: rid });
-      if (mv) params.set("mv", mv);
-      params.set("from", `table:${name}`);
-      navigate(`/neuron?${params}`);
+      navigate(buildNeuronHref(rid));
     },
-    [ds, mv, name, navigate],
+    [ds, name, navigate, buildNeuronHref],
   );
 
-  const makeSegmentsLink = useMakeSegmentsLinkMutation();
+  const ngl = useNglLink();
   const openSegmentsInNGL = useCallback(
-    async (rootIds: string[], position?: [number, number, number]) => {
-      if (!ds || rootIds.length === 0) return;
-      const result = await makeSegmentsLink.mutateAsync({
-        ds, matVersion, rootIds,
+    (rootIds: string[], position?: [number, number, number]) => {
+      if (!ds || rootIds.length === 0) return Promise.resolve(false);
+      return ngl.open({
+        kind: "segments",
+        ds,
+        matVersion,
+        rootIds,
         position,
         voxelResolution: position ? voxelResolution : undefined,
       });
-      window.open(result.url, "_blank");
     },
-    [ds, matVersion, makeSegmentsLink, voxelResolution],
+    [ds, matVersion, ngl, voxelResolution],
   );
 
   // Build the leaf column defs once per bucketing — sort/filter behavior
@@ -712,7 +722,7 @@ export function TableRowsView() {
                   onClick={() =>
                     openSegmentsInNGL(allRootIds, firstRowPosition(rows, positionPrefix) ?? undefined)
                   }
-                  disabled={makeSegmentsLink.isPending}
+                  disabled={ngl.isPending}
                   title={
                     limitHit
                       ? `Open the ${allRootIds.length} segments in this loaded slice — additional matching segments may exist beyond the ${rowLimit.toLocaleString()}-row cap.`
@@ -730,7 +740,7 @@ export function TableRowsView() {
                         firstRowPosition(filteredRows.map((r) => r.original), positionPrefix) ?? undefined,
                       )
                     }
-                    disabled={makeSegmentsLink.isPending}
+                    disabled={ngl.isPending}
                     title={`Open ${filteredRootIds.length} filtered-row segments`}
                   >
                     filtered ({filteredRootIds.length})
@@ -743,7 +753,7 @@ export function TableRowsView() {
                       firstRowPosition(selectedScopeRows, positionPrefix) ?? undefined,
                     )
                   }
-                  disabled={selectedRootIds.length === 0 || makeSegmentsLink.isPending}
+                  disabled={selectedRootIds.length === 0 || ngl.isPending}
                   title={`Open ${selectedRootIds.length} selected-row segments`}
                 >
                   selected ({selectedRootIds.length})
@@ -805,8 +815,8 @@ export function TableRowsView() {
             )}
           </div>
 
-          {makeSegmentsLink.isError && (
-            <p className="error">{(makeSegmentsLink.error as Error).message}</p>
+          {ngl.isError && ngl.error && (
+            <p className="error">{ngl.error.message}</p>
           )}
 
           <div className="partners-scroll">

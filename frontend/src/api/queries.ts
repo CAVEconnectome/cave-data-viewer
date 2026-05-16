@@ -446,10 +446,16 @@ export interface MakeSegmentsLinkArgs {
 }
 
 /**
- * Open Neuroglancer with a flat list of segments pinned. Used by the
- * per-table view, where there's no focal neuron — just a set of root_ids
- * the user is interested in. Distinct mutation from useMakeLinkMutation
- * (focal-neuron + direction shaped) because the API endpoints are different.
+ * Open Neuroglancer with a flat list of segments pinned. Used when
+ * there's no focal neuron — just a set of root_ids the user is
+ * interested in (table-rows view, cell-list lasso, neutral sidebar
+ * link).
+ *
+ * Prefer the unified `useNglLink` (hooks/useNglLink.ts) at call sites
+ * rather than importing this directly — the unified hook aggregates
+ * pending/error state across both template-based and segment-based
+ * NGL flows and centralises the `window.open` step. Direct use is
+ * reserved for code that needs the raw mutation handle.
  */
 export function useMakeSegmentsLinkMutation() {
   return useMutation<LinkResponse, Error, MakeSegmentsLinkArgs>({

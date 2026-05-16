@@ -339,6 +339,158 @@ import logging as _logging
 _root_xlate_logger = _logging.getLogger("cdv.root_translation")
 
 
+def _timestamp_for_mat_version(client, mat_version):
+    """Resolve the chunkedgraph-call timestamp for a request's mat_version.
+
+    Live mode: the request's pinned consistency timestamp. Materialized
+    mode: the version's frozen snapshot timestamp. Shared by singular
+    `suggest_current_root` and batched `suggest_current_roots` so both
+    surfaces apply the same "what is the canonical root at this moment"
+    semantics.
+    """
+    from .datastack_config import version_timestamp
+    from .request_state import current_timestamp
+
+    if is_live(mat_version):
+        return current_timestamp()
+    return version_timestamp(client, mat_version)
+
+
+def suggest_current_roots(
+    client,
+    root_ids,
+    *,
+    mat_version: int | str | None,
+) -> dict[int, int | None]:
+    """Batched chunkedgraph alignment with a fast-path.
+
+    Returns a `{original_root_id: aligned_root_id_or_None}` mapping with
+    one entry per input. ``None`` for an input means the lineage walk
+    couldn't produce a current root at this timestamp; callers in the
+    Cell ID Search flow turn `None` into a per-row "unaligned" status.
+
+    Strategy:
+
+    1. ``client.chunkedgraph.is_latest_roots(root_ids, timestamp=ts)``
+       — fast bool check against the chunkedgraph's current-roots set.
+       In a typical paste from a stable Neuroglancer URL most roots are
+       already current at the request's mat_version; this call settles
+       the common case in a single round-trip without any lineage work.
+    2. For the False subset, run ``suggest_latest_roots`` in a batched
+       call to walk the lineage and produce the aligned current roots.
+
+    Entries where ``aligned == original`` indicate the input was already
+    canonical at this timestamp; entries where ``aligned != original``
+    mean the cell was edited (split/merged) since the input was minted
+    and we surfaced the post-edit id.
+    """
+    int_ids = [int(r) for r in root_ids]
+    if not int_ids:
+        return {}
+    ts = _timestamp_for_mat_version(client, mat_version)
+    if ts is None:
+        _root_xlate_logger.info(
+            "suggest_current_roots(n=%d, mv=%s): no usable timestamp — skipped",
+            len(int_ids), mat_version,
+        )
+        return {r: None for r in int_ids}
+
+    # Fast path: is_latest_roots tells us which inputs are already the
+    # current root at this timestamp, so we can skip the lineage walk
+    # for them entirely. On a chunkedgraph or caveclient that doesn't
+    # support this call we fall back to the old "suggest everything"
+    # path by treating every root as potentially stale.
+    is_latest_list: list[bool]
+    try:
+        with timer("is_latest_roots"):
+            is_latest_raw = client.chunkedgraph.is_latest_roots(
+                int_ids, timestamp=ts
+            )
+        is_latest_list = [bool(v) for v in is_latest_raw]
+        if len(is_latest_list) != len(int_ids):
+            _root_xlate_logger.warning(
+                "suggest_current_roots(n=%d, mv=%s, ts=%s): is_latest_roots "
+                "shape mismatch (got %d), falling back to full suggest",
+                len(int_ids), mat_version, ts, len(is_latest_list),
+            )
+            is_latest_list = [False] * len(int_ids)
+    except Exception as exc:
+        # Older caveclient / chunkedgraph that doesn't have
+        # is_latest_roots, or a transient hiccup. Treat every root as
+        # potentially stale; the suggest call below still produces the
+        # right answer, just without the fast-path.
+        _root_xlate_logger.info(
+            "suggest_current_roots(n=%d, mv=%s, ts=%s): is_latest_roots "
+            "unavailable (%s: %s); using full suggest path",
+            len(int_ids), mat_version, ts, type(exc).__name__, exc,
+        )
+        is_latest_list = [False] * len(int_ids)
+
+    stale_roots = [r for r, latest in zip(int_ids, is_latest_list) if not latest]
+
+    # Step 2 — batched lineage walk for the stale subset only. caveclient's
+    # batched form is a single round-trip; further parallelization
+    # (per-stale-root threading) would mean N HTTP calls in place of one
+    # and is almost always slower. If the chunkedgraph endpoint turns out
+    # to fan out internally per id, we can revisit with a
+    # ThreadPoolExecutor here.
+    suggestions: dict[int, int | None] = {}
+    if stale_roots:
+        try:
+            with timer("suggest_latest_roots"):
+                if len(stale_roots) == 1:
+                    suggested_one = client.chunkedgraph.suggest_latest_roots(
+                        stale_roots[0], timestamp=ts
+                    )
+                    sug_list = [suggested_one]
+                else:
+                    suggested_arr = client.chunkedgraph.suggest_latest_roots(
+                        stale_roots, timestamp=ts
+                    )
+                    sug_list = list(suggested_arr)
+            if len(sug_list) != len(stale_roots):
+                _root_xlate_logger.warning(
+                    "suggest_current_roots(n=%d, mv=%s, ts=%s): "
+                    "suggest_latest_roots shape mismatch (got %d for %d stale)",
+                    len(int_ids), mat_version, ts, len(sug_list), len(stale_roots),
+                )
+                suggestions = {r: None for r in stale_roots}
+            else:
+                for orig, sug in zip(stale_roots, sug_list):
+                    if sug is None:
+                        suggestions[orig] = None
+                        continue
+                    try:
+                        suggestions[orig] = int(sug)
+                    except (TypeError, ValueError):
+                        suggestions[orig] = None
+        except Exception as exc:
+            _root_xlate_logger.warning(
+                "suggest_current_roots(n=%d, mv=%s, ts=%s): suggest_latest_roots "
+                "exception %s: %s",
+                len(int_ids), mat_version, ts, type(exc).__name__, exc,
+            )
+            suggestions = {r: None for r in stale_roots}
+
+    out: dict[int, int | None] = {}
+    for orig, latest in zip(int_ids, is_latest_list):
+        if latest:
+            # Already current at this timestamp — no lineage walk needed.
+            out[orig] = orig
+        else:
+            out[orig] = suggestions.get(orig)
+
+    _root_xlate_logger.info(
+        "suggest_current_roots(n=%d, mv=%s, ts=%s): %d already current, "
+        "%d realigned, %d unaligned",
+        len(int_ids), mat_version, ts,
+        sum(1 for k, v in out.items() if v == k),
+        sum(1 for k, v in out.items() if v is not None and v != k),
+        sum(1 for v in out.values() if v is None),
+    )
+    return out
+
+
 def suggest_current_root(
     client,
     root_id: int,
@@ -348,60 +500,22 @@ def suggest_current_root(
     """Ask the chunkedgraph what root_id `root_id` maps to at the
     request's "current" timestamp.
 
-    Timestamp resolution:
-      - Live mode: the request's pinned consistency timestamp
-        (`current_timestamp()`), so the suggestion shares the same point
-        in time as every other CAVE call in this request.
-      - Materialized mode: the version's frozen timestamp, derived from
-        `client.materialize.get_versions_metadata()` via
-        `services.datastack_config.version_timestamp`. The suggested
-        root is what was canonical at that materialization.
+    Thin wrapper over `suggest_current_roots` preserved for the
+    `/connectivity` stale-root recovery path
+    (`endpoints/connectivity.py`). The batched form is the primary
+    implementation; the singular form delegates so both surfaces share
+    timestamp resolution, error handling, and logging.
 
     Returns:
-      - A new int root_id when the chunkedgraph thinks the input has
+      - A new int root_id when the chunkedgraph believes the input has
         been split/merged into something else, or
-      - The same `root_id` when nothing changed (caller treats this as
-        no-op), or
+      - The same `root_id` when nothing changed, or
       - `None` when the chunkedgraph call fails or no timestamp can be
-        derived (caller skips the translation).
+        derived.
     """
-    from .datastack_config import version_timestamp
-    from .request_state import current_timestamp
-
-    if is_live(mat_version):
-        ts = current_timestamp()
-    else:
-        ts = version_timestamp(client, mat_version)
-    if ts is None:
-        _root_xlate_logger.info(
-            "suggest_current_root(%s, mv=%s): no usable timestamp — skipped",
-            root_id, mat_version,
-        )
-        return None
-    try:
-        with timer("suggest_latest_roots"):
-            # Method name is plural in caveclient (`suggest_latest_roots`)
-            # even though we pass a single root and get a single root back.
-            # An earlier attempt called the singular spelling, which
-            # silently AttributeError'd through the broad except below
-            # and degraded the whole feature to a no-op for weeks.
-            suggested = client.chunkedgraph.suggest_latest_roots(int(root_id), timestamp=ts)
-    except Exception as exc:
-        # Chunkedgraph hiccup, or root_id unknown — caller falls back to
-        # serving an empty bundle on the original root, which is safer
-        # than failing the whole request.
-        _root_xlate_logger.warning(
-            "suggest_current_root(%s, mv=%s, ts=%s): exception %s: %s",
-            root_id, mat_version, ts, type(exc).__name__, exc,
-        )
-        return None
-    _root_xlate_logger.info(
-        "suggest_current_root(%s, mv=%s, ts=%s) -> %r (type=%s)",
-        root_id, mat_version, ts, suggested, type(suggested).__name__,
-    )
-    if suggested is None:
-        return None
-    return int(suggested)
+    return suggest_current_roots(
+        client, [int(root_id)], mat_version=mat_version
+    ).get(int(root_id))
 
 
 def _partner_soma_positions(

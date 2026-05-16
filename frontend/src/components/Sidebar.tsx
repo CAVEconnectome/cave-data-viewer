@@ -3,11 +3,11 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   useDatastackInfo,
   useDatastacks,
-  useMakeSegmentsLinkMutation,
   useTours,
   useVersions,
 } from "../api/queries";
 import type { Recipe } from "../api/types";
+import { useNglLink } from "../hooks/useNglLink";
 import { parseMatVersion, useSetUrlParams, useSwitchDatastack, useUrlParam } from "../hooks/useUrlState";
 import type { ViewFamily } from "../hooks/useViewSnapshot";
 import { applyTourConfigToParams, buildRecipeOpenParams } from "../tours/urlMint";
@@ -186,6 +186,13 @@ export function Sidebar({ navigateToView, collapsed, onToggleCollapsed }: Sideba
             >
               Table browser
             </button>
+            <button
+              onClick={() => navigateToView("explore")}
+              disabled={!ds}
+              title="Resumes your last feature-explorer view if you've been here before"
+            >
+              Feature Explorer
+            </button>
           </nav>
           {ds && <ShareMenu ds={ds} />}
           {ds && <SidebarResetView ds={ds} />}
@@ -215,29 +222,21 @@ interface NeutralNeuroglancerLinkProps {
  */
 function NeutralNeuroglancerLink({ ds, mv }: NeutralNeuroglancerLinkProps) {
   const matVersion = parseMatVersion(mv);
-  const makeLink = useMakeSegmentsLinkMutation();
-  const open = async () => {
-    try {
-      const result = await makeLink.mutateAsync({ ds, matVersion, rootIds: [] });
-      window.open(result.url, "_blank");
-    } catch {
-      // Error message renders below; nothing to do here.
-    }
-  };
+  const ngl = useNglLink();
   return (
     <p className="ngl-link-row">
       <button
         type="button"
         className="link-button"
-        onClick={open}
-        disabled={makeLink.isPending}
+        onClick={() =>
+          ngl.open({ kind: "segments", ds, matVersion, rootIds: [] })
+        }
+        disabled={ngl.isPending}
       >
-        {makeLink.isPending ? "opening…" : "Open in Neuroglancer ↗"}
+        {ngl.isPending ? "opening…" : "Open in Neuroglancer ↗"}
       </button>
-      {makeLink.isError && (
-        <span className="error">
-          {(makeLink.error as Error).message}
-        </span>
+      {ngl.isError && ngl.error && (
+        <span className="error">{ngl.error.message}</span>
       )}
     </p>
   );

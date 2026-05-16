@@ -1,5 +1,13 @@
-import { useMemo } from "react";
-import type { EmbeddingScatterResponse } from "../../api/types";
+import { useMemo, useState } from "react";
+import { useEmbeddingColumn } from "../../api/embeddings";
+import { useUrlParam } from "../../hooks/useUrlState";
+import type {
+  ColumnGroup,
+  EmbeddingColumnResponse,
+  EmbeddingScatterResponse,
+  FeatureTableListItem,
+} from "../../api/types";
+import { ColumnPicker } from "./ColumnPicker";
 
 interface Props {
   /** Universe scatter response — provides `cell_ids` and the bound
@@ -9,6 +17,22 @@ interface Props {
   /** The highlight set — typically (filter ∩ lasso). Null when nothing
    *  narrows the universe; bars then show universe counts only. */
   highlightedCellIds?: Set<string> | null;
+  /** Datastack id — required so `useEmbeddingColumn` can route
+   *  manual-histogram requests. */
+  ds: string | null;
+  /** Currently-bound feature table descriptor. Used for the column
+   *  picker's category structure + for routing column requests. */
+  featureTable: FeatureTableListItem | null;
+  /** Column_groups from the /cells response. Lets the column picker
+   *  surface attached decoration tables alongside parquet columns. */
+  cellsColumnGroups?: ColumnGroup[];
+  /** Active mat_version (parsed). Decoration / nucleus columns need
+   *  it; pure-parquet columns ignore it. */
+  matVersion: number | "live" | null;
+  /** Decoration tables currently attached. Manual plots that
+   *  reference a decoration column thread these through so the
+   *  server doesn't need to re-attach them per request. */
+  decorationTables: string[];
 }
 
 interface CategoryRow {
@@ -18,80 +42,89 @@ interface CategoryRow {
   highlightCount: number;
 }
 
+const SUMMARY_PLOTS_KEY = "summary_plots";
+
 /**
  * Summary panel for the explorer's left rail.
  *
- * Renders a contextual readout based on what's *currently bound* to
- * the color channel:
+ * Three sections, top-to-bottom:
  *
- * - **Categorical color** → one bar per category. Bar length scales
- *   to the largest universe count; the highlight portion fills from
- *   the left in the category's color. Lets the user see, at a glance,
- *   "I lassoed mostly L23_PYR cells" or "my filter is biased toward
- *   excitatory neurons."
+ * 1. **Count line** — how many cells are highlighted vs in the universe.
+ * 2. **Channel-driven plots** — automatic histograms / categorical
+ *    breakdowns mirroring whatever the color/size channels are bound
+ *    to. Updates as the user binds channels in the rail.
+ * 3. **Manual plots** — user-added per-column histograms. State lives
+ *    in the `?summary_plots=` URL param (comma-separated dotted column
+ *    paths) so a shared link reproduces the rail layout exactly. The
+ *    "+ add plot" button at the bottom opens a category-grouped
+ *    `ColumnPicker` popover with mass-select affordances per category.
  *
- * - **Numeric color** → deferred (histogram overlay is a follow-up).
- *
- * - **Nothing bound** → just the highlight/universe count text. Avoids
- *   an empty panel when there's nothing meaningful to summarize.
- *
- * Sits at the bottom of the left rail because the data it presents
- * mirrors what's bound *in the rail* (the color channel). Reading
- * top-to-bottom: pickers → channels → filter → "here's what's in
- * scope right now."
+ * Each manual plot independently fetches its universe column via
+ * `useEmbeddingColumn`, which caches forever client-side (parquet +
+ * decoration snapshots are immutable at a mat_version). Switching
+ * channels or filters doesn't refetch the underlying values — only the
+ * highlight overlay recomputes.
  */
-export function SummaryPanel({ scatter, highlightedCellIds }: Props) {
+export function SummaryPanel({
+  scatter,
+  highlightedCellIds,
+  ds,
+  featureTable,
+  cellsColumnGroups,
+  matVersion,
+  decorationTables,
+}: Props) {
   const totalCells = scatter?.n_cells ?? 0;
   const highlightSize = highlightedCellIds?.size ?? 0;
 
-  // Compute category counts (universe + highlight). Memoized because
-  // it's O(n) over potentially 100k+ values; the n_cells/highlight
-  // identity captures everything that affects the result.
-  const categories = useMemo<CategoryRow[] | null>(() => {
+  const [summaryPlotsRaw, setSummaryPlotsRaw] = useUrlParam(SUMMARY_PLOTS_KEY);
+  const [picking, setPicking] = useState(false);
+
+  const manualColumns = useMemo<string[]>(() => {
+    if (!summaryPlotsRaw) return [];
+    // Dedup while preserving first-occurrence order — a user pasting a
+    // doubled list in the URL shouldn't see duplicate histograms.
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const c of summaryPlotsRaw.split(",")) {
+      const v = c.trim();
+      if (!v || seen.has(v)) continue;
+      seen.add(v);
+      out.push(v);
+    }
+    return out;
+  }, [summaryPlotsRaw]);
+  const selectedValues = useMemo(() => new Set(manualColumns), [manualColumns]);
+
+  const updateManual = (next: string[]) => {
+    setSummaryPlotsRaw(next.length > 0 ? next.join(",") : null);
+  };
+  const addColumn = (col: string) => {
+    if (manualColumns.includes(col)) return;
+    updateManual([...manualColumns, col]);
+  };
+  const removeColumn = (col: string) => {
+    updateManual(manualColumns.filter((c) => c !== col));
+  };
+
+  // Channel-driven categorical breakdown (same rows as before — colored
+  // bars per category, universe + highlight overlaid).
+  const channelCategories = useMemo<CategoryRow[] | null>(() => {
     const color = scatter?.color;
     if (!color || color.kind !== "categorical") return null;
-    const cm = color.color_map ?? {};
-    const universe = new Map<string, number>();
-    const highlight = new Map<string, number>();
-    const hl = highlightedCellIds;
-    for (let i = 0; i < color.values.length; i++) {
-      const raw = color.values[i];
-      const key = raw === null || raw === undefined ? "(none)" : String(raw);
-      universe.set(key, (universe.get(key) ?? 0) + 1);
-      if (hl && hl.has(scatter!.cell_ids[i])) {
-        highlight.set(key, (highlight.get(key) ?? 0) + 1);
-      }
-    }
-    const out: CategoryRow[] = [];
-    for (const [label, count] of universe.entries()) {
-      // Drop the "(none)" / null slot from the displayed rows when it
-      // would be visually noisy. Keep it when it's a meaningful slice
-      // (>5% of the universe) so the user knows it exists.
-      if (label === "(none)" && count / totalCells < 0.05) continue;
-      out.push({
-        label,
-        hex: cm[label] ?? "#dcdcdc",
-        universeCount: count,
-        highlightCount: highlight.get(label) ?? 0,
-      });
-    }
-    // Sort by universe count desc.
-    out.sort((a, b) => b.universeCount - a.universeCount);
-    return out;
+    return buildCategoryRows(
+      color.values as Array<string | null>,
+      scatter!.cell_ids,
+      color.color_map ?? {},
+      highlightedCellIds,
+      totalCells,
+    );
   }, [scatter, highlightedCellIds, totalCells]);
 
   if (!scatter) return null;
 
-  // Numeric channels for the histogram view: render *every* bound
-  // numeric channel as its own histogram. When the user has both
-  // color (numeric) and size bound, both distributions show — the
-  // panel mirrors what's in the rail. When color is categorical it
-  // gets the stacked-bar treatment above; size still gets its own
-  // histogram below.
-  //
-  // Channel-color convention:
-  //   - numeric color → mid-Viridis teal (matches the scatter colorscale)
-  //   - size → project accent orange (no "color of size" otherwise)
+  // Channel-driven numeric histograms (color + size when bound to
+  // numeric columns).
   const numericChannels: Array<{
     key: string;
     column: string;
@@ -115,10 +148,6 @@ export function SummaryPanel({ scatter, highlightedCellIds }: Props) {
     });
   }
 
-  const maxUniverse = categories
-    ? Math.max(...categories.map((c) => c.universeCount), 1)
-    : 1;
-
   return (
     <div className="summary-panel">
       <div className="explore-picker-label">Summary</div>
@@ -134,16 +163,11 @@ export function SummaryPanel({ scatter, highlightedCellIds }: Props) {
           </>
         )}
       </div>
-      {categories && categories.length > 0 && (
-        <div
-          className="summary-panel-categories"
-          title={scatter.color?.column}
-        >
-          <div className="summary-panel-cat-title">{bareCol(scatter.color!.column)}</div>
-          {categories.map((cat) => (
-            <SummaryRow key={cat.label} cat={cat} maxUniverse={maxUniverse} />
-          ))}
-        </div>
+      {channelCategories && channelCategories.length > 0 && (
+        <CategoricalBreakdown
+          column={scatter.color!.column}
+          rows={channelCategories}
+        />
       )}
       {numericChannels.map((ch) => (
         <NumericHistogram
@@ -155,11 +179,237 @@ export function SummaryPanel({ scatter, highlightedCellIds }: Props) {
           color={ch.color}
         />
       ))}
+      {manualColumns.length > 0 && (
+        <div className="summary-panel-divider" />
+      )}
+      {manualColumns.map((col) => (
+        <ManualPlot
+          key={col}
+          column={col}
+          ds={ds}
+          featureTableId={featureTable?.id ?? null}
+          matVersion={matVersion}
+          decorationTables={decorationTables}
+          highlightedCellIds={highlightedCellIds ?? null}
+          onRemove={() => removeColumn(col)}
+        />
+      ))}
+      <div className="summary-panel-add-plot">
+        <button
+          type="button"
+          className="summary-panel-add-button"
+          onClick={() => setPicking((p) => !p)}
+          disabled={!featureTable}
+          title={
+            featureTable
+              ? "Add a histogram for any column"
+              : "Pick a feature table first"
+          }
+        >
+          + add plot
+        </button>
+        {picking && featureTable && (
+          <div className="summary-panel-picker-popover">
+            <ColumnPicker
+              featureTable={featureTable}
+              cellsColumnGroups={cellsColumnGroups}
+              selectedValues={selectedValues}
+              onAdd={(v) => addColumn(v)}
+              onRemove={(v) => removeColumn(v)}
+              onClose={() => setPicking(false)}
+            />
+          </div>
+        )}
+      </div>
     </div>
   );
 }
 
-// --- numeric histogram view -------------------------------------------------
+// --- manual-plot wrapper ----------------------------------------------------
+
+interface ManualPlotProps {
+  column: string;
+  ds: string | null;
+  featureTableId: string | null;
+  matVersion: number | "live" | null;
+  decorationTables: string[];
+  highlightedCellIds: Set<string> | null;
+  onRemove: () => void;
+}
+
+/**
+ * One user-added histogram. Fetches the column's universe values
+ * independently of the scatter (its own TanStack Query cache entry)
+ * and dispatches to the numeric or categorical renderer.
+ *
+ * Decoration columns and synthetic nucleus columns go through the
+ * resolver, so they only enable when `matVersion` is a real
+ * materialization. A live-mode user sees a "manual plot needs a
+ * materialized version" placeholder rather than a broken request.
+ */
+function ManualPlot({
+  column,
+  ds,
+  featureTableId,
+  matVersion,
+  decorationTables,
+  highlightedCellIds,
+  onRemove,
+}: ManualPlotProps) {
+  // Decoration / nucleus columns require a materialized version. Pure-
+  // parquet columns (prefixed with the feature_table id) can fetch in
+  // either mode — the universe enrichment is the only path that hits
+  // CAVE.
+  const isParquet =
+    !!featureTableId && column.startsWith(`${featureTableId}.`);
+  const liveBlocked = !isParquet && matVersion === "live";
+
+  const q = useEmbeddingColumn(
+    ds && featureTableId && !liveBlocked
+      ? {
+          ds,
+          featureTableId,
+          column,
+          decorationTables,
+          matVersion,
+        }
+      : null,
+  );
+
+  return (
+    <div className="summary-manual-plot">
+      <button
+        type="button"
+        className="summary-manual-plot-remove"
+        title="Remove this plot"
+        onClick={onRemove}
+      >
+        ×
+      </button>
+      {liveBlocked ? (
+        <div className="summary-manual-plot-placeholder" title={column}>
+          <div className="summary-panel-cat-title">{bareCol(column)}</div>
+          <div className="summary-manual-plot-msg">
+            requires a materialized version
+          </div>
+        </div>
+      ) : q.isLoading ? (
+        <div className="summary-manual-plot-placeholder" title={column}>
+          <div className="summary-panel-cat-title">{bareCol(column)}</div>
+          <div className="summary-manual-plot-msg">loading…</div>
+        </div>
+      ) : q.isError ? (
+        <div className="summary-manual-plot-placeholder" title={column}>
+          <div className="summary-panel-cat-title">{bareCol(column)}</div>
+          <div className="summary-manual-plot-msg error">
+            failed: {String(q.error)}
+          </div>
+        </div>
+      ) : q.data ? (
+        <ManualPlotBody
+          response={q.data}
+          highlightedCellIds={highlightedCellIds}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+function ManualPlotBody({
+  response,
+  highlightedCellIds,
+}: {
+  response: EmbeddingColumnResponse;
+  highlightedCellIds: Set<string> | null;
+}) {
+  if (response.kind === "numeric") {
+    return (
+      <NumericHistogram
+        column={response.column}
+        values={response.values as Array<number | null>}
+        cellIds={response.cell_ids}
+        highlightedCellIds={highlightedCellIds}
+        // Distinct color from the channel-driven plots so the user
+        // can see at a glance "this row came from a manual add."
+        color="#6366f1"
+      />
+    );
+  }
+  // Categorical: project palette via the response's color_map. Build
+  // the same breakdown rows the channel-driven categorical panel uses
+  // so the look is consistent.
+  const rows = buildCategoryRows(
+    response.values as Array<string | null>,
+    response.cell_ids,
+    response.color_map ?? {},
+    highlightedCellIds,
+    response.n_cells,
+  );
+  if (!rows || rows.length === 0) {
+    return (
+      <div className="summary-manual-plot-placeholder" title={response.column}>
+        <div className="summary-panel-cat-title">{bareCol(response.column)}</div>
+        <div className="summary-manual-plot-msg">no values</div>
+      </div>
+    );
+  }
+  return <CategoricalBreakdown column={response.column} rows={rows} />;
+}
+
+// --- shared rendering primitives --------------------------------------------
+
+function CategoricalBreakdown({
+  column,
+  rows,
+}: {
+  column: string;
+  rows: CategoryRow[];
+}) {
+  const maxUniverse = Math.max(...rows.map((c) => c.universeCount), 1);
+  return (
+    <div className="summary-panel-categories" title={column}>
+      <div className="summary-panel-cat-title">{bareCol(column)}</div>
+      {rows.map((cat) => (
+        <SummaryRow key={cat.label} cat={cat} maxUniverse={maxUniverse} />
+      ))}
+    </div>
+  );
+}
+
+function buildCategoryRows(
+  values: Array<string | null>,
+  cellIds: string[],
+  colorMap: Record<string, string>,
+  highlight: Set<string> | null | undefined,
+  totalCells: number,
+): CategoryRow[] {
+  const universe = new Map<string, number>();
+  const highlightCounts = new Map<string, number>();
+  for (let i = 0; i < values.length; i++) {
+    const raw = values[i];
+    const key = raw === null || raw === undefined ? "(none)" : String(raw);
+    universe.set(key, (universe.get(key) ?? 0) + 1);
+    if (highlight && highlight.has(cellIds[i])) {
+      highlightCounts.set(key, (highlightCounts.get(key) ?? 0) + 1);
+    }
+  }
+  const out: CategoryRow[] = [];
+  for (const [label, count] of universe.entries()) {
+    // Drop the "(none)" / null slot from the displayed rows when it
+    // would be visually noisy. Keep it when it's a meaningful slice
+    // (>5% of the universe) so the user knows it exists.
+    if (label === "(none)" && totalCells > 0 && count / totalCells < 0.05)
+      continue;
+    out.push({
+      label,
+      hex: colorMap[label] ?? "#dcdcdc",
+      universeCount: count,
+      highlightCount: highlightCounts.get(label) ?? 0,
+    });
+  }
+  out.sort((a, b) => b.universeCount - a.universeCount);
+  return out;
+}
 
 interface NumericHistogramProps {
   column: string;
@@ -186,11 +436,14 @@ function NumericHistogram({
   if (!bins || bins.universeDensity.length === 0) return null;
 
   const width = 240;
-  const height = 60;
+  // Reduced from the previous 60→46 — the axis-tick row is now rendered
+  // in HTML below the SVG (preserveAspectRatio="none" stretched the
+  // SVG <text> glyphs horizontally at wider rail widths). The visual
+  // height the user sees is still ~60px after the HTML row underneath.
+  const height = 46;
   const padLeft = 0;
-  const padBottom = 14;
   const innerW = width - padLeft;
-  const innerH = height - padBottom;
+  const innerH = height;
   // Both distributions are area-normalized to sum 1; the y-axis is
   // shared and scales to the larger of the two distributions' max
   // bin. Result: subset bars and universe bars are visually
@@ -245,27 +498,14 @@ function NumericHistogram({
             </g>
           );
         })}
-        {/* Axis ticks: min + max raw values. */}
-        <text
-          x={padLeft}
-          y={height - 2}
-          fontSize="9"
-          fill="rgba(0,0,0,0.55)"
-          fontFamily="ui-monospace, monospace"
-        >
-          {formatTick(bins.binMin)}
-        </text>
-        <text
-          x={width}
-          y={height - 2}
-          fontSize="9"
-          fill="rgba(0,0,0,0.55)"
-          textAnchor="end"
-          fontFamily="ui-monospace, monospace"
-        >
-          {formatTick(bins.binMax)}
-        </text>
       </svg>
+      {/* Tick row in HTML so the rail's resize handle doesn't stretch
+          the text glyphs horizontally (which is what the SVG-internal
+          tick text suffered from with preserveAspectRatio="none"). */}
+      <div className="summary-histogram-ticks">
+        <span>{formatTick(bins.binMin)}</span>
+        <span>{formatTick(bins.binMax)}</span>
+      </div>
     </div>
   );
 }

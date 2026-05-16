@@ -903,9 +903,18 @@ h1, h2, h3, h4, h5, h6 {
   margin-bottom: 4px;
 }
 .cell-filter-add {
+  /* Flex-center the glyph rather than rely on text metrics — most
+     fonts render "+" with its optical center slightly below the
+     line-box center, which made the button look like the glyph was
+     sagging. Inline-flex with both-axis centering puts the glyph
+     dead-center regardless of font. */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   font-size: 14px;
   line-height: 1;
   width: 22px; height: 22px;
+  padding: 0;
   border: 1px solid var(--line);
   border-radius: var(--r-md);
   background: var(--bg);
@@ -926,6 +935,11 @@ h1, h2, h3, h4, h5, h6 {
   border-radius: var(--r-md);
   font-family: var(--font-mono);
   font-size: 11px;
+  /* Keep the chip inside the container regardless of predicate length.
+     Without these, a long `table.column op value` overflowed the panel
+     and pushed the × delete past the right edge, making it unreachable. */
+  max-width: 100%;
+  min-width: 0;
 }
 /* Disabled state: muted text + dashed border so the chip is clearly toggled
    off but still visually present (the whole point — keep it around so the
@@ -945,16 +959,40 @@ h1, h2, h3, h4, h5, h6 {
   color: inherit;
   padding: 2px 4px;
   text-align: left;
+  /* Allow the predicate text to wrap inside the chip rather than push
+     siblings (×) past the container edge. word-break (not just
+     overflow-wrap) handles dotted identifiers like long.column.names
+     that don't have spaces to break on. */
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 .cell-filter-chip .chip-text:hover { color: var(--accent); }
 .cell-filter-chip > button:last-child {
+  /* Fixed-size flex box so the × glyph centers cleanly regardless of
+     font (same fix as the `+` add button above — text metrics put the
+     × below the box center otherwise). align-self: flex-start keeps
+     the × at the top of the chip when the predicate text wraps to
+     multiple lines, so the click target stays at a predictable spot. */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
   border: none;
   background: transparent;
   cursor: pointer;
   font-size: 14px;
   line-height: 1;
-  padding: 0 2px;
+  padding: 0;
   color: var(--muted);
+  flex-shrink: 0;
+  align-self: flex-start;
+  /* Nudge the × upward a touch so it sits flush with the first line of
+     wrapped text, not below it. Margin (not padding) keeps the click
+     target predictable. */
+  margin-top: 1px;
 }
 .cell-filter-chip > button:last-child:hover { color: var(--error); }
 .cell-filter-builder {
@@ -965,19 +1003,157 @@ h1, h2, h3, h4, h5, h6 {
 }
 .cell-filter-builder select,
 .cell-filter-builder input {
-  font-size: 11px;
+  /* Match the channel-select look (.explore-channel-select) so the
+     filter builder and the channel pickers read as one design system —
+     same font size, same panel background, same border, same radius. */
+  font-size: 12px;
   padding: 2px 4px;
-  border: 1px solid var(--line);
-  border-radius: var(--r-md);
-  background: var(--bg);
+  background: var(--panel, #fff);
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 4px;
+  /* Let long column / table names truncate inside the select rather
+     than stretch the row past the panel edge. */
+  max-width: 100%;
+  min-width: 0;
 }
 .cell-filter-builder button {
-  font-size: 11px;
+  font-size: 12px;
   padding: 2px 8px;
-  border: 1px solid var(--line);
-  border-radius: var(--r-md);
-  background: var(--bg);
+  background: var(--panel, #fff);
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 4px;
   cursor: pointer;
+}
+.cell-filter-builder button[type="submit"]:not(:disabled) {
+  background: rgba(99, 102, 241, 0.1);
+  border-color: #6366f1;
+  color: #4f46e5;
+}
+.cell-filter-builder button[type="submit"]:not(:disabled):hover {
+  background: rgba(99, 102, 241, 0.18);
+}
+
+/* Between-mode value inputs sit side-by-side with an "and" between them.
+   Matches the chip rendering ("X between lo and hi") so the builder and
+   the result read the same. */
+.cell-filter-between {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.cell-filter-between-input {
+  font-size: 12px;
+  padding: 2px 4px;
+  background: var(--panel, #fff);
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 4px;
+  width: 64px;
+  min-width: 0;
+}
+.cell-filter-between-sep {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+/* Path styling — table/column path with a soft separator so the
+   hierarchy reads at a glance. The slash is dimmed so the eye lands on
+   the column name (the thing the predicate is about). */
+.cell-filter-colpath {
+  white-space: nowrap;
+}
+.cell-filter-colpath-table {
+  color: var(--muted);
+}
+.cell-filter-colpath-sep {
+  color: var(--muted);
+  opacity: 0.7;
+  margin: 0 1px;
+}
+.cell-filter-colpath-col {
+  color: var(--text, var(--fg));
+  font-weight: 500;
+}
+
+/* ---- Cell filter menu (popover wrapper) ----------------------------- */
+.cell-filter-menu {
+  position: relative;
+  display: inline-block;
+}
+.cell-filter-menu-trigger {
+  font-size: 11px;
+  padding: 2px 10px;
+  background: var(--surface, #fff);
+  color: var(--muted, #6b7280);
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+  letter-spacing: 0.02em;
+}
+.cell-filter-menu-trigger:hover {
+  color: var(--text, #111);
+  border-color: var(--text, #111);
+}
+/* When at least one predicate is active, the trigger reads as "primed"
+   so the user can see at a glance that the table is filtered without
+   having to open the popover. */
+.cell-filter-menu-trigger.has-filter {
+  background: rgba(245, 158, 11, 0.1);
+  border-color: #f59e0b;
+  color: #92400e;
+  font-weight: 500;
+}
+.cell-filter-menu-trigger.has-filter:hover {
+  background: rgba(245, 158, 11, 0.18);
+  border-color: #f59e0b;
+}
+.cell-filter-menu-popover {
+  position: absolute;
+  /* Extend rightward from the trigger by default. Both mount sites
+     (the explorer drawer header and the NeuronView rail header) have
+     more room on the right of the filter button than on the left,
+     where the left rail / analytics rail otherwise overlap the
+     popover.
+     z-index sits high enough to overpaint every neighboring panel
+     (the rail, the drawer body, plot panels) so the popover is
+     guaranteed visible no matter where the menu mounts. */
+  left: 0;
+  min-width: 280px;
+  max-width: 380px;
+  background: var(--panel, #fff);
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+  padding: 4px;
+  z-index: 1000;
+}
+/* Default (downward) placement — sits just below the trigger. Used by
+   the NeuronView rail header where there's plenty of room beneath. */
+.cell-filter-menu-popover-down {
+  top: calc(100% + 4px);
+}
+/* Upward placement — explorer drawer header sits at the bottom of the
+   viewport (the table is rendered as a fold-out drawer); opening
+   downward would clip the popover off-screen or hide it behind the
+   table when the drawer is open. */
+.cell-filter-menu-popover-up {
+  bottom: calc(100% + 4px);
+}
+/* Drop the inner panel's outer border/padding/margin when it lives in
+   the popover — the popover already provides those. */
+.cell-filter-menu-popover .cell-filter-panel {
+  border: none;
+  margin: 0;
+  padding: 4px;
+  background: transparent;
+}
+/* When the menu sits in the explorer drawer header, the surrounding
+   button (drawer handle) is a flex row; align our wrapper to it. */
+.explore-pill-wrap {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 6px;
 }
 
 /* In-panel header: title left, column picker right. Used by column-bound
@@ -1247,6 +1423,8 @@ h1, h2, h3, h4, h5, h6 {
 .rail-header {
   display: flex;
   justify-content: flex-end;
+  align-items: center;
+  gap: 6px;
   margin-bottom: 4px;
 }
 .rail-clear-brushes {
@@ -1462,6 +1640,7 @@ h1, h2, h3, h4, h5, h6 {
   color: var(--fg);
   border-color: var(--line);
 }
+
 
 .actions .scope {
   font-size: 12px;
@@ -2834,6 +3013,197 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .explore-knn-actions button:disabled { opacity: 0.55; cursor: not-allowed; }
 .explore-knn-error { font-size: 11px; color: #b00020; padding: 4px 0; }
 
+/* CellIdSearch — small rail trigger that opens a modal containing
+   the actual search UI. The trigger is a compact one-line button so
+   it doesn't eat the rail real estate of an inline panel; the modal
+   has room for the multi-line input + status detail without crowding
+   the always-on controls (pickers, channel binders) in the rail. */
+.cell-id-search-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  font-size: 12px;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  align-self: flex-start;
+}
+.cell-id-search-trigger:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.cell-id-search-trigger > span:first-child {
+  font-size: 14px;
+  line-height: 1;
+}
+
+.cell-id-search-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 18, 25, 0.55);
+  z-index: 1000;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  /* Vertical offset so the modal sits in the upper third of the
+     viewport rather than dead center — keeps the scatter visible
+     behind/below it so the user can see the highlight light up as
+     soon as the search resolves. */
+  padding: 8vh 24px 24px;
+}
+.cell-id-search-modal {
+  position: relative;
+  width: min(520px, 92vw);
+  max-height: 80vh;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.25);
+  padding: 14px 16px 16px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.cell-id-search-modal-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+.cell-id-search-modal-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+.cell-id-search-modal-close {
+  width: 26px;
+  height: 26px;
+  font-size: 14px;
+  line-height: 1;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--muted);
+  border-radius: var(--r-md);
+  cursor: pointer;
+}
+.cell-id-search-modal-close:hover {
+  color: var(--error);
+  border-color: var(--accent);
+}
+.cell-id-search-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.cell-id-search-mode { display: flex; gap: 4px; }
+.cell-id-search-mode-btn {
+  flex: 1;
+  padding: 4px 0;
+  font-size: 12px;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+}
+.cell-id-search-mode-btn.active {
+  background: var(--accent);
+  color: white;
+  border-color: var(--accent);
+}
+.cell-id-search-input {
+  font: inherit;
+  font-size: 12px;
+  font-family:
+    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  padding: 6px 8px;
+  resize: vertical;
+  min-height: 44px;
+  line-height: 1.35;
+}
+.cell-id-search-input::placeholder {
+  color: var(--muted);
+  font-family: inherit;
+}
+.cell-id-search-actions { display: flex; justify-content: flex-end; }
+.cell-id-search-submit {
+  padding: 5px 14px;
+  font-size: 13px;
+  line-height: 1;
+  border: 1px solid var(--accent);
+  border-radius: var(--r-sm);
+  background: var(--bg);
+  color: var(--accent);
+  cursor: pointer;
+}
+.cell-id-search-submit:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.cell-id-search-error {
+  font-size: 11px;
+  color: #b00020;
+  padding: 4px 0;
+  word-break: break-word;
+}
+.cell-id-search-status {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-top: 2px;
+}
+.cell-id-search-aligned-note,
+.cell-id-search-misses-note {
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.4;
+}
+.cell-id-search-detail {
+  font-size: 11px;
+  color: var(--muted);
+}
+.cell-id-search-detail summary {
+  cursor: pointer;
+  padding: 2px 0;
+  user-select: none;
+}
+.cell-id-search-detail summary:hover {
+  color: var(--fg);
+}
+.cell-id-search-detail-list {
+  list-style: none;
+  padding: 4px 0 4px 12px;
+  margin: 0;
+  max-height: 160px;
+  overflow-y: auto;
+  font-family:
+    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 11px;
+}
+.cell-id-search-detail-list li {
+  padding: 1px 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: baseline;
+  word-break: break-all;
+}
+.cell-id-search-detail-aligned {
+  color: var(--accent);
+}
+.cell-id-search-detail-cell {
+  color: var(--muted);
+}
+
 /* DecorationPicker */
 .explore-dec { display: flex; flex-direction: column; gap: 4px; }
 .explore-dec-chips {
@@ -2881,11 +3251,44 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
    from the bottom. */
 .explore {
   display: grid;
-  grid-template-columns: 280px 1fr;
-  gap: 12px;
+  /* Three columns: rail, drag handle, center. Width values are injected
+     via inline `style` by FeatureExplorer so the rail is user-resizable;
+     this default is the fallback when JS hasn't applied the inline
+     style yet (very brief, on first paint). */
+  grid-template-columns: 340px 6px 1fr;
+  gap: 6px;
   padding: 12px;
   height: 100%;
   box-sizing: border-box;
+}
+/* Vertical drag handle between rail and scatter. Sits in its own grid
+   column so the gap collapses tightly around it; widens visually on
+   hover + while dragging so the user gets clear feedback even though
+   the click target itself is only 6px wide. */
+.explore-rail-handle {
+  cursor: col-resize;
+  background: transparent;
+  border-radius: 2px;
+  align-self: stretch;
+  position: relative;
+  user-select: none;
+}
+.explore-rail-handle::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 2px;
+  transform: translateX(-50%);
+  background: var(--border, #e5e7eb);
+  border-radius: 1px;
+  transition: background 0.1s ease, width 0.1s ease;
+}
+.explore-rail-handle:hover::before,
+.explore-rail-handle.dragging::before {
+  background: #6366f1;
+  width: 3px;
 }
 .explore-rail {
   display: flex;
@@ -2957,6 +3360,14 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   font-size: 14px;
   width: 14px;
   display: inline-block;
+}
+.explore-drawer-icon {
+  flex-shrink: 0;
+  color: var(--muted, #6b7280);
+  transition: color 0.1s ease;
+}
+.explore-drawer-handle:hover .explore-drawer-icon {
+  color: var(--text, #111);
 }
 .explore-drawer-count strong {
   color: var(--text, #111);
@@ -3136,6 +3547,32 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   background: transparent;
   height: 4px;
 }
+/* Center thumb — distinct from the orange min/max thumbs so the user
+   reads it as a different kind of control. Slim dark rectangle that
+   visually echoes the legend's center tick. Slightly taller than the
+   track so it pokes above and below for grabbability. */
+.size-range-thumb-center::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 18px;
+  width: 6px;
+  border-radius: 2px;
+  background: #111827;
+  border: 1px solid rgba(255, 255, 255, 0.9);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.15);
+  cursor: ew-resize;
+  pointer-events: auto;
+}
+.size-range-thumb-center::-moz-range-thumb {
+  height: 18px;
+  width: 6px;
+  border-radius: 2px;
+  background: #111827;
+  border: 1px solid rgba(255, 255, 255, 0.9);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.15);
+  cursor: ew-resize;
+  pointer-events: auto;
+}
 .size-range-slider-readout {
   display: flex;
   justify-content: space-between;
@@ -3198,17 +3635,208 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   font-style: italic;
   font-size: 10px;
 }
-.color-legend-gradient {
+.color-legend-gradient-wrap {
+  position: relative;
   width: 180px;
+}
+.color-legend-gradient {
+  width: 100%;
   height: 10px;
   border-radius: 2px;
   border: 1px solid rgba(0, 0, 0, 0.08);
 }
+.color-legend-center-tick {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 2px;
+  margin-left: -1px;
+  background: rgba(0, 0, 0, 0.7);
+  border-radius: 1px;
+  pointer-events: none;
+}
 .color-legend-numeric-ticks {
+  position: relative;
   display: flex;
   justify-content: space-between;
   font-size: 10px;
   color: var(--muted, #6b7280);
+}
+.color-legend-numeric-center {
+  position: absolute;
+  top: 0;
+  transform: translateX(-50%);
+  color: var(--text, #111);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- Center-reset pill (in the RangeSlider readout) ------------------ */
+.size-range-slider-reset {
+  font-size: 10px;
+  padding: 1px 6px;
+  background: transparent;
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 10px;
+  color: var(--muted, #6b7280);
+  cursor: pointer;
+  font-family: var(--font-sans, system-ui, sans-serif);
+  letter-spacing: 0.02em;
+}
+.size-range-slider-reset:hover {
+  color: var(--text, #111);
+  border-color: var(--text, #111);
+}
+
+/* ---- Colormap picker ------------------------------------------------- */
+.cmap-picker {
+  position: relative;
+  display: block;
+  min-width: 0;
+}
+.cmap-picker-trigger {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 2px 6px 2px 4px;
+  background: var(--panel, #fff);
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 4px;
+  font-size: 12px;
+  color: var(--text, #111);
+  cursor: pointer;
+  text-align: left;
+}
+.cmap-picker-trigger:hover {
+  border-color: var(--text, #111);
+}
+.cmap-picker-swatch {
+  display: inline-block;
+  width: 36px;
+  height: 12px;
+  border-radius: 2px;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  flex-shrink: 0;
+}
+.cmap-picker-swatch.tall {
+  width: 100%;
+  height: 18px;
+}
+.cmap-picker-trigger-label {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cmap-picker-chev {
+  color: var(--muted, #6b7280);
+  font-size: 10px;
+}
+.cmap-picker-popover {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  min-width: 220px;
+  max-height: 320px;
+  background: var(--panel, #fff);
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  z-index: 10;
+}
+.cmap-picker-section-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted, #6b7280);
+  padding: 0 2px;
+}
+.cmap-picker-featured {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+}
+.cmap-picker-featured-item {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 4px;
+  background: transparent;
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 4px;
+  cursor: pointer;
+  text-align: left;
+}
+.cmap-picker-featured-item:hover {
+  border-color: var(--text, #111);
+}
+.cmap-picker-featured-item.selected {
+  border-color: #f59e0b;
+  background: rgba(245, 158, 11, 0.06);
+}
+.cmap-picker-featured-label {
+  font-size: 11px;
+  color: var(--text, #111);
+}
+.cmap-picker-search {
+  font-size: 12px;
+  padding: 4px 6px;
+  background: var(--panel, #fff);
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 4px;
+  color: var(--text, #111);
+}
+.cmap-picker-search:focus {
+  outline: none;
+  border-color: var(--text, #111);
+}
+.cmap-picker-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.cmap-picker-row {
+  display: grid;
+  grid-template-columns: 48px 1fr auto;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 4px;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 11px;
+}
+.cmap-picker-row:hover {
+  background: rgba(0, 0, 0, 0.04);
+}
+.cmap-picker-row.selected {
+  background: rgba(245, 158, 11, 0.1);
+}
+.cmap-picker-row-label {
+  color: var(--text, #111);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cmap-picker-row-cat {
+  color: var(--muted, #6b7280);
+  font-size: 10px;
+  text-transform: lowercase;
+}
+.cmap-picker-empty {
+  font-size: 11px;
+  color: var(--muted, #6b7280);
+  padding: 6px;
+  text-align: center;
+  font-style: italic;
 }
 
 /* ---- Summary panel (bottom of left rail) ----------------------------- */
@@ -3309,8 +3937,220 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 }
 .summary-histogram-svg {
   width: 100%;
-  height: 60px;
+  height: 46px;
   display: block;
+}
+.summary-histogram-ticks {
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 9px;
+  color: rgba(0, 0, 0, 0.55);
+  /* Tighten the gap between bars and ticks; the bottom of the SVG
+     is the baseline of the lowest bars (no embedded text padding
+     anymore), so the labels can ride close. */
+  margin-top: 1px;
+}
+
+/* ---- Manual-plot section (user-added histograms) --------------------- */
+.summary-panel-divider {
+  height: 1px;
+  background: var(--border, #e5e7eb);
+  margin: 4px 0;
+}
+.summary-manual-plot {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.summary-manual-plot-remove {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(0, 0, 0, 0.05);
+  color: var(--muted, #6b7280);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  padding: 0;
+  z-index: 1;
+}
+.summary-manual-plot-remove:hover {
+  background: rgba(220, 38, 38, 0.12);
+  color: #b91c1c;
+}
+.summary-manual-plot-placeholder {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-height: 60px;
+}
+.summary-manual-plot-msg {
+  font-size: 11px;
+  color: var(--muted, #6b7280);
+  font-style: italic;
+}
+.summary-manual-plot-msg.error {
+  color: #b91c1c;
+  font-style: normal;
+}
+.summary-panel-add-plot {
+  position: relative;
+  margin-top: 4px;
+}
+.summary-panel-add-button {
+  width: 100%;
+  padding: 4px 8px;
+  background: transparent;
+  border: 1px dashed var(--border, #d1d5db);
+  border-radius: 4px;
+  color: var(--muted, #6b7280);
+  font-size: 11px;
+  cursor: pointer;
+}
+.summary-panel-add-button:hover:not(:disabled) {
+  background: rgba(99, 102, 241, 0.06);
+  color: #4f46e5;
+  border-color: #6366f1;
+}
+.summary-panel-add-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.summary-panel-picker-popover {
+  position: absolute;
+  bottom: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 20;
+  background: #fff;
+  border: 1px solid var(--border, #d1d5db);
+  border-radius: 4px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+}
+
+/* ---- Column picker (popover) ----------------------------------------- */
+.column-picker {
+  display: flex;
+  flex-direction: column;
+  max-height: 360px;
+  width: 100%;
+  font-size: 12px;
+}
+.column-picker-header {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px;
+  border-bottom: 1px solid var(--border, #e5e7eb);
+}
+.column-picker-search {
+  flex: 1;
+  padding: 3px 6px;
+  font-size: 11px;
+  border: 1px solid var(--border, #d1d5db);
+  border-radius: 3px;
+  outline: none;
+}
+.column-picker-search:focus {
+  border-color: #6366f1;
+}
+.column-picker-close {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--muted, #6b7280);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+}
+.column-picker-close:hover { color: var(--text, #111); }
+.column-picker-body {
+  overflow-y: auto;
+  padding: 4px 0;
+}
+.column-picker-empty {
+  padding: 12px;
+  text-align: center;
+  font-style: italic;
+  color: var(--muted, #6b7280);
+}
+.column-picker-section {
+  padding: 4px 0;
+}
+.column-picker-section + .column-picker-section {
+  border-top: 1px solid rgba(0, 0, 0, 0.04);
+}
+.column-picker-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 2px 8px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted, #6b7280);
+}
+.column-picker-add-all {
+  background: transparent;
+  border: none;
+  color: #4f46e5;
+  font-size: 10px;
+  cursor: pointer;
+  padding: 0 2px;
+}
+.column-picker-add-all:hover { text-decoration: underline; }
+.column-picker-section-rows {
+  display: flex;
+  flex-direction: column;
+}
+.column-picker-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  background: transparent;
+  border: none;
+  text-align: left;
+  font: inherit;
+  color: var(--text, #111);
+  cursor: pointer;
+}
+.column-picker-row:hover:not(:disabled) {
+  background: rgba(99, 102, 241, 0.07);
+}
+.column-picker-row.selected {
+  color: var(--muted, #6b7280);
+  background: rgba(0, 0, 0, 0.02);
+}
+.column-picker-row.disallowed {
+  color: rgba(0, 0, 0, 0.3);
+  cursor: not-allowed;
+}
+.column-picker-row-mark {
+  display: inline-block;
+  width: 10px;
+  text-align: center;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  color: var(--muted, #6b7280);
+}
+.column-picker-row.selected .column-picker-row-mark {
+  color: #10b981;
+}
+.column-picker-row-label {
+  flex: 1;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* ---- Explorer drawer NGL action bar + clear-selection pill ----------- */
@@ -3429,6 +4269,160 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   color: var(--muted, #6b7280);
   border-color: var(--border, #e5e7eb);
 }
+
+/* "★ Save selection" pill — same shape language as the NGL / clear
+   pills, distinct color (gold) so it reads as a separate affordance
+   rather than another clear-action. */
+.explore-save-pill {
+  margin-left: 4px;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+  background: rgba(202, 138, 4, 0.12);
+  color: #854d0e;
+  border: 1px solid #ca8a04;
+}
+.explore-save-pill:hover:not(.disabled) { background: rgba(202, 138, 4, 0.22); }
+.explore-save-pill.disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  background: rgba(0, 0, 0, 0.03);
+  color: var(--muted, #6b7280);
+  border-color: var(--border, #e5e7eb);
+}
+.explore-save-prompt {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: 4px;
+  background: #fff;
+  border: 1px solid #ca8a04;
+  border-radius: 4px;
+  padding: 1px 2px;
+}
+.explore-save-prompt-input {
+  font-size: 11px;
+  padding: 1px 4px;
+  border: none;
+  outline: none;
+  min-width: 120px;
+}
+.explore-save-prompt-ok,
+.explore-save-prompt-cancel {
+  border: none;
+  background: transparent;
+  font-size: 12px;
+  line-height: 1;
+  padding: 0 4px;
+  cursor: pointer;
+  color: var(--muted, #6b7280);
+}
+.explore-save-prompt-ok:hover { color: #16a34a; }
+.explore-save-prompt-cancel:hover { color: #dc2626; }
+
+/* ---- Saved cell sets panel (left rail) ------------------------------- */
+.saved-sets-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border, #e5e7eb);
+}
+.saved-sets-empty {
+  font-size: 11px;
+  color: var(--muted, #6b7280);
+  font-style: italic;
+  line-height: 1.4;
+  padding: 4px 0;
+}
+.saved-sets-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.saved-sets-row {
+  display: grid;
+  grid-template-columns: 10px 1fr auto;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 4px;
+  border-radius: 3px;
+}
+.saved-sets-row:hover { background: rgba(0, 0, 0, 0.03); }
+.saved-sets-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 1px solid rgba(0, 0, 0, 0.1);
+}
+.saved-sets-name {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  background: transparent;
+  border: none;
+  text-align: left;
+  font: inherit;
+  padding: 0;
+  cursor: pointer;
+  color: var(--text, #111);
+  overflow: hidden;
+}
+.saved-sets-name:hover .saved-sets-name-label { text-decoration: underline; }
+.saved-sets-name-label {
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.saved-sets-count {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10px;
+  color: var(--muted, #6b7280);
+}
+.saved-sets-rename-input {
+  font-size: 12px;
+  padding: 1px 4px;
+  border: 1px solid #6366f1;
+  border-radius: 3px;
+  outline: none;
+  background: #fff;
+}
+.saved-sets-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  opacity: 0.4;
+  transition: opacity 0.1s ease-in-out;
+}
+.saved-sets-row:hover .saved-sets-actions { opacity: 1; }
+.saved-sets-action {
+  width: 18px;
+  height: 18px;
+  border-radius: 3px;
+  border: none;
+  background: transparent;
+  color: var(--muted, #6b7280);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.saved-sets-action:hover:not(:disabled) {
+  background: rgba(99, 102, 241, 0.1);
+  color: #4f46e5;
+}
+.saved-sets-action:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+.saved-sets-action-delete:hover { background: rgba(220, 38, 38, 0.12); color: #b91c1c; }
+.saved-sets-action-rename { font-size: 11px; }
 
 /* Drawer toolbar — "Limit visible to selection" + "Reset visible"
    action buttons. Discrete actions (not state) so the user can

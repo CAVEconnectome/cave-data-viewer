@@ -8,7 +8,6 @@ import { parseMatVersion, useSetUrlParams, useUrlParam } from "../hooks/useUrlSt
 import { isSelKey } from "../plots/urlState";
 import { useSessionRecipe } from "../tours/sessionRecipe";
 import { AnalyticsRail } from "./AnalyticsRail";
-import { CellFilterPanel } from "./CellFilterPanel";
 import { Combobox } from "./Combobox";
 import { PartnersPane } from "./PartnersPane";
 
@@ -381,13 +380,6 @@ export function NeuronView() {
                         </button>
                       </div>
                     )}
-                    <CellFilterPanel
-                      columnGroups={connectivity.data.column_groups}
-                      sampleRows={[
-                        ...(connectivity.data.partners_in ?? []),
-                        ...(connectivity.data.partners_out ?? []),
-                      ]}
-                    />
                     <AnalyticsRail
                       ds={ds}
                       rootId={rootId}

@@ -149,6 +149,36 @@ function Breadcrumb({ from, ds, mv }: BreadcrumbProps) {
     next.delete("from");
     label = `table ${value}`;
     to = `${pathname}?${next.toString()}`;
+  } else if (kind === "explore" && value) {
+    // `value` is `<ft>/<emb>` — what the explorer was looking at when the
+    // user cross-navigated out. Two restoration paths, parallel to the
+    // table-breadcrumb logic:
+    //   - sessionStorage snapshot if the user left a richer view behind
+    //     (channel bindings, manual histograms, filter, …) on this tab,
+    //     restore in full so they land back where they were.
+    //   - bare /explore with just ?ds, ?mv, ?ft, ?emb when no snapshot
+    //     matches — gets the user on the right embedding view even on
+    //     a fresh tab.
+    const [breadcrumbFt, breadcrumbEmb] = value.split("/");
+    const snapshot = readViewSnapshot("explore");
+    const snapshotDs = snapshot
+      ? new URLSearchParams(snapshot.search).get("ds")
+      : null;
+    let next: URLSearchParams;
+    if (snapshot && snapshotDs === ds) {
+      next = new URLSearchParams(snapshot.search);
+    } else {
+      next = new URLSearchParams();
+      if (breadcrumbFt) next.set("ft", breadcrumbFt);
+      if (breadcrumbEmb) next.set("emb", breadcrumbEmb);
+    }
+    if (ds) next.set("ds", ds);
+    if (mv) next.set("mv", mv);
+    next.delete("from");
+    label = breadcrumbFt
+      ? `feature explorer (${breadcrumbFt})`
+      : "feature explorer";
+    to = `/explore?${next.toString()}`;
   } else {
     return null;
   }

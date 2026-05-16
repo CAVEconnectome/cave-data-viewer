@@ -1,16 +1,17 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   useCellList,
   useEmbeddingList,
   useEmbeddingScatter,
   useResolveRoots,
 } from "../../api/embeddings";
+import { useCrossNavHref } from "../../hooks/useCrossNavHref";
 import {
   parseMatVersion,
   useSetUrlParams,
   useUrlParam,
 } from "../../hooks/useUrlState";
-import { useMakeSegmentsLinkMutation } from "../../api/queries";
+import { randomSubsample, useNglLink } from "../../hooks/useNglLink";
 import type { PartnerRecord } from "../../api/types";
 
 /** Hard cap on the cells handed to /links/segments at once. The server
@@ -106,26 +107,24 @@ function NglActionPill({
   );
 }
 
-/** Random sub-sample of `arr` of size `cap`, preserving original order.
- *  Reservoir sampling: O(n) single-pass, uniform without replacement.
- *  Returns the full array unchanged when it's already at-or-below cap. */
-function randomSubsample<T>(arr: T[], cap: number): T[] {
-  if (arr.length <= cap) return arr;
-  const out = arr.slice(0, cap);
-  for (let i = cap; i < arr.length; i++) {
-    const j = Math.floor(Math.random() * (i + 1));
-    if (j < cap) out[j] = arr[i];
-  }
-  return out;
-}
-import { CellFilterPanel } from "../CellFilterPanel";
+import { CellFilterMenu } from "../CellFilterMenu";
 import { PartnersTable } from "../PartnersTable";
+import { CellIdSearch } from "./CellIdSearch";
 import { ChannelPicker } from "./ChannelPicker";
 import { DecorationPicker } from "./DecorationPicker";
 import { EmbeddingPicker } from "./EmbeddingPicker";
 import { FeatureTablePicker } from "./FeatureTablePicker";
+import { SavedSetsPanel } from "./SavedSetsPanel";
 import { SummaryPanel } from "./SummaryPanel";
-import { UniverseScatter } from "./UniverseScatter";
+import {
+  UniverseScatter,
+  type UniverseScatterHandle,
+} from "./UniverseScatter";
+import {
+  useNamedSelections,
+  type NamedSelection,
+} from "../../hooks/useNamedSelections";
+import { useResizableRailWidth } from "../../hooks/useResizableRailWidth";
 
 /**
  * Route component for `/explore`.
@@ -166,6 +165,30 @@ export function FeatureExplorer() {
   const setSelTable = useCallback((csv: string | null) => {
     setSelTableLocal(csv ? csv.split(",").filter(Boolean) : []);
   }, []);
+  // Set-typed mutators for the named-set algebra below — operating on
+  // raw arrays would require redundant split-and-join on every call.
+  const replaceSelection = useCallback((cellIds: string[]) => {
+    setSelTableLocal(cellIds);
+  }, []);
+  const unionIntoSelection = useCallback((cellIds: string[]) => {
+    setSelTableLocal((prev) => {
+      const seen = new Set(prev);
+      const out = [...prev];
+      for (const c of cellIds) {
+        if (!seen.has(c)) {
+          seen.add(c);
+          out.push(c);
+        }
+      }
+      return out;
+    });
+  }, []);
+  const subtractFromSelection = useCallback((cellIds: string[]) => {
+    setSelTableLocal((prev) => {
+      const drop = new Set(cellIds);
+      return prev.filter((c) => !drop.has(c));
+    });
+  }, []);
   // Seaborn-style channel bindings. Each is the dotted column name
   // (parquet columns are prefixed with the feature_table id; decoration
   // columns are `<dec_table>.<col>`) or null to fall back to the
@@ -178,6 +201,8 @@ export function FeatureExplorer() {
   const [sizeMaxRaw] = useUrlParam("size_max");
   const [colorMinRaw] = useUrlParam("color_min");
   const [colorMaxRaw] = useUrlParam("color_max");
+  const [colormapId] = useUrlParam("cmap");
+  const [colorCenterRaw] = useUrlParam("color_center");
   // Drawer state for the cell-list table. Closed by default so the
   // scatter owns the full canvas on first arrival; user clicks the
   // drawer handle to pull up the table.
@@ -201,10 +226,66 @@ export function FeatureExplorer() {
   // extent." Explicit URL values clamp the colorscale endpoints.
   const colorMin = colorMinRaw ? parseFloat(colorMinRaw) : null;
   const colorMax = colorMaxRaw ? parseFloat(colorMaxRaw) : null;
+  // Center for diverging colormaps. Null = "no explicit pick" → renderer
+  // falls back to the range midpoint, which is a visual no-op until the
+  // user moves it. Numeric URL values clamp the gradient pivot.
+  const colorCenter = colorCenterRaw ? parseFloat(colorCenterRaw) : null;
   const setUrl = useSetUrlParams();
 
   const matVersion = parseMatVersion(mv);
   const decorationTables = decRaw ? decRaw.split(",").filter(Boolean) : [];
+
+  // Resizable rail width. Persists to localStorage so reloads + cross-
+  // nav preserve it; clamped to [260, 640] inside the hook.
+  const {
+    width: railWidth,
+    beginDrag: beginRailResize,
+    isDragging: railResizing,
+  } = useResizableRailWidth();
+
+  // Imperative handle on the universe scatter. Used by CellIdSearch to
+  // re-frame the camera onto a freshly-resolved cell (or set of cells)
+  // after `replaceSelection(...)` populates the highlight set. The
+  // scatter's `fitView` reads `partition.highlight` which depends on the
+  // `highlightedCellIds` prop — so the call has to be deferred until
+  // React has flushed the selection state change and the scatter has
+  // re-committed its partition. `requestAnimationFrame` is enough: the
+  // state update fires synchronously, React schedules a render, then
+  // rAF runs after the commit phase, and `ref.current.fitView` is the
+  // latest closure (useImperativeHandle re-binds on fitView change).
+  const scatterRef = useRef<UniverseScatterHandle | null>(null);
+  const fitToSelection = useCallback(() => {
+    requestAnimationFrame(() => {
+      scatterRef.current?.fitView();
+    });
+  }, []);
+
+  // Named cell sets — per (ds, ft) localStorage layer. The hook is
+  // disabled gracefully when ds/ft are null (initial render before
+  // catalog defaults kick in) so the panel just renders the empty
+  // state during that brief window.
+  const namedSelections = useNamedSelections(ds, ft);
+  // Inline "Save selection" affordance: the drawer header pill opens
+  // an input pre-filled with the auto-suggested name. Local state
+  // holds the draft + open flag so the rename input doesn't fight
+  // with the pill's click toggle.
+  const [savePromptOpen, setSavePromptOpen] = useState(false);
+  const [saveDraftName, setSaveDraftName] = useState("");
+  const openSavePrompt = () => {
+    setSaveDraftName(namedSelections.suggestName());
+    setSavePromptOpen(true);
+  };
+  const closeSavePrompt = () => {
+    setSavePromptOpen(false);
+  };
+  const commitSavePrompt = () => {
+    if (selTableLocal.length === 0) {
+      setSavePromptOpen(false);
+      return;
+    }
+    namedSelections.save(saveDraftName, selTableLocal);
+    setSavePromptOpen(false);
+  };
 
   // Catalog — drives both pickers + tells us if the explorer is even
   // configured for this datastack.
@@ -278,6 +359,17 @@ export function FeatureExplorer() {
     return { lo, hi };
   }, [scatter.data?.color]);
 
+  // Universe Set for the Cell ID Search's `cell_id` mode. The scatter
+  // already loaded the cell_id array; wrap it in a Set so membership
+  // checks are O(1) per token rather than O(n) per token. Re-builds
+  // only when the underlying array reference changes (TanStack Query
+  // hands us a stable reference per response).
+  const universeCellIds = useMemo<Set<string> | null>(() => {
+    const ids = scatter.data?.cell_ids;
+    if (!ids) return null;
+    return new Set(ids);
+  }, [scatter.data?.cell_ids]);
+
   // /cells fetch — the cell-list table reads from this. With lasso
   // now a selection mechanism (not a filter), the request is driven
   // purely by the filter expression `?cells=` from CellFilterPanel.
@@ -294,20 +386,23 @@ export function FeatureExplorer() {
       : null,
   );
 
-  // Highlight set on the scatter, in priority order:
-  //   1. The unified selection (row-sel = lasso ∪ row-clicks). When
-  //      non-empty, that's the highlight.
-  //   2. Filter result. When the user has narrowed scope with the
-  //      CellFilterPanel but hasn't selected anything yet, the
-  //      filter result reads as the implicit highlight.
-  //   3. Nothing → no overlay.
+  // Selection (the "mark" set in scope/view/mark) — the union of two
+  // mechanisms that both produce selections, not one overriding the
+  // other:
+  //   - Predicate selection: cells matching the CellFilterPanel
+  //     expression (`?cells=`). Only counted when a filter is active —
+  //     without one, cellList returns the full universe, which would
+  //     trivially mark everything.
+  //   - Brush selection: row checkboxes + scatter lasso, both pooled
+  //     into `rowSelectedCellIds`.
+  // The two compose: filter to a population, then lasso a subset, and
+  // both stay marked on the plot. Empty union → no overlay.
   const highlightedCellIds = useMemo(() => {
-    if (rowSelectedCellIds.length > 0) {
-      return new Set(rowSelectedCellIds);
-    }
-    if (!cells) return null;
-    if (!cellList.data) return null;
-    return new Set(cellList.data.cell_ids);
+    const fromPredicate = cells && cellList.data ? cellList.data.cell_ids : [];
+    if (fromPredicate.length === 0 && rowSelectedCellIds.length === 0) return null;
+    const union = new Set<string>(fromPredicate);
+    for (const id of rowSelectedCellIds) union.add(id);
+    return union;
   }, [rowSelectedCellIds, cells, cellList.data]);
 
   // Batch cell_id → root_id resolution for the visible rows. The
@@ -348,22 +443,27 @@ export function FeatureExplorer() {
     return out;
   };
 
-  const segmentsLink = useMakeSegmentsLinkMutation();
+  // Cross-nav builder for the per-row "→" link in the cell-list table.
+  // Inter-view (explore → neuron) so explorer URL state (ft/emb/x/y/…)
+  // stays put. cells + decorations carry forward — the user's filter
+  // and decoration choices belong on both sides.
+  const cellCrossNavHref = useCrossNavHref({
+    ds: ds ?? "",
+    matVersion,
+    from: `explore:${ft ?? ""}/${emb ?? ""}`,
+    decorationTables,
+    cells,
+    inheritParams: false,
+    resolveRoot: (cellId) => rootByCellId.get(cellId) ?? null,
+  });
+
+  const ngl = useNglLink();
   const openInNgl = async (cellIds: string[]) => {
     if (matVersion === "live" || !ds) return;
     const roots = resolveRoots(cellIds);
     if (roots.length === 0) return;
     const sampled = randomSubsample(roots, NGL_LINK_CAP);
-    try {
-      const result = await segmentsLink.mutateAsync({
-        ds,
-        matVersion,
-        rootIds: sampled,
-      });
-      window.open(result.url, "_blank");
-    } catch {
-      // Error surfaces via segmentsLink.isError below the buttons.
-    }
+    await ngl.open({ kind: "segments", ds, matVersion, rootIds: sampled });
   };
   // Per-row NGL action — opens a single cell as a segment. Wraps the
   // bulk handler with a one-id list; reuses the same mutation +
@@ -446,7 +546,10 @@ export function FeatureExplorer() {
   const currentEmb = currentEmbeddings.find((e) => e.id === emb) ?? null;
 
   return (
-    <div className="explore">
+    <div
+      className="explore"
+      style={{ gridTemplateColumns: `${railWidth}px 6px 1fr` }}
+    >
       <aside className="explore-rail">
         <FeatureTablePicker
           featureTables={featureTables}
@@ -475,6 +578,15 @@ export function FeatureExplorer() {
             }
           />
         )}
+        <CellIdSearch
+          ds={ds}
+          featureTableId={ft}
+          matVersion={matVersion}
+          universeCellIds={universeCellIds}
+          onReplaceSelection={replaceSelection}
+          onUnionIntoSelection={unionIntoSelection}
+          onFitToSelection={fitToSelection}
+        />
         <ChannelPicker
           featureTable={currentFt}
           cellsColumnGroups={cellList.data?.column_groups}
@@ -488,6 +600,8 @@ export function FeatureExplorer() {
           colorMin={colorMin}
           colorMax={colorMax}
           colorIsNumeric={scatter.data?.color?.kind === "numeric"}
+          colormapId={colormapId}
+          colorCenter={colorCenter}
           defaultXLabel={currentEmb?.axes?.[0]}
           defaultYLabel={currentEmb?.axes?.[1]}
           defaultColorLabel={currentEmb?.default_color_by ?? null}
@@ -509,21 +623,53 @@ export function FeatureExplorer() {
               ...(next.colorMax !== undefined
                 ? { color_max: next.colorMax === null ? null : String(next.colorMax) }
                 : {}),
+              ...(next.colormapId !== undefined ? { cmap: next.colormapId } : {}),
+              ...(next.colorCenter !== undefined
+                ? {
+                    color_center:
+                      next.colorCenter === null ? null : String(next.colorCenter),
+                  }
+                : {}),
             })
           }
-        />
-        <CellFilterPanel
-          columnGroups={cellList.data?.column_groups}
-          sampleRows={cellList.data?.rows}
         />
         <SummaryPanel
           scatter={scatter.data}
           highlightedCellIds={highlightedCellIds}
+          ds={ds}
+          featureTable={currentFt}
+          cellsColumnGroups={cellList.data?.column_groups}
+          matVersion={matVersion}
+          decorationTables={decorationTables}
+        />
+        <SavedSetsPanel
+          selections={namedSelections.selections}
+          currentSelection={selTableLocal}
+          onLoad={(s: NamedSelection) => replaceSelection(s.cellIds)}
+          onAdd={(s: NamedSelection) => unionIntoSelection(s.cellIds)}
+          onSubtract={(s: NamedSelection) => subtractFromSelection(s.cellIds)}
+          onRename={(s: NamedSelection, name: string) =>
+            namedSelections.rename(s.id, name)
+          }
+          onRemove={(s: NamedSelection) => namedSelections.remove(s.id)}
         />
       </aside>
+      {/* Vertical drag handle between rail and scatter. Hover state in
+          CSS; the active class comes from the hook's isDragging flag
+          so the handle stays highlighted while the user is mid-drag
+          even after the cursor leaves its bounds. */}
+      <div
+        className={`explore-rail-handle${railResizing ? " dragging" : ""}`}
+        onMouseDown={beginRailResize}
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize feature explorer rail"
+        title="Drag to resize rail"
+      />
       <section className={`explore-center${tableOpen ? " table-open" : ""}`}>
         <div className="explore-scatter-wrap">
           <UniverseScatter
+            ref={scatterRef}
             ds={ds}
             featureTableId={ft}
             embeddingId={emb}
@@ -535,6 +681,8 @@ export function FeatureExplorer() {
             sizeMaxPx={sizeMaxPx}
             colorMin={colorMin}
             colorMax={colorMax}
+            colormapId={colormapId}
+            colorCenter={colorCenter}
             decorationTables={decorationTables}
             matVersion={matVersion}
             highlightedCellIds={highlightedCellIds}
@@ -562,7 +710,33 @@ export function FeatureExplorer() {
             className="explore-drawer-handle"
             onClick={() => setTable(tableOpen ? null : "open")}
             aria-expanded={tableOpen}
+            title={tableOpen ? "Hide cell table" : "Show cell table"}
           >
+            {/* Table-shaped icon so the handle reads as "tabular cell
+                data" rather than just a generic expand chevron. Inline
+                SVG (rather than a Unicode glyph) so it renders
+                consistently across platforms at this small size. */}
+            <svg
+              className="explore-drawer-icon"
+              width="14"
+              height="14"
+              viewBox="0 0 14 14"
+              aria-hidden="true"
+            >
+              <rect
+                x="1.5"
+                y="1.5"
+                width="11"
+                height="11"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1"
+                rx="1.5"
+              />
+              <line x1="1.5" y1="5" x2="12.5" y2="5" stroke="currentColor" strokeWidth="1" />
+              <line x1="1.5" y1="9" x2="12.5" y2="9" stroke="currentColor" strokeWidth="1" />
+              <line x1="6" y1="1.5" x2="6" y2="12.5" stroke="currentColor" strokeWidth="1" />
+            </svg>
             <span className="explore-drawer-toggle">{tableOpen ? "▾" : "▴"}</span>
             <span className="explore-drawer-count">
               {cellList.data ? (
@@ -585,6 +759,29 @@ export function FeatureExplorer() {
                 ""
               )}
             </span>
+            {/* Filter menu — popover lives in the drawer header so the
+                user edits the filter next to the table the filter
+                affects. The whole drawer-handle is a button, so the
+                pill wrapper stops propagation to prevent a filter
+                click from toggling the drawer open/closed. */}
+            <span
+              className="explore-pill-wrap"
+              onClick={(e) => e.stopPropagation()}
+              role="presentation"
+            >
+              <CellFilterMenu
+                columnGroups={cellList.data?.column_groups}
+                sampleRows={cellList.data?.rows}
+                className="explore-filter-pill"
+                placement="up"
+                categoriesByTable={
+                  currentFt && currentFt.categories.length > 0
+                    ? { [currentFt.id]: currentFt.categories }
+                    : undefined
+                }
+              />
+            </span>
+            <span className="explore-pill-separator" aria-hidden />
             {/* NGL actions — grouped on the left side with the
                 count and selection context (where filtering and
                 selection actually happen). Both buttons are always
@@ -598,7 +795,7 @@ export function FeatureExplorer() {
                 !cellList.data ||
                 cellList.data.matched_count === 0 ||
                 matVersion === "live" ||
-                segmentsLink.isPending
+                ngl.isPending
               }
               liveDisabled={matVersion === "live"}
               onOpen={() =>
@@ -611,7 +808,7 @@ export function FeatureExplorer() {
               disabled={
                 rowSelectedCellIds.length === 0 ||
                 matVersion === "live" ||
-                segmentsLink.isPending
+                ngl.isPending
               }
               liveDisabled={matVersion === "live"}
               onOpen={() => openInNgl(rowSelectedCellIds)}
@@ -626,12 +823,77 @@ export function FeatureExplorer() {
               onClear={() => setSelTable(null)}
               variant="rowsel"
             />
+            {/* Save the current selection as a named cell set. Persists
+                in localStorage; surfaces in the rail's SavedSetsPanel
+                for later load/union/subtract. Disabled when there's
+                nothing to save. The wrapper stops drawer-toggle
+                propagation so the popover doesn't open/close the
+                drawer when the user types into the rename input. */}
+            <span
+              className="explore-pill-wrap"
+              onClick={(e) => e.stopPropagation()}
+              role="presentation"
+            >
+              <span
+                role="button"
+                className={`explore-save-pill${
+                  rowSelectedCellIds.length === 0 ? " disabled" : ""
+                }`}
+                aria-disabled={rowSelectedCellIds.length === 0}
+                title={
+                  rowSelectedCellIds.length === 0
+                    ? "Make a selection first"
+                    : `Save ${rowSelectedCellIds.length.toLocaleString()} cells as a named set`
+                }
+                onClick={() => {
+                  if (rowSelectedCellIds.length === 0) return;
+                  if (savePromptOpen) {
+                    closeSavePrompt();
+                  } else {
+                    openSavePrompt();
+                  }
+                }}
+              >
+                ★ Save selection
+              </span>
+              {savePromptOpen && rowSelectedCellIds.length > 0 && (
+                <span className="explore-save-prompt">
+                  <input
+                    type="text"
+                    className="explore-save-prompt-input"
+                    value={saveDraftName}
+                    autoFocus
+                    onChange={(e) => setSaveDraftName(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") commitSavePrompt();
+                      if (e.key === "Escape") closeSavePrompt();
+                    }}
+                  />
+                  <button
+                    type="button"
+                    className="explore-save-prompt-ok"
+                    onClick={commitSavePrompt}
+                    title="Save"
+                  >
+                    ✓
+                  </button>
+                  <button
+                    type="button"
+                    className="explore-save-prompt-cancel"
+                    onClick={closeSavePrompt}
+                    title="Cancel"
+                  >
+                    ×
+                  </button>
+                </span>
+              )}
+            </span>
           </button>
           {tableOpen && enrichedCells && enrichedCells.rows.length > 0 && (
             <div className="explore-drawer-body">
-              {segmentsLink.isError && (
+              {ngl.isError && (
                 <div className="explore-ngl-error">
-                  NGL link failed: {String(segmentsLink.error)}
+                  NGL link failed: {String(ngl.error)}
                 </div>
               )}
               <PartnersTable
@@ -685,23 +947,11 @@ export function FeatureExplorer() {
                 keyColumn="cell_id"
                 // Resolve cell_id → root_id at the active mv. Cells
                 // that didn't resolve (missing / ambiguous / not yet
-                // resolved / live mode) get a "#" href so the link is
-                // visually present but doesn't navigate; the user can
-                // see why in the root_id column (rendered as null).
-                crossNavHref={(cellId) => {
-                  const root = rootByCellId.get(cellId);
-                  if (!root) return "#";
-                  const next = new URLSearchParams();
-                  next.set("ds", ds);
-                  next.set("mv", matVersion === "live" ? "live" : String(matVersion));
-                  next.set("root", root);
-                  next.set("from", `explore:${ft}/${emb}`);
-                  if (decorationTables.length > 0) {
-                    next.set("dec", decorationTables.join(","));
-                  }
-                  if (cells) next.set("cells", cells);
-                  return `/neuron?${next.toString()}`;
-                }}
+                // resolved / live mode) get a "#" href from the
+                // resolver below so the link is visually present but
+                // doesn't navigate. Inter-view cross-nav: explorer URL
+                // state stays put rather than polluting /neuron.
+                crossNavHref={cellCrossNavHref}
                 enableNglAction={false}
                 rowsLabel="cells"
                 selectedIds={rowSelectedCellIds}

@@ -1,5 +1,7 @@
 import { useMemo } from "react";
 import type { ColumnGroup, FeatureTableListItem } from "../../api/types";
+import { getColormap } from "./colormaps";
+import { ColormapPicker } from "./ColormapPicker";
 import { RangeSlider } from "./RangeSlider";
 
 interface ChannelOption {
@@ -43,6 +45,15 @@ interface Props {
    *  renders for numeric bindings — clipping a categorical palette
    *  doesn't make sense. */
   colorIsNumeric?: boolean;
+  /** Selected colormap id. Only meaningful for numeric color bindings;
+   *  for categorical, the palette comes from the server's color_map
+   *  and the picker is hidden. */
+  colormapId?: string | null;
+  /** Data value anchored to the colormap's midpoint. Null defers to
+   *  the midpoint of the current [colorMin, colorMax] range. Only
+   *  surfaced when the active colormap's category is "diverging" —
+   *  the renderer ignores centering for non-diverging maps. */
+  colorCenter?: number | null;
   defaultXLabel?: string; // shown when x is null (the embedding's declared axis)
   defaultYLabel?: string;
   defaultColorLabel?: string | null; // embedding's default_color_by
@@ -55,6 +66,8 @@ interface Props {
     sizeMaxPx?: number;
     colorMin?: number | null;
     colorMax?: number | null;
+    colormapId?: string | null;
+    colorCenter?: number | null;
   }) => void;
 }
 
@@ -86,28 +99,73 @@ export function ChannelPicker({
   colorMin,
   colorMax,
   colorIsNumeric,
+  colormapId,
+  colorCenter,
   defaultXLabel,
   defaultYLabel,
   defaultColorLabel,
   onChange,
 }: Props) {
   const { axisOptions, colorOptions, sizeOptions } = useMemo(() => {
-    const parquetNumeric: ChannelOption[] = (featureTable?.feature_columns ?? []).map(
-      (c) => ({
-        value: `${featureTable!.id}.${c}`,
-        label: c,
-        source: "features",
-        isNumeric: true,
-      }),
-    );
-    const parquetCategorical: ChannelOption[] = featureTable
-      ? featureTable.categorical_columns.map((c) => ({
-          value: `${featureTable.id}.${c}`,
-          label: c,
-          source: "categoricals",
-          isNumeric: false,
-        }))
+    // Build per-column option records (numeric flag from
+    // feature_columns vs categorical_columns), then re-group by
+    // manifest categories if any are declared. Otherwise fall back to
+    // the original `features` / `categoricals` split.
+    const numericSet = new Set(featureTable?.feature_columns ?? []);
+    const categoricalSet = new Set(featureTable?.categorical_columns ?? []);
+    const allParquetCols = featureTable
+      ? Array.from(new Set([...numericSet, ...categoricalSet]))
       : [];
+
+    const baseRecord = (col: string): Omit<ChannelOption, "source"> => ({
+      value: `${featureTable!.id}.${col}`,
+      label: col,
+      // A column declared in feature_columns wins as numeric; if it's
+      // only in categorical_columns it's non-numeric. Columns referenced
+      // by a category but absent from both lists fall through as
+      // unknown-numeric (matches the decoration-column treatment).
+      isNumeric: numericSet.has(col)
+        ? true
+        : categoricalSet.has(col)
+          ? false
+          : undefined,
+    });
+
+    let parquetOptions: ChannelOption[] = [];
+    const categories = featureTable?.categories ?? [];
+    if (categories.length > 0) {
+      // Manifest-declared categories. A column may belong to multiple
+      // categories — we emit one option per (column, category) so the
+      // user sees the column under every relevant header. The dedupe
+      // happens visually (different optgroup labels) and in the picker
+      // state (the URL holds the dotted column path, not the category).
+      const referenced = new Set<string>();
+      for (const cat of categories) {
+        for (const col of cat.columns) {
+          if (!featureTable || !allParquetCols.includes(col)) continue;
+          referenced.add(col);
+          parquetOptions.push({ ...baseRecord(col), source: cat.title });
+        }
+      }
+      // Implicit "Uncategorized" bucket for parquet columns the manifest
+      // forgot to file. Skipping this would silently hide columns
+      // present in the parquet but absent from any category — worse
+      // than a slightly noisy fallback group.
+      const uncategorized = allParquetCols.filter((c) => !referenced.has(c));
+      for (const col of uncategorized) {
+        parquetOptions.push({ ...baseRecord(col), source: "Uncategorized" });
+      }
+    } else if (featureTable) {
+      // Legacy flat layout: numeric features under `features`, label
+      // columns under `categoricals`. Preserves the previous look for
+      // manifests that don't opt in to categories.
+      for (const col of featureTable.feature_columns ?? []) {
+        parquetOptions.push({ ...baseRecord(col), source: "features" });
+      }
+      for (const col of featureTable.categorical_columns ?? []) {
+        parquetOptions.push({ ...baseRecord(col), source: "categoricals" });
+      }
+    }
     // Decoration tables show up in the /cells response's column_groups
     // as `kind: "table"` entries with the table name. We surface all
     // columns from those groups — we don't know which are numeric until
@@ -128,7 +186,7 @@ export function ChannelPicker({
         });
       }
     }
-    const all = [...parquetNumeric, ...parquetCategorical, ...decorationOptions];
+    const all = [...parquetOptions, ...decorationOptions];
     return {
       axisOptions: all, // any column can be on an axis
       colorOptions: all,
@@ -169,21 +227,55 @@ export function ChannelPicker({
           })
         }
       />
-      {colorBy && colorIsNumeric && colorBound && (
-        <RangeSlider
-          label="range"
-          bound={colorBound}
-          min={colorMin ?? colorBound.lo}
-          max={colorMax ?? colorBound.hi}
-          formatValue={formatNumericTick}
-          onChange={(next) =>
-            onChange({
-              ...(next.min !== undefined ? { colorMin: next.min } : {}),
-              ...(next.max !== undefined ? { colorMax: next.max } : {}),
-            })
-          }
-        />
-      )}
+      {colorBy && colorIsNumeric && colorBound && (() => {
+        const isDiverging = getColormap(colormapId).category === "diverging";
+        const lo = colorMin ?? colorBound.lo;
+        const hi = colorMax ?? colorBound.hi;
+        // Treat NaN colorCenter (e.g. stale URL state from a hand-typed
+        // value) as "no explicit pick" so the slider always gets a finite
+        // value and the thumb lands at the range midpoint rather than at
+        // some browser-default fallback position.
+        const explicitCenter =
+          typeof colorCenter === "number" && Number.isFinite(colorCenter)
+            ? colorCenter
+            : null;
+        const effectiveCenter =
+          isDiverging
+            ? explicitCenter !== null
+              ? explicitCenter
+              : (lo + hi) / 2
+            : null;
+        const centerIsExplicit = isDiverging && explicitCenter !== null;
+        return (
+          <>
+            <RangeSlider
+              label="range"
+              bound={colorBound}
+              min={lo}
+              max={hi}
+              formatValue={formatNumericTick}
+              center={effectiveCenter}
+              centerLabel="center"
+              centerIsExplicit={centerIsExplicit}
+              onCenterChange={(v) => onChange({ colorCenter: v })}
+              onCenterReset={() => onChange({ colorCenter: null })}
+              onChange={(next) =>
+                onChange({
+                  ...(next.min !== undefined ? { colorMin: next.min } : {}),
+                  ...(next.max !== undefined ? { colorMax: next.max } : {}),
+                })
+              }
+            />
+            <div className="explore-channel">
+              <span className="explore-channel-label">scale</span>
+              <ColormapPicker
+                value={colormapId}
+                onChange={(id) => onChange({ colormapId: id })}
+              />
+            </div>
+          </>
+        );
+      })()}
       <ChannelSelect
         label="size"
         value={sizeBy}

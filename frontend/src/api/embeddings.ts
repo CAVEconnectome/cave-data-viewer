@@ -10,10 +10,12 @@
 import { useMutation, useQuery, type QueryKey } from "@tanstack/react-query";
 import { apiFetch } from "./client";
 import type {
+  EmbeddingColumnResponse,
   EmbeddingKnnResponse,
   EmbeddingListResponse,
   EmbeddingScatterResponse,
   FeatureTableCellsResponse,
+  FindCellsResponse,
   ResolveRootsResponse,
 } from "./types";
 
@@ -23,10 +25,18 @@ const PATHS = {
     `/api/v1/datastacks/${ds}/feature_tables/${ftId}/embeddings/${embId}/scatter`,
   cells: (ds: string, ftId: string) =>
     `/api/v1/datastacks/${ds}/feature_tables/${ftId}/cells`,
+  column: (ds: string, ftId: string, column: string) =>
+    // Path-segment column name (server uses <path:column> so dotted
+    // names like `<table>.<col>` survive without escaping the dot).
+    // We still encodeURIComponent the segment so slashes or unusual
+    // characters in a column name don't break the URL.
+    `/api/v1/datastacks/${ds}/feature_tables/${ftId}/column/${encodeURIComponent(column)}`,
   knn: (ds: string, ftId: string) =>
     `/api/v1/datastacks/${ds}/feature_tables/${ftId}/knn`,
   resolveRoots: (ds: string, ftId: string) =>
     `/api/v1/datastacks/${ds}/feature_tables/${ftId}/resolve_roots`,
+  findCells: (ds: string, ftId: string) =>
+    `/api/v1/datastacks/${ds}/feature_tables/${ftId}/find_cells`,
 };
 
 // ---- /embeddings (catalog) -------------------------------------------------
@@ -174,6 +184,65 @@ export function useCellList(args: CellListArgs | null) {
   });
 }
 
+// ---- /column (single-column universe values) -------------------------------
+
+export interface EmbeddingColumnArgs {
+  ds: string;
+  featureTableId: string;
+  /** Resolved column name. Bare for feature-table parquet columns
+   *  (server prefixes with `<ft>.` after `FeatureTableQuery.frame()`);
+   *  dotted `<table>.<col>` for decoration columns and synthetic
+   *  `nucleus.x/y/z`. */
+  column: string;
+  /** Decoration tables to attach. The server auto-extends this to
+   *  include the column's table when the column is a decoration
+   *  reference, so callers don't have to pre-compute it. */
+  decorationTables?: string[];
+  /** Required when the column lives in a decoration table or in
+   *  synthetic nucleus space (those go through the resolver). */
+  matVersion?: number | "live" | null;
+}
+
+/** Universe-aligned values for one column. Cached with `staleTime:
+ *  Infinity` because the parquet content is pinned by URI and
+ *  decoration snapshots are immutable at a mat_version — the response
+ *  cannot change for a fixed (ft, column, decTables, mat_version)
+ *  tuple. */
+export function useEmbeddingColumn(args: EmbeddingColumnArgs | null) {
+  return useQuery<EmbeddingColumnResponse>({
+    queryKey: args
+      ? [
+          "embedding_column",
+          args.ds,
+          args.featureTableId,
+          args.column,
+          (args.decorationTables ?? []).join(","),
+          args.matVersion ?? "",
+        ]
+      : ["embedding_column", "disabled"],
+    queryFn: () =>
+      apiFetch<EmbeddingColumnResponse>(
+        PATHS.column(args!.ds, args!.featureTableId, args!.column),
+        {
+          query: {
+            dec: args!.decorationTables?.length
+              ? args!.decorationTables.join(",")
+              : undefined,
+            mat_version:
+              args!.matVersion === "live"
+                ? "live"
+                : args!.matVersion === null || args!.matVersion === undefined
+                  ? undefined
+                  : String(args!.matVersion),
+          },
+        },
+      ),
+    enabled:
+      !!args && !!args.ds && !!args.featureTableId && !!args.column,
+    staleTime: Infinity,
+  });
+}
+
 // ---- /knn ------------------------------------------------------------------
 
 export interface EmbeddingKnnArgs {
@@ -259,5 +328,39 @@ export function useResolveRoots(args: ResolveRootsArgs | null) {
     // FeatureExplorer skipping the call when mv === "live".
     staleTime: Infinity,
     gcTime: Infinity,
+  });
+}
+
+// ---- /find_cells -----------------------------------------------------------
+
+export interface FindCellsArgs {
+  ds: string;
+  featureTableId: string;
+  /** Root_ids the user typed into the search box. Strings end-to-end —
+   *  chunkedgraph root_ids exceed JS Number precision (2^53). */
+  rootIds: string[];
+  matVersion: number | "live";
+}
+
+/** Two-step lookup behind the explorer's `<CellIdSearch>` component:
+ *  chunkedgraph alignment at the request's mat_version timestamp, then
+ *  nucleus reverse-resolve on the aligned root.
+ *
+ *  Mutation rather than query — search is a one-shot user action;
+ *  results aren't cached across submissions because the input changes
+ *  every time the user clicks the submit button. Partial failure is
+ *  expected (paste-many always has a few stale ids past the lineage
+ *  walk), so the caller groups results by `status` for the status row.
+ */
+export function useFindCellsMutation() {
+  return useMutation<FindCellsResponse, Error, FindCellsArgs>({
+    mutationFn: (args) =>
+      apiFetch<FindCellsResponse>(PATHS.findCells(args.ds, args.featureTableId), {
+        method: "POST",
+        body: {
+          root_ids: args.rootIds,
+          mat_version: args.matVersion,
+        },
+      }),
   });
 }

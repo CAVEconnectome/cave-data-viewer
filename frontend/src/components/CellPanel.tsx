@@ -1,5 +1,5 @@
 import { useCallback } from "react";
-import { useMakeLinkMutation } from "../api/queries";
+import { useNglLink } from "../hooks/useNglLink";
 import type { ColumnGroup, ConnectivityBundle } from "../api/types";
 import { CopyableId, displayName, formatCell } from "./tableColumns";
 
@@ -37,15 +37,11 @@ function bareColumnName(key: string): string {
 
 export function CellPanel({ ds, rootId, matVersion, bundle, columnGroups }: Props) {
   const cell = bundle.root_record;
-  const makeLink = useMakeLinkMutation();
+  const ngl = useNglLink();
   const open = useCallback(
-    async (template: string) => {
-      const result = await makeLink.mutateAsync({
-        ds, rootId, matVersion, template,
-      });
-      window.open(result.url, "_blank");
-    },
-    [ds, matVersion, makeLink, rootId],
+    (template: string) =>
+      ngl.open({ kind: "template", ds, rootId, matVersion, template }),
+    [ds, matVersion, ngl, rootId],
   );
 
   if (!cell) {
@@ -76,8 +72,8 @@ export function CellPanel({ ds, rootId, matVersion, bundle, columnGroups }: Prop
         <button onClick={() => open("connectivity")}>
           Open this cell in Neuroglancer
         </button>
-        {makeLink.isError && (
-          <span className="error">{makeLink.error.message}</span>
+        {ngl.isError && ngl.error && (
+          <span className="error">{ngl.error.message}</span>
         )}
       </div>
       <div className="partners-scroll">
