@@ -9,14 +9,31 @@ import type {
 } from "../../api/types";
 import { ColumnPicker } from "./ColumnPicker";
 
+/** Display mode for the panel's histograms.
+ *
+ *  - **all**: background bars = the full universe, overlay = the active
+ *    Filter Scope. "How does my scope compare to the population?"
+ *  - **scope**: background bars = the active Filter Scope, overlay = the
+ *    effective selection (bag ∩ scope). "How does my selection compare
+ *    to the filtered population?"
+ *
+ *  When no scope is active the two modes collapse (background and
+ *  scope are both the universe) and the toggle hides itself. */
+type BgMode = "all" | "scope";
+
 interface Props {
   /** Universe scatter response — provides `cell_ids` and the bound
    *  color channel's per-point values + color_map. Null while
    *  loading. */
   scatter?: EmbeddingScatterResponse | null;
-  /** The highlight set — typically (filter ∩ lasso). Null when nothing
-   *  narrows the universe; bars then show universe counts only. */
-  highlightedCellIds?: Set<string> | null;
+  /** The in-scope set — cells passing the active Filter Scope
+   *  (predicate `?cells=` or "Filter to selection" snapshot). Null
+   *  means the full universe is in scope; bars then show universe
+   *  counts only. */
+  inScopeCellIds?: Set<string> | null;
+  /** The active selection — bag ∩ scope. Drives the overlay in
+   *  "vs Scope" mode. Null/empty = no overlay in that mode. */
+  selectedCellIds?: Set<string> | null;
   /** Datastack id — required so `useEmbeddingColumn` can route
    *  manual-histogram requests. */
   ds: string | null;
@@ -38,18 +55,22 @@ interface Props {
 interface CategoryRow {
   label: string;
   hex: string;
-  universeCount: number;
-  highlightCount: number;
+  bgCount: number;
+  fgCount: number;
 }
 
 const SUMMARY_PLOTS_KEY = "summary_plots";
+const SUMMARY_BG_KEY = "summary_bg";
 
 /**
  * Summary panel for the explorer's left rail.
  *
  * Three sections, top-to-bottom:
  *
- * 1. **Count line** — how many cells are highlighted vs in the universe.
+ * 1. **Count line + bg-mode toggle** — how many cells are in scope vs in
+ *    the universe, and a "vs All / vs Scope" toggle that controls what
+ *    the histogram background bars represent (see {@link BgMode}). The
+ *    toggle hides itself when no scope is active.
  * 2. **Channel-driven plots** — automatic histograms / categorical
  *    breakdowns mirroring whatever the color/size channels are bound
  *    to. Updates as the user binds channels in the rail.
@@ -63,11 +84,12 @@ const SUMMARY_PLOTS_KEY = "summary_plots";
  * `useEmbeddingColumn`, which caches forever client-side (parquet +
  * decoration snapshots are immutable at a mat_version). Switching
  * channels or filters doesn't refetch the underlying values — only the
- * highlight overlay recomputes.
+ * bg/fg partitions recompute.
  */
 export function SummaryPanel({
   scatter,
-  highlightedCellIds,
+  inScopeCellIds,
+  selectedCellIds,
   ds,
   featureTable,
   cellsColumnGroups,
@@ -75,9 +97,12 @@ export function SummaryPanel({
   decorationTables,
 }: Props) {
   const totalCells = scatter?.n_cells ?? 0;
-  const highlightSize = highlightedCellIds?.size ?? 0;
+  const scopeSize = inScopeCellIds?.size ?? 0;
+  const selectionSize = selectedCellIds?.size ?? 0;
 
   const [summaryPlotsRaw, setSummaryPlotsRaw] = useUrlParam(SUMMARY_PLOTS_KEY);
+  const [bgModeRaw, setBgModeRaw] = useUrlParam(SUMMARY_BG_KEY);
+  const bgMode: BgMode = bgModeRaw === "scope" ? "scope" : "all";
   const [picking, setPicking] = useState(false);
 
   const manualColumns = useMemo<string[]>(() => {
@@ -107,8 +132,21 @@ export function SummaryPanel({
     updateManual(manualColumns.filter((c) => c !== col));
   };
 
+  // Resolved bg/fg sets given the active mode + the panel inputs. The
+  // toggle is meaningful only when a scope is active; without scope,
+  // bg=universe and fg=scope-or-selection collapse to the same view
+  // (bg=universe, fg=null or universe — boring either way).
+  const hasScope = !!inScopeCellIds;
+  const effectiveBgMode: BgMode = hasScope ? bgMode : "all";
+  const bgCellIds: Set<string> | null =
+    effectiveBgMode === "scope" ? inScopeCellIds ?? null : null;
+  const fgCellIds: Set<string> | null =
+    effectiveBgMode === "scope"
+      ? selectedCellIds ?? null
+      : inScopeCellIds ?? null;
+
   // Channel-driven categorical breakdown (same rows as before — colored
-  // bars per category, universe + highlight overlaid).
+  // bars per category, bg + fg overlaid).
   const channelCategories = useMemo<CategoryRow[] | null>(() => {
     const color = scatter?.color;
     if (!color || color.kind !== "categorical") return null;
@@ -116,10 +154,11 @@ export function SummaryPanel({
       color.values as Array<string | null>,
       scatter!.cell_ids,
       color.color_map ?? {},
-      highlightedCellIds,
+      bgCellIds,
+      fgCellIds,
       totalCells,
     );
-  }, [scatter, highlightedCellIds, totalCells]);
+  }, [scatter, bgCellIds, fgCellIds, totalCells]);
 
   if (!scatter) return null;
 
@@ -150,13 +189,38 @@ export function SummaryPanel({
 
   return (
     <div className="summary-panel">
-      <div className="explore-picker-label">Summary</div>
+      <div className="summary-panel-head">
+        <div className="explore-picker-label">Summary</div>
+        {hasScope && (
+          <BgModeToggle
+            value={bgMode}
+            onChange={(next) =>
+              // Default ("all"): clear the URL key so the share link
+              // stays compact. "scope" is the only value that needs
+              // to ride the URL.
+              setBgModeRaw(next === "scope" ? "scope" : null)
+            }
+          />
+        )}
+      </div>
       <div className="summary-panel-count">
-        {highlightedCellIds && highlightSize > 0 ? (
-          <>
-            <strong>{highlightSize.toLocaleString()}</strong> of{" "}
-            <strong>{totalCells.toLocaleString()}</strong> cells in scope
-          </>
+        {hasScope ? (
+          effectiveBgMode === "scope" ? (
+            // "vs Scope" mode — the active comparison is selection
+            // against scope. Lead with the selection count to match
+            // what the histograms now overlay.
+            <>
+              <strong>{selectionSize.toLocaleString()}</strong>
+              {" selected of "}
+              <strong>{scopeSize.toLocaleString()}</strong>
+              {" in scope"}
+            </>
+          ) : (
+            <>
+              <strong>{scopeSize.toLocaleString()}</strong> of{" "}
+              <strong>{totalCells.toLocaleString()}</strong> cells in scope
+            </>
+          )
         ) : (
           <>
             <strong>{totalCells.toLocaleString()}</strong> cells total
@@ -175,7 +239,8 @@ export function SummaryPanel({
           column={ch.column}
           values={ch.values}
           cellIds={scatter.cell_ids}
-          highlightedCellIds={highlightedCellIds ?? null}
+          bgCellIds={bgCellIds}
+          fgCellIds={fgCellIds}
           color={ch.color}
         />
       ))}
@@ -190,7 +255,8 @@ export function SummaryPanel({
           featureTableId={featureTable?.id ?? null}
           matVersion={matVersion}
           decorationTables={decorationTables}
-          highlightedCellIds={highlightedCellIds ?? null}
+          bgCellIds={bgCellIds}
+          fgCellIds={fgCellIds}
           onRemove={() => removeColumn(col)}
         />
       ))}
@@ -225,6 +291,42 @@ export function SummaryPanel({
   );
 }
 
+// --- background mode toggle -------------------------------------------------
+
+function BgModeToggle({
+  value,
+  onChange,
+}: {
+  value: BgMode;
+  onChange: (next: BgMode) => void;
+}) {
+  return (
+    <div
+      className="summary-bg-toggle"
+      role="group"
+      aria-label="Histogram background distribution"
+      title="What the background bars represent in the histograms below"
+    >
+      <button
+        type="button"
+        className={`summary-bg-toggle-btn${value === "all" ? " active" : ""}`}
+        onClick={() => onChange("all")}
+        title="Background = full universe; overlay = in-scope cells"
+      >
+        vs All
+      </button>
+      <button
+        type="button"
+        className={`summary-bg-toggle-btn${value === "scope" ? " active" : ""}`}
+        onClick={() => onChange("scope")}
+        title="Background = in-scope cells; overlay = current selection"
+      >
+        vs Scope
+      </button>
+    </div>
+  );
+}
+
 // --- manual-plot wrapper ----------------------------------------------------
 
 interface ManualPlotProps {
@@ -233,7 +335,8 @@ interface ManualPlotProps {
   featureTableId: string | null;
   matVersion: number | "live" | null;
   decorationTables: string[];
-  highlightedCellIds: Set<string> | null;
+  bgCellIds: Set<string> | null;
+  fgCellIds: Set<string> | null;
   onRemove: () => void;
 }
 
@@ -253,7 +356,8 @@ function ManualPlot({
   featureTableId,
   matVersion,
   decorationTables,
-  highlightedCellIds,
+  bgCellIds,
+  fgCellIds,
   onRemove,
 }: ManualPlotProps) {
   // Decoration / nucleus columns require a materialized version. Pure-
@@ -308,7 +412,8 @@ function ManualPlot({
       ) : q.data ? (
         <ManualPlotBody
           response={q.data}
-          highlightedCellIds={highlightedCellIds}
+          bgCellIds={bgCellIds}
+          fgCellIds={fgCellIds}
         />
       ) : null}
     </div>
@@ -317,10 +422,12 @@ function ManualPlot({
 
 function ManualPlotBody({
   response,
-  highlightedCellIds,
+  bgCellIds,
+  fgCellIds,
 }: {
   response: EmbeddingColumnResponse;
-  highlightedCellIds: Set<string> | null;
+  bgCellIds: Set<string> | null;
+  fgCellIds: Set<string> | null;
 }) {
   if (response.kind === "numeric") {
     return (
@@ -328,7 +435,8 @@ function ManualPlotBody({
         column={response.column}
         values={response.values as Array<number | null>}
         cellIds={response.cell_ids}
-        highlightedCellIds={highlightedCellIds}
+        bgCellIds={bgCellIds}
+        fgCellIds={fgCellIds}
         // Distinct color from the channel-driven plots so the user
         // can see at a glance "this row came from a manual add."
         color="#6366f1"
@@ -342,7 +450,8 @@ function ManualPlotBody({
     response.values as Array<string | null>,
     response.cell_ids,
     response.color_map ?? {},
-    highlightedCellIds,
+    bgCellIds,
+    fgCellIds,
     response.n_cells,
   );
   if (!rows || rows.length === 0) {
@@ -365,49 +474,62 @@ function CategoricalBreakdown({
   column: string;
   rows: CategoryRow[];
 }) {
-  const maxUniverse = Math.max(...rows.map((c) => c.universeCount), 1);
+  const maxBg = Math.max(...rows.map((c) => c.bgCount), 1);
   return (
     <div className="summary-panel-categories" title={column}>
       <div className="summary-panel-cat-title">{bareCol(column)}</div>
       {rows.map((cat) => (
-        <SummaryRow key={cat.label} cat={cat} maxUniverse={maxUniverse} />
+        <SummaryRow key={cat.label} cat={cat} maxBg={maxBg} />
       ))}
     </div>
   );
 }
 
+/** Build per-category counts for the bg + fg distributions. `bgCellIds`
+ *  filters the background bar (null = include all cells); `fgCellIds`
+ *  filters the foreground overlay bar (null/empty = no overlay). */
 function buildCategoryRows(
   values: Array<string | null>,
   cellIds: string[],
   colorMap: Record<string, string>,
-  highlight: Set<string> | null | undefined,
+  bgCellIds: Set<string> | null,
+  fgCellIds: Set<string> | null,
   totalCells: number,
 ): CategoryRow[] {
-  const universe = new Map<string, number>();
-  const highlightCounts = new Map<string, number>();
+  const bgCounts = new Map<string, number>();
+  const fgCounts = new Map<string, number>();
+  let bgTotal = 0;
   for (let i = 0; i < values.length; i++) {
+    const id = cellIds[i];
+    if (bgCellIds && !bgCellIds.has(id)) continue;
     const raw = values[i];
     const key = raw === null || raw === undefined ? "(none)" : String(raw);
-    universe.set(key, (universe.get(key) ?? 0) + 1);
-    if (highlight && highlight.has(cellIds[i])) {
-      highlightCounts.set(key, (highlightCounts.get(key) ?? 0) + 1);
+    bgCounts.set(key, (bgCounts.get(key) ?? 0) + 1);
+    bgTotal += 1;
+    if (fgCellIds && fgCellIds.has(id)) {
+      fgCounts.set(key, (fgCounts.get(key) ?? 0) + 1);
     }
   }
   const out: CategoryRow[] = [];
-  for (const [label, count] of universe.entries()) {
+  // Use `totalCells` for the "(none)" drop heuristic — the heuristic
+  // is about absolute prevalence in the data, not the background
+  // subset, so a tiny scope's "(none)" doesn't get hidden by the
+  // 5%-of-universe threshold.
+  const noneThresholdBase = totalCells > 0 ? totalCells : bgTotal;
+  for (const [label, count] of bgCounts.entries()) {
     // Drop the "(none)" / null slot from the displayed rows when it
     // would be visually noisy. Keep it when it's a meaningful slice
     // (>5% of the universe) so the user knows it exists.
-    if (label === "(none)" && totalCells > 0 && count / totalCells < 0.05)
+    if (label === "(none)" && noneThresholdBase > 0 && count / noneThresholdBase < 0.05)
       continue;
     out.push({
       label,
       hex: colorMap[label] ?? "#dcdcdc",
-      universeCount: count,
-      highlightCount: highlightCounts.get(label) ?? 0,
+      bgCount: count,
+      fgCount: fgCounts.get(label) ?? 0,
     });
   }
-  out.sort((a, b) => b.universeCount - a.universeCount);
+  out.sort((a, b) => b.bgCount - a.bgCount);
   return out;
 }
 
@@ -415,9 +537,10 @@ interface NumericHistogramProps {
   column: string;
   values: Array<number | null>;
   cellIds: string[];
-  highlightedCellIds: Set<string> | null;
-  /** Hex color for the highlight bars. Defaults to the project's
-   *  accent orange so unbound (e.g. lasso-only) cases still read. */
+  bgCellIds: Set<string> | null;
+  fgCellIds: Set<string> | null;
+  /** Hex color for the foreground bars. Defaults to the project's
+   *  accent orange so unbound (e.g. selection-only) cases still read. */
   color?: string;
 }
 
@@ -425,15 +548,16 @@ function NumericHistogram({
   column,
   values,
   cellIds,
-  highlightedCellIds,
+  bgCellIds,
+  fgCellIds,
   color = "#f59e0b",
 }: NumericHistogramProps) {
   const bins = useMemo(
-    () => buildHistogram(values, cellIds, highlightedCellIds, 24),
-    [values, cellIds, highlightedCellIds],
+    () => buildHistogram(values, cellIds, bgCellIds, fgCellIds, 24),
+    [values, cellIds, bgCellIds, fgCellIds],
   );
 
-  if (!bins || bins.universeDensity.length === 0) return null;
+  if (!bins || bins.bgDensity.length === 0) return null;
 
   const width = 240;
   // Reduced from the previous 60→46 — the axis-tick row is now rendered
@@ -446,18 +570,17 @@ function NumericHistogram({
   const innerH = height;
   // Both distributions are area-normalized to sum 1; the y-axis is
   // shared and scales to the larger of the two distributions' max
-  // bin. Result: subset bars and universe bars are visually
+  // bin. Result: foreground bars and background bars are visually
   // comparable as *shapes* — the user can see a distribution shift
-  // even when the subset is 444 cells out of 94k. Absolute counts
-  // are shown above the histogram in the "N of M cells in scope"
-  // line.
+  // even when the foreground is 444 cells out of 94k. Absolute counts
+  // are shown above the histogram in the count line.
   const maxDensity = Math.max(
     1e-9,
-    ...bins.universeDensity,
-    ...bins.highlightDensity,
+    ...bins.bgDensity,
+    ...bins.fgDensity,
   );
-  const barW = innerW / bins.universeDensity.length;
-  const hasHighlight = bins.highlightDensity.some((d) => d > 0);
+  const barW = innerW / bins.bgDensity.length;
+  const hasFg = bins.fgDensity.some((d) => d > 0);
 
   return (
     <div className="summary-histogram" title={column}>
@@ -467,14 +590,14 @@ function NumericHistogram({
         className="summary-histogram-svg"
         preserveAspectRatio="none"
       >
-        {bins.universeDensity.map((u, i) => {
-          const h = (u / maxDensity) * innerH;
-          const hl = bins.highlightDensity[i];
-          const hlH = (hl / maxDensity) * innerH;
+        {bins.bgDensity.map((bg, i) => {
+          const h = (bg / maxDensity) * innerH;
+          const fg = bins.fgDensity[i];
+          const fgH = (fg / maxDensity) * innerH;
           const x = padLeft + i * barW;
           return (
             <g key={i}>
-              {/* Universe bar (gray). */}
+              {/* Background bar (gray). */}
               <rect
                 x={x + 0.5}
                 y={innerH - h}
@@ -482,15 +605,15 @@ function NumericHistogram({
                 height={h}
                 fill="rgba(0, 0, 0, 0.18)"
               />
-              {/* Highlight overlay (in the channel color). Density-
+              {/* Foreground overlay (in the channel color). Density-
                   normalized so a small subset is still visible at
-                  comparable scale to the universe distribution. */}
-              {hasHighlight && hl > 0 && (
+                  comparable scale to the background distribution. */}
+              {hasFg && fg > 0 && (
                 <rect
                   x={x + 0.5}
-                  y={innerH - hlH}
+                  y={innerH - fgH}
                   width={Math.max(0, barW - 1)}
-                  height={hlH}
+                  height={fgH}
                   fill={color}
                   opacity={0.8}
                 />
@@ -511,13 +634,13 @@ function NumericHistogram({
 }
 
 interface HistogramData {
-  /** Universe distribution density (each value = bin count /
-   *  universe total; sums to 1). */
-  universeDensity: number[];
-  /** Highlight distribution density (each value = bin count /
-   *  highlight total; sums to 1 when the highlight is non-empty,
+  /** Background distribution density (each value = bin count /
+   *  background total; sums to 1). */
+  bgDensity: number[];
+  /** Foreground distribution density (each value = bin count /
+   *  foreground total; sums to 1 when the foreground is non-empty,
    *  else all zeros). */
-  highlightDensity: number[];
+  fgDensity: number[];
   binMin: number;
   binMax: number;
 }
@@ -525,14 +648,21 @@ interface HistogramData {
 function buildHistogram(
   values: Array<number | null>,
   cellIds: string[],
-  highlight: Set<string> | null,
+  bgCellIds: Set<string> | null,
+  fgCellIds: Set<string> | null,
   nBins: number,
 ): HistogramData | null {
-  // Pass 1: extent over finite values.
+  // Pass 1: extent over finite values in the background set. Using
+  // the background subset (rather than all values) keeps bins
+  // meaningful when "vs Scope" mode has narrowed the comparison to
+  // a small population — a long-tail outlier in the universe
+  // shouldn't squash the scope's distribution into a single bin.
   let mn = Number.POSITIVE_INFINITY;
   let mx = Number.NEGATIVE_INFINITY;
-  for (const v of values) {
+  for (let i = 0; i < values.length; i++) {
+    const v = values[i];
     if (v === null || v === undefined || !Number.isFinite(v)) continue;
+    if (bgCellIds && !bgCellIds.has(cellIds[i])) continue;
     if (v < mn) mn = v;
     if (v > mx) mx = v;
   }
@@ -540,9 +670,9 @@ function buildHistogram(
 
   const binsLen = mx === mn ? 1 : nBins;
   const binCounts = new Array<number>(binsLen).fill(0);
-  const highlightCounts = new Array<number>(binsLen).fill(0);
-  let universeTotal = 0;
-  let highlightTotal = 0;
+  const fgCounts = new Array<number>(binsLen).fill(0);
+  let bgTotal = 0;
+  let fgTotal = 0;
 
   if (mx === mn) {
     // Constant column — single bin so the panel renders without a
@@ -550,11 +680,13 @@ function buildHistogram(
     for (let i = 0; i < values.length; i++) {
       const v = values[i];
       if (v === null || v === undefined || !Number.isFinite(v)) continue;
+      const id = cellIds[i];
+      if (bgCellIds && !bgCellIds.has(id)) continue;
       binCounts[0] += 1;
-      universeTotal += 1;
-      if (highlight && highlight.has(cellIds[i])) {
-        highlightCounts[0] += 1;
-        highlightTotal += 1;
+      bgTotal += 1;
+      if (fgCellIds && fgCellIds.has(id)) {
+        fgCounts[0] += 1;
+        fgTotal += 1;
       }
     }
   } else {
@@ -562,26 +694,28 @@ function buildHistogram(
     for (let i = 0; i < values.length; i++) {
       const v = values[i];
       if (v === null || v === undefined || !Number.isFinite(v)) continue;
+      const id = cellIds[i];
+      if (bgCellIds && !bgCellIds.has(id)) continue;
       let bin = Math.floor(((v - mn) / span) * nBins);
       if (bin >= nBins) bin = nBins - 1; // clamp the max-value point
       binCounts[bin] += 1;
-      universeTotal += 1;
-      if (highlight && highlight.has(cellIds[i])) {
-        highlightCounts[bin] += 1;
-        highlightTotal += 1;
+      bgTotal += 1;
+      if (fgCellIds && fgCellIds.has(id)) {
+        fgCounts[bin] += 1;
+        fgTotal += 1;
       }
     }
   }
 
   // Normalize to densities (each distribution sums to 1) so a small
-  // subset's shape is visually comparable to the full universe's.
-  const universeDensity = binCounts.map((c) =>
-    universeTotal > 0 ? c / universeTotal : 0,
+  // foreground's shape is visually comparable to the full background's.
+  const bgDensity = binCounts.map((c) =>
+    bgTotal > 0 ? c / bgTotal : 0,
   );
-  const highlightDensity = highlightCounts.map((c) =>
-    highlightTotal > 0 ? c / highlightTotal : 0,
+  const fgDensity = fgCounts.map((c) =>
+    fgTotal > 0 ? c / fgTotal : 0,
   );
-  return { universeDensity, highlightDensity, binMin: mn, binMax: mx };
+  return { bgDensity, fgDensity, binMin: mn, binMax: mx };
 }
 
 function formatTick(n: number): string {
@@ -594,13 +728,13 @@ function formatTick(n: number): string {
 
 function SummaryRow({
   cat,
-  maxUniverse,
+  maxBg,
 }: {
   cat: CategoryRow;
-  maxUniverse: number;
+  maxBg: number;
 }) {
-  const universePct = (cat.universeCount / maxUniverse) * 100;
-  const highlightPctOfMax = (cat.highlightCount / maxUniverse) * 100;
+  const bgPct = (cat.bgCount / maxBg) * 100;
+  const fgPctOfMax = (cat.fgCount / maxBg) * 100;
   return (
     <div className="summary-row">
       <div className="summary-row-label" title={cat.label}>
@@ -613,27 +747,27 @@ function SummaryRow({
       <div className="summary-row-bar-wrap">
         <div
           className="summary-row-bar-universe"
-          style={{ width: `${universePct}%` }}
+          style={{ width: `${bgPct}%` }}
         />
-        {cat.highlightCount > 0 && (
+        {cat.fgCount > 0 && (
           <div
             className="summary-row-bar-highlight"
             style={{
-              width: `${highlightPctOfMax}%`,
+              width: `${fgPctOfMax}%`,
               background: cat.hex,
             }}
           />
         )}
       </div>
       <div className="summary-row-count">
-        {cat.highlightCount > 0 ? (
+        {cat.fgCount > 0 ? (
           <>
-            {cat.highlightCount.toLocaleString()}
+            {cat.fgCount.toLocaleString()}
             <span className="summary-row-count-of">/</span>
-            {cat.universeCount.toLocaleString()}
+            {cat.bgCount.toLocaleString()}
           </>
         ) : (
-          cat.universeCount.toLocaleString()
+          cat.bgCount.toLocaleString()
         )}
       </div>
     </div>

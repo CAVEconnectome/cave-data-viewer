@@ -33,6 +33,7 @@ import {
   vizParamKey,
 } from "../plots/urlState";
 import { listVizColumns } from "../plots/vizColumns";
+import { useTablesUniqueValues } from "../api/queries";
 import { CellFilterMenu } from "./CellFilterMenu";
 import { DynamicPlotPanel } from "./DynamicPlotPanel";
 import { PlotPanel } from "./PlotPanel";
@@ -240,6 +241,13 @@ export function AnalyticsRail({ ds, rootId, matVersion, bundle, decorationTables
     () => [...(bundle.partners_in ?? []), ...(bundle.partners_out ?? [])],
     [bundle.partners_in, bundle.partners_out],
   );
+  // Distinct-value universe for every attached decoration table so the
+  // predicate builder shows categorical dropdowns / checkbox lists
+  // instead of free-text. Reuses the 7-day immutable
+  // `dcv_unique_values_cache` keyed by (ds, mv, table); the same fetch
+  // backs the table view's column filters, so cross-navigated pages
+  // typically have warm cache hits.
+  const tableValues = useTablesUniqueValues(ds, decorationTables, matVersion);
 
   return (
     <div className="plots">
@@ -266,6 +274,7 @@ export function AnalyticsRail({ ds, rootId, matVersion, bundle, decorationTables
         <CellFilterMenu
           columnGroups={bundle.column_groups}
           sampleRows={filterSampleRows}
+          availableValues={tableValues.values}
         />
       </div>
       {resolvedRegistry.map((d) =>

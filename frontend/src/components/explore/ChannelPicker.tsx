@@ -34,6 +34,14 @@ interface Props {
    *  parent — typically 2/18). */
   sizeMinPx: number;
   sizeMaxPx: number;
+  /** Numeric size channel data-range clipping. Mirrors colorBound /
+   *  colorMin / colorMax for size. ``sizeBound`` is the underlying
+   *  data extent (from the response); ``sizeDataMin`` / ``sizeDataMax``
+   *  are the user-clamped values within it. Only meaningful when a
+   *  size channel is bound. */
+  sizeBound?: { lo: number; hi: number } | null;
+  sizeDataMin?: number | null;
+  sizeDataMax?: number | null;
   /** Numeric color channel clipping. ``colorBound`` is the underlying
    *  data extent (from the response); ``colorMin``/``colorMax`` are
    *  the user-clamped values within it. Only meaningful when color is
@@ -64,6 +72,8 @@ interface Props {
     sizeBy?: string | null;
     sizeMinPx?: number;
     sizeMaxPx?: number;
+    sizeDataMin?: number | null;
+    sizeDataMax?: number | null;
     colorMin?: number | null;
     colorMax?: number | null;
     colormapId?: string | null;
@@ -95,6 +105,9 @@ export function ChannelPicker({
   sizeBy,
   sizeMinPx,
   sizeMaxPx,
+  sizeBound,
+  sizeDataMin,
+  sizeDataMax,
   colorBound,
   colorMin,
   colorMax,
@@ -282,8 +295,40 @@ export function ChannelPicker({
         defaultLabel="—"
         options={sizeOptions}
         allowNone
-        onChange={(v) => onChange({ sizeBy: v })}
+        onChange={(v) =>
+          onChange({
+            sizeBy: v,
+            // Reset the data-range clip when the column changes —
+            // the old min/max bounds are meaningless for a new
+            // column. Same pattern as colorBy → colorMin/colorMax.
+            sizeDataMin: null,
+            sizeDataMax: null,
+          })
+        }
       />
+      {/* Size data range — only when a size channel is bound. Mirrors
+          color's range slider: out-of-range cells clamp to the size
+          endpoints so a long-tail outlier doesn't squash the size
+          gradient onto a few cells. */}
+      {sizeBy && sizeBound && (() => {
+        const lo = sizeDataMin ?? sizeBound.lo;
+        const hi = sizeDataMax ?? sizeBound.hi;
+        return (
+          <RangeSlider
+            label="range"
+            bound={sizeBound}
+            min={lo}
+            max={hi}
+            formatValue={formatNumericTick}
+            onChange={(next) =>
+              onChange({
+                ...(next.min !== undefined ? { sizeDataMin: next.min } : {}),
+                ...(next.max !== undefined ? { sizeDataMax: next.max } : {}),
+              })
+            }
+          />
+        );
+      })()}
       {/* Size slider is always present. Single-thumb when no size
           channel is bound (controls uniform point size); dual-thumb
           range when a channel is bound (rank-scaled px endpoints).

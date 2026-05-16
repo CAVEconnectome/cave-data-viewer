@@ -894,34 +894,6 @@ h1, h2, h3, h4, h5, h6 {
   margin-bottom: 8px;
   font-size: 12px;
 }
-.cell-filter-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  font-weight: 500;
-  color: var(--muted);
-  margin-bottom: 4px;
-}
-.cell-filter-add {
-  /* Flex-center the glyph rather than rely on text metrics — most
-     fonts render "+" with its optical center slightly below the
-     line-box center, which made the button look like the glyph was
-     sagging. Inline-flex with both-axis centering puts the glyph
-     dead-center regardless of font. */
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 14px;
-  line-height: 1;
-  width: 22px; height: 22px;
-  padding: 0;
-  border: 1px solid var(--line);
-  border-radius: var(--r-md);
-  background: var(--bg);
-  cursor: pointer;
-}
-.cell-filter-add:disabled { opacity: 0.5; cursor: default; }
-.cell-filter-empty { color: var(--muted); font-style: italic; }
 .cell-filter-chips {
   display: flex; flex-wrap: wrap; gap: 4px;
 }
@@ -995,42 +967,227 @@ h1, h2, h3, h4, h5, h6 {
   margin-top: 1px;
 }
 .cell-filter-chip > button:last-child:hover { color: var(--error); }
+/* Empty-state "Build a predicate" button — primary affordance when
+   the popover has no chips yet. Wider hit target than the old `+`
+   icon button so it reads as the obvious first thing to do. */
+.cell-filter-add-primary {
+  font-size: 12px;
+  padding: 6px 10px;
+  background: rgba(99, 102, 241, 0.08);
+  color: #4f46e5;
+  border: 1px dashed #a5b4fc;
+  border-radius: 4px;
+  cursor: pointer;
+  letter-spacing: 0.02em;
+  margin-top: 4px;
+  width: 100%;
+  text-align: center;
+}
+.cell-filter-add-primary:hover:not(:disabled) {
+  background: rgba(99, 102, 241, 0.16);
+  border-color: #6366f1;
+}
+.cell-filter-add-primary:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+/* Ghost "+ add predicate" link — secondary affordance when chips
+   already exist. Quieter than the primary so it doesn't compete with
+   the chips above it for visual weight. */
+.cell-filter-add-ghost {
+  font-size: 11px;
+  padding: 2px 6px;
+  background: transparent;
+  color: var(--muted, #6b7280);
+  border: none;
+  cursor: pointer;
+  margin-top: 4px;
+  align-self: flex-start;
+}
+.cell-filter-add-ghost:hover:not(:disabled) {
+  color: var(--accent, #4f46e5);
+}
+.cell-filter-add-ghost:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+/* Predicate builder — vertical card layout. Replaces the old
+   flex-wrap row that squashed selects against each other at popover
+   widths. Each labeled section (Where / Match) reads as a distinct
+   block; the footer separates "decide" actions from "data" controls. */
 .cell-filter-builder {
   display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  margin-top: 4px;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 6px;
+  padding: 8px;
+  background: var(--surface, #fff);
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 6px;
 }
-.cell-filter-builder select,
-.cell-filter-builder input {
-  /* Match the channel-select look (.explore-channel-select) so the
-     filter builder and the channel pickers read as one design system —
-     same font size, same panel background, same border, same radius. */
+.cell-filter-builder-section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.cell-filter-builder-section-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted, #6b7280);
+  font-weight: 600;
+}
+.cell-filter-builder-section-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+/* Sub-row inside a section — op + value sit inline for the simple
+   case. between / checklist break the row and render full-width
+   below it (handled at the JSX level). */
+.cell-filter-builder-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  min-width: 0;
+}
+.cell-filter-builder-row > * {
+  min-width: 0;
+}
+/* The op select sizes to its content ("equals", "is one of") so the
+   value input gets the remaining space. Without this override the
+   base .cell-filter-builder-select { width: 100% } rule consumes the
+   row's flex basis and starves the value input down to a sliver. */
+.cell-filter-builder-row .cell-filter-builder-select:first-child {
+  width: auto;
+  flex: 0 0 auto;
+}
+.cell-filter-builder-row .cell-filter-builder-select:nth-child(2),
+.cell-filter-builder-row .cell-filter-builder-input {
+  flex: 1 1 0;
+  width: auto;
+}
+/* Selects + inputs — match the channel-select look across the app
+   so the builder and the channel pickers read as one design system. */
+.cell-filter-builder-select,
+.cell-filter-builder-input {
   font-size: 12px;
-  padding: 2px 4px;
+  padding: 3px 6px;
   background: var(--panel, #fff);
   border: 1px solid var(--border, #e5e7eb);
   border-radius: 4px;
-  /* Let long column / table names truncate inside the select rather
-     than stretch the row past the panel edge. */
   max-width: 100%;
   min-width: 0;
+  width: 100%;
 }
-.cell-filter-builder button {
+/* Footer — cancel + add, right-aligned with a divider above so the
+   user reads "decide / commit" in the same spot every time, matching
+   the surrounding .cell-filter-menu-footer in the popover. */
+.cell-filter-builder-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border, #e5e7eb);
+}
+.cell-filter-builder-btn {
   font-size: 12px;
-  padding: 2px 8px;
+  padding: 3px 12px;
   background: var(--panel, #fff);
+  color: var(--text, #111);
   border: 1px solid var(--border, #e5e7eb);
   border-radius: 4px;
   cursor: pointer;
+  letter-spacing: 0.02em;
 }
-.cell-filter-builder button[type="submit"]:not(:disabled) {
+.cell-filter-builder-btn:hover:not(:disabled) {
+  background: rgba(0, 0, 0, 0.04);
+}
+.cell-filter-builder-btn.primary {
   background: rgba(99, 102, 241, 0.1);
   border-color: #6366f1;
   color: #4f46e5;
 }
-.cell-filter-builder button[type="submit"]:not(:disabled):hover {
+.cell-filter-builder-btn.primary:hover:not(:disabled) {
   background: rgba(99, 102, 241, 0.18);
+}
+.cell-filter-builder-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* Categorical-value checklist for in/notin ops. Wraps full-width below
+   the predicate-builder's row of selects when active, since a row of
+   30+ checkboxes wouldn't fit alongside the table/column/op selects.
+   Mirrors the table view's category-filter UX so the user sees the
+   same enumeration in both surfaces. */
+.cell-filter-checklist {
+  flex-basis: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 2px;
+  padding: 4px;
+  background: var(--surface, #fff);
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 4px;
+}
+.cell-filter-checklist-search {
+  font-size: 12px;
+  padding: 2px 6px;
+  background: var(--panel, #fff);
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 3px;
+  width: 100%;
+  min-width: 0;
+}
+.cell-filter-checklist-actions {
+  display: flex;
+  gap: 8px;
+}
+.cell-filter-checklist-link {
+  font-size: 11px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  color: var(--accent, #4f46e5);
+  cursor: pointer;
+  text-decoration: underline;
+}
+.cell-filter-checklist-link:disabled {
+  color: var(--muted, #6b7280);
+  cursor: default;
+  text-decoration: none;
+}
+.cell-filter-checklist-items {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-height: 160px;
+  overflow-y: auto;
+}
+.cell-filter-checklist-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  cursor: pointer;
+  padding: 1px 2px;
+  border-radius: 2px;
+}
+.cell-filter-checklist-item:hover {
+  background: rgba(0, 0, 0, 0.04);
+}
+.cell-filter-checklist-item input {
+  margin: 0;
+  cursor: pointer;
+}
+.cell-filter-checklist-empty {
+  font-size: 11px;
+  color: var(--muted, #6b7280);
+  font-style: italic;
+  padding: 4px;
 }
 
 /* Between-mode value inputs sit side-by-side with an "and" between them.
@@ -1081,15 +1238,9 @@ h1, h2, h3, h4, h5, h6 {
   display: inline-block;
 }
 .cell-filter-menu-trigger {
-  font-size: 11px;
-  padding: 2px 10px;
   background: var(--surface, #fff);
   color: var(--muted, #6b7280);
   border: 1px solid var(--border, #e5e7eb);
-  border-radius: 4px;
-  cursor: pointer;
-  white-space: nowrap;
-  letter-spacing: 0.02em;
 }
 .cell-filter-menu-trigger:hover {
   color: var(--text, #111);
@@ -1147,6 +1298,101 @@ h1, h2, h3, h4, h5, h6 {
   margin: 0;
   padding: 4px;
   background: transparent;
+}
+/* Popover header: title, active scope source line, Ghost/Hide toggle.
+   Visually grouped at the top so the user understands the popover is
+   about scope (not generic filtering) before they reach the predicate
+   editor below. */
+.cell-filter-menu-header {
+  padding: 6px 8px 8px 8px;
+  border-bottom: 1px solid var(--border, #e5e7eb);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.cell-filter-menu-header-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text, #111);
+  letter-spacing: 0.01em;
+}
+.cell-filter-menu-header-source {
+  font-size: 11px;
+  color: var(--muted, #6b7280);
+  font-style: italic;
+}
+.cell-filter-menu-mode-toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 2px;
+}
+.cell-filter-menu-mode-label {
+  font-size: 11px;
+  color: var(--muted, #6b7280);
+  margin-right: 4px;
+}
+.cell-filter-menu-mode-btn {
+  font-size: 11px;
+  padding: 1px 8px;
+  background: var(--surface, #fff);
+  color: var(--muted, #6b7280);
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 3px;
+  cursor: pointer;
+  letter-spacing: 0.02em;
+}
+.cell-filter-menu-mode-btn:hover {
+  color: var(--text, #111);
+  border-color: var(--text, #111);
+}
+.cell-filter-menu-mode-btn.active {
+  background: var(--text, #111);
+  color: var(--surface, #fff);
+  border-color: var(--text, #111);
+}
+/* Predicate editor wrapper. Used so the popover can grey out the
+   editor when the snapshot scope is active — predicates are inert
+   while the snapshot owns scope, and the disabled-look signals that. */
+.cell-filter-panel-wrap {
+  padding: 4px 0;
+}
+.cell-filter-panel-wrap.disabled {
+  opacity: 0.5;
+  pointer-events: none;
+}
+/* Popover footer: snapshot action + clear-scope. Visually separated
+   from the predicate editor so the user reads the two surfaces as
+   distinct: above = "build a scope by rule," below = "snapshot the
+   current selection as scope, or clear all scope." */
+.cell-filter-menu-footer {
+  padding: 6px 8px 4px 8px;
+  border-top: 1px solid var(--border, #e5e7eb);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+}
+.cell-filter-menu-footer-btn {
+  font-size: 11px;
+  padding: 3px 10px;
+  background: var(--surface, #fff);
+  color: var(--text, #111);
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 4px;
+  cursor: pointer;
+  letter-spacing: 0.02em;
+}
+.cell-filter-menu-footer-btn:not(:disabled):hover {
+  background: rgba(245, 158, 11, 0.1);
+  border-color: #f59e0b;
+}
+.cell-filter-menu-footer-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.cell-filter-menu-footer-btn-count {
+  color: var(--muted, #6b7280);
 }
 /* When the menu sits in the explorer drawer header, the surrounding
    button (drawer handle) is a flex row; align our wrapper to it. */
@@ -3343,7 +3589,24 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .explore-drawer-handle {
   display: flex;
   align-items: center;
-  gap: 8px;
+  /* Wrap by group when the row can't fit. The pill groups have
+     internal flex-wrap: nowrap so they stay together; the wrap
+     point is between groups, which keeps related actions visually
+     clustered. */
+  flex-wrap: wrap;
+  /* Container-type so the pill-suffix / pill-count container
+     queries below resolve against the drawer-handle's width
+     rather than the viewport. The drawer width depends on the
+     rail's width, not the window, so a viewport @media query
+     wouldn't catch all the narrow cases. */
+  container-type: inline-size;
+  container-name: drawer-handle;
+  /* Larger horizontal gap between groups (16px) than between pills
+     inside a group (handled by .explore-pill-group's 6px gap), so
+     the filter / NGL / selection clusters read as three distinct
+     units rather than one undifferentiated row. Vertical gap (6px)
+     applies only when wrapping. */
+  gap: 6px 16px;
   padding: 6px 12px;
   background: transparent;
   border: none;
@@ -3352,6 +3615,26 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   color: var(--muted, #6b7280);
   text-align: left;
   width: 100%;
+}
+/* Pill groups — internal cluster of related actions (filter / NGL /
+   selection). Stays together on wrap so the user reads each cluster
+   as one unit. Inner gap is tight (6px) so the cluster reads as one
+   thing; the larger 16px gap on the drawer-handle separates clusters. */
+.explore-pill-group {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 6px;
+}
+/* Compact mode: at moderate widths, drop the secondary label words
+   ("Scope", "selection") and the count parentheticals from the NGL
+   pills. Tooltips carry the full text. The pills themselves stay
+   in place, just narrower — wrap-by-group is the last resort. */
+@container drawer-handle (max-width: 880px) {
+  .explore-pill-suffix,
+  .explore-pill-count {
+    display: none;
+  }
 }
 .explore-drawer-handle:hover {
   background: rgba(0, 0, 0, 0.02);
@@ -3847,6 +4130,43 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   padding-top: 8px;
   border-top: 1px solid var(--border, #e5e7eb);
 }
+/* Summary header row: label on the left, bg-mode toggle on the right.
+   Toggle is only rendered when a Filter Scope is active (otherwise
+   "vs All" and "vs Scope" collapse onto the same view). */
+.summary-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.summary-bg-toggle {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.summary-bg-toggle-btn {
+  font-size: 10px;
+  padding: 2px 8px;
+  background: var(--surface, #fff);
+  color: var(--muted, #6b7280);
+  border: none;
+  cursor: pointer;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+.summary-bg-toggle-btn + .summary-bg-toggle-btn {
+  border-left: 1px solid var(--border, #e5e7eb);
+}
+.summary-bg-toggle-btn:hover:not(.active) {
+  color: var(--text, #111);
+  background: rgba(0, 0, 0, 0.03);
+}
+.summary-bg-toggle-btn.active {
+  background: var(--text, #111);
+  color: var(--surface, #fff);
+}
 .summary-panel-count {
   font-size: 12px;
   color: var(--muted, #6b7280);
@@ -4218,16 +4538,39 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 }
 
 /* Shared base for NGL action pills (indigo). */
-.explore-ngl-pill {
-  margin-left: 6px;
+/* Shared base for every drawer-toolbar pill — Filter Scope, NGL,
+   clear, Save selection, Sets. Standardizes height by pinning
+   line-height + padding + box-sizing so `<button>` and `<span
+   role="button">` instances render identical. Without this, the
+   `<button>` elements pick up UA defaults (different font-family,
+   line-height: normal) and render visibly taller than the spans.
+   `inline-block` (rather than `inline-flex`) so the pill's internal
+   text + suffix-span content laid out via normal inline flow —
+   inline-flex strips whitespace between flex items, which butted
+   the suffix span up against the preceding word ("FilterScope"
+   instead of "Filter Scope"). */
+.cell-filter-menu-trigger,
+.saved-sets-menu-trigger,
+.explore-ngl-pill,
+.explore-clear-pill,
+.explore-save-pill {
+  display: inline-block;
+  vertical-align: middle;
+  box-sizing: border-box;
+  font-family: inherit;
   font-size: 11px;
-  padding: 2px 10px;
-  background: rgba(99, 102, 241, 0.12);
-  color: #4338ca;
-  border: 1px solid #818cf8;
+  line-height: 1.2;
+  padding: 3px 10px;
   border-radius: 4px;
   cursor: pointer;
   white-space: nowrap;
+  letter-spacing: 0.02em;
+}
+
+.explore-ngl-pill {
+  background: rgba(99, 102, 241, 0.12);
+  color: #4338ca;
+  border: 1px solid #818cf8;
 }
 .explore-ngl-pill:hover:not(.disabled) { background: rgba(99, 102, 241, 0.22); }
 .explore-ngl-pill.disabled {
@@ -4242,12 +4585,6 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
    accent that matches the corresponding highlight on the scatter:
    orange for the lasso, blue for the row-selection. */
 .explore-clear-pill {
-  margin-left: 4px;
-  font-size: 11px;
-  padding: 2px 8px;
-  border-radius: 4px;
-  cursor: pointer;
-  white-space: nowrap;
   border: 1px solid transparent;
 }
 .explore-clear-pill-lasso {
@@ -4274,12 +4611,6 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
    pills, distinct color (gold) so it reads as a separate affordance
    rather than another clear-action. */
 .explore-save-pill {
-  margin-left: 4px;
-  font-size: 11px;
-  padding: 2px 8px;
-  border-radius: 4px;
-  cursor: pointer;
-  white-space: nowrap;
   background: rgba(202, 138, 4, 0.12);
   color: #854d0e;
   border: 1px solid #ca8a04;
@@ -4322,14 +4653,46 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .explore-save-prompt-ok:hover { color: #16a34a; }
 .explore-save-prompt-cancel:hover { color: #dc2626; }
 
-/* ---- Saved cell sets panel (left rail) ------------------------------- */
-.saved-sets-panel {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding-top: 8px;
-  border-top: 1px solid var(--border, #e5e7eb);
+/* ---- Saved cell sets menu (drawer toolbar pill + popover) ------------ */
+/* Trigger pill — sibling to .explore-save-pill so the two read as a
+   matched pair in the drawer header. Warm amber tint when there's at
+   least one saved set; quieter "no sets" disabled state otherwise. */
+.saved-sets-menu {
+  position: relative;
+  display: inline-block;
 }
+.saved-sets-menu-trigger {
+  background: rgba(202, 138, 4, 0.12);
+  color: #854d0e;
+  border: 1px solid #ca8a04;
+}
+.saved-sets-menu-trigger.has-sets:hover { background: rgba(202, 138, 4, 0.22); }
+.saved-sets-menu-trigger.disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  background: rgba(0, 0, 0, 0.03);
+  color: var(--muted, #6b7280);
+  border-color: var(--border, #e5e7eb);
+}
+.saved-sets-menu-popover {
+  position: absolute;
+  /* Right-anchor — the trigger sits at the right end of the drawer-
+     header cluster (after Save selection). Anchoring left would push
+     the popover off-screen on narrow displays. */
+  right: 0;
+  min-width: 240px;
+  max-width: 360px;
+  background: var(--panel, #fff);
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+  padding: 6px;
+  z-index: 1000;
+  /* .cell-filter-menu-popover-up handles bottom: calc(100% + 4px) so
+     the popover opens upward from a drawer-anchored trigger. */
+}
+
+/* ---- Saved cell sets list (inside popover) ---------------------------- */
 .saved-sets-empty {
   font-size: 11px;
   color: var(--muted, #6b7280);
@@ -4435,31 +4798,4 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   border-bottom: 1px solid var(--border, #e5e7eb);
   margin-bottom: 8px;
   flex-wrap: wrap;
-}
-.explore-toolbar-btn {
-  font-size: 12px;
-  padding: 4px 10px;
-  background: var(--panel, #fff);
-  border: 1px solid var(--border, #e5e7eb);
-  border-radius: 4px;
-  cursor: pointer;
-  color: var(--text, #111);
-}
-.explore-toolbar-btn:hover:not(:disabled) {
-  background: rgba(0, 0, 0, 0.04);
-}
-.explore-toolbar-btn:disabled {
-  color: var(--muted, #9ca3af);
-  cursor: not-allowed;
-  opacity: 0.55;
-}
-.explore-toolbar-btn-count {
-  font-family: var(--font-mono, ui-monospace, monospace);
-  color: var(--muted, #6b7280);
-}
-.explore-toolbar-hint {
-  font-size: 11px;
-  color: var(--muted, #6b7280);
-  font-style: italic;
-  margin-left: 4px;
 }

@@ -226,6 +226,14 @@ interface Props {
    *  (decoration tables, partners-frame intrinsic tables) render flat
    *  as before. */
   categoriesByTable?: Record<string, FeatureCategory[]>;
+  /** Distinct-value universe per qualified column (`${table}.${col}`).
+   *  When a column being filtered has entries here, the predicate
+   *  builder swaps free-text input for a dropdown (eq/ne) or checkbox
+   *  multi-select (in/notin), mirroring the table view's categorical
+   *  filter UX. Missing columns fall back to free-text — works for
+   *  parquet feature-table strings (no /values endpoint for those) and
+   *  for tables whose unique-values fetch failed. */
+  availableValues?: Record<string, string[]>;
 }
 
 /**
@@ -237,7 +245,7 @@ interface Props {
  * op → value). The full predicate text is the chip label so users learn the
  * grammar by reading their own filters.
  */
-export function CellFilterPanel({ columnGroups, sampleRows, categoriesByTable }: Props) {
+export function CellFilterPanel({ columnGroups, sampleRows, categoriesByTable, availableValues }: Props) {
   const [raw, setRaw] = useUrlParam("cells");
   const preds = useMemo(() => parseCells(raw), [raw]);
   const items = useMemo(() => mergeBetween(preds), [preds]);
@@ -275,27 +283,16 @@ export function CellFilterPanel({ columnGroups, sampleRows, categoriesByTable }:
     setAdding(false);
   };
 
+  // Disable the "add predicate" affordance when there's no table to
+  // filter on. The "Load a decoration table first" hint surfaces via
+  // the title attribute on the disabled button.
+  const noTables = tableGroups.length === 0;
+
   return (
     <div className="cell-filter-panel">
-      <div className="cell-filter-header">
-        <span>Cell filter</span>
-        {!adding && (
-          <button
-            type="button"
-            className="cell-filter-add"
-            onClick={() => setAdding(true)}
-            disabled={tableGroups.length === 0}
-            title={
-              tableGroups.length === 0
-                ? "Load a decoration table first"
-                : "Add a predicate"
-            }
-          >+</button>
-        )}
-      </div>
-      {items.length === 0 && !adding && (
-        <div className="cell-filter-empty">no filter</div>
-      )}
+      {/* No inline "Cell filter" header — the popover title (Filter
+          Scope) already labels the surface. Removing the redundant
+          subheader gives the chips + builder more breathing room. */}
       {items.length > 0 && (
         <div className="cell-filter-chips">
           {items.map((item, i) => (
@@ -308,11 +305,48 @@ export function CellFilterPanel({ columnGroups, sampleRows, categoriesByTable }:
           ))}
         </div>
       )}
+      {/* Add-predicate affordance is shape-shifted by context: a
+          single primary "Build a predicate" button when no chips
+          exist (empty state), a ghost "+ add predicate" link when
+          chips are already there. Both open the builder card. The
+          builder hides this trigger while open — only one editor at
+          a time. */}
+      {!adding &&
+        (items.length === 0 ? (
+          <button
+            type="button"
+            className="cell-filter-add-primary"
+            onClick={() => setAdding(true)}
+            disabled={noTables}
+            title={
+              noTables
+                ? "Load a decoration table first"
+                : "Open the predicate builder"
+            }
+          >
+            + Build a predicate
+          </button>
+        ) : (
+          <button
+            type="button"
+            className="cell-filter-add-ghost"
+            onClick={() => setAdding(true)}
+            disabled={noTables}
+            title={
+              noTables
+                ? "Load a decoration table first"
+                : "Add another predicate"
+            }
+          >
+            + add predicate
+          </button>
+        ))}
       {adding && (
         <PredicateBuilder
           tableGroups={tableGroups}
           sampleRows={sampleRows ?? []}
           categoriesByTable={categoriesByTable}
+          availableValues={availableValues}
           onCancel={() => setAdding(false)}
           onAdd={addPredicates}
         />
@@ -411,6 +445,11 @@ interface BuilderProps {
    *  categories, the column select renders as optgroups; otherwise
    *  flat (the legacy behavior). */
   categoriesByTable?: Record<string, FeatureCategory[]>;
+  /** Distinct-value universe per qualified column. When the active
+   *  column has entries, eq/ne render as a `<select>` and in/notin
+   *  render as a checkbox list — matching the table view's pattern.
+   *  Columns without entries fall back to free-text. */
+  availableValues?: Record<string, string[]>;
   onCancel: () => void;
   onAdd: (preds: Omit<Predicate, "enabled">[]) => void;
 }
@@ -421,7 +460,7 @@ function bareColumn(c: string): string {
   return c.includes(".") ? c.split(".").slice(1).join(".") : c;
 }
 
-function PredicateBuilder({ tableGroups, sampleRows, categoriesByTable, onCancel, onAdd }: BuilderProps) {
+function PredicateBuilder({ tableGroups, sampleRows, categoriesByTable, availableValues, onCancel, onAdd }: BuilderProps) {
   const [table, setTable] = useState(tableGroups[0]?.name ?? "");
   const tableCols = useMemo(() => {
     const group = tableGroups.find((g) => g.name === table);
@@ -502,6 +541,20 @@ function PredicateBuilder({ tableGroups, sampleRows, categoriesByTable, onCancel
   const isBoolean = columnKind === "boolean";
   const isBetween = op === "between";
   const isNumeric = columnKind === "numeric";
+  // Categorical-value short-circuit: when the active column has an
+  // enumerated value universe (decoration table fed through
+  // `useTablesUniqueValues`), the predicate builder swaps the
+  // free-text input for a dropdown or checkbox list. Limited to
+  // string/unknown columns — numeric/boolean already have specialized
+  // widgets that are better than a dropdown over thousands of values.
+  // Parquet feature-table strings (no /values endpoint for those) fall
+  // through to free-text since their qualified col won't be in the map.
+  const qualifiedCol = table && column ? `${table}.${column}` : "";
+  const enumValues = availableValues?.[qualifiedCol];
+  const isStringish = columnKind === "string" || columnKind === "unknown";
+  const hasEnum = isStringish && !!enumValues && enumValues.length > 0;
+  const useDropdown = hasEnum && (op === "eq" || op === "ne");
+  const useChecklist = hasEnum && (op === "in" || op === "notin");
   // Between needs both endpoints. Comparison ops need a value unless
   // they're nullish. Boolean uses its own widget and is always "ready".
   const betweenOk =
@@ -548,79 +601,266 @@ function PredicateBuilder({ tableGroups, sampleRows, categoriesByTable, onCancel
         onAdd([{ table, column, op: op as Op, value: valueDisabled ? "" : value }]);
       }}
     >
-      <select value={table} onChange={(e) => onTableChange(e.target.value)}>
-        {tableGroups.map((g) => (
-          <option key={g.name} value={g.name}>{g.name}</option>
-        ))}
-      </select>
-      <select value={column} onChange={(e) => onColumnChange(e.target.value)}>
-        {columnSections.length === 1 && columnSections[0].title === null
-          ? // Flat layout — no optgroups so a one-table partners-frame
-            // filter doesn't get a single anonymous-group wrapper.
-            columnSections[0].columns.map((c) => (
-              <option key={c} value={c}>{c}</option>
-            ))
-          : columnSections.map((s) => (
-              <optgroup key={s.title ?? "_flat"} label={s.title ?? ""}>
-                {s.columns.map((c) => (
-                  <option key={c} value={c}>{c}</option>
-                ))}
-              </optgroup>
-            ))}
-      </select>
-      {isBoolean ? (
-        // Boolean: a single 4-option select replaces the op+value pair. Reads
-        // naturally as "field <choice>" which is what the user asked for.
-        <select value={boolIdx} onChange={(e) => setBoolIdx(Number(e.target.value))}>
-          {BOOL_PREDICATES.map((p, i) => (
-            <option key={i} value={i}>{p.label}</option>
-          ))}
-        </select>
-      ) : (
-        <>
-          <select value={op} onChange={(e) => setOp(e.target.value as BuilderOp)}>
-            {allowedOps.map((o) => (
-              <option key={o} value={o}>{OP_DROPDOWN_LABEL[o]}</option>
+      {/* Where: table + column.  Selects are stacked full-width inside
+          the card so long names ("aibs_metamodel_mtypes_v661_v2") don't
+          force the form to squash everything else. */}
+      <div className="cell-filter-builder-section">
+        <div className="cell-filter-builder-section-label">Where</div>
+        <div className="cell-filter-builder-section-body">
+          <select
+            className="cell-filter-builder-select"
+            value={table}
+            onChange={(e) => onTableChange(e.target.value)}
+            aria-label="table"
+          >
+            {tableGroups.map((g) => (
+              <option key={g.name} value={g.name}>{g.name}</option>
             ))}
           </select>
-          {isBetween ? (
-            <span className="cell-filter-between">
-              <input
-                type="number"
-                step="any"
-                className="cell-filter-between-input"
-                value={betweenLo}
-                onChange={(e) => setBetweenLo(e.target.value)}
-                placeholder="low"
-                aria-label="lower bound"
-              />
-              <span className="cell-filter-between-sep">and</span>
-              <input
-                type="number"
-                step="any"
-                className="cell-filter-between-input"
-                value={betweenHi}
-                onChange={(e) => setBetweenHi(e.target.value)}
-                placeholder="high"
-                aria-label="upper bound"
-              />
-            </span>
+          <select
+            className="cell-filter-builder-select"
+            value={column}
+            onChange={(e) => onColumnChange(e.target.value)}
+            aria-label="column"
+          >
+            {columnSections.length === 1 && columnSections[0].title === null
+              ? // Flat layout — no optgroups so a one-table partners-frame
+                // filter doesn't get a single anonymous-group wrapper.
+                columnSections[0].columns.map((c) => (
+                  <option key={c} value={c}>{c}</option>
+                ))
+              : columnSections.map((s) => (
+                  <optgroup key={s.title ?? "_flat"} label={s.title ?? ""}>
+                    {s.columns.map((c) => (
+                      <option key={c} value={c}>{c}</option>
+                    ))}
+                  </optgroup>
+                ))}
+          </select>
+        </div>
+      </div>
+      {/* Match: op + value (or a specialized value widget). The op
+          select sits inline with the value control for simple cases;
+          between / checklist break onto the row below since they're
+          tall. */}
+      <div className="cell-filter-builder-section">
+        <div className="cell-filter-builder-section-label">Match</div>
+        <div className="cell-filter-builder-section-body">
+          {isBoolean ? (
+            // Boolean: a single 4-option select replaces the op+value pair. Reads
+            // naturally as "field <choice>" which is what the user asked for.
+            <select
+              className="cell-filter-builder-select"
+              value={boolIdx}
+              onChange={(e) => setBoolIdx(Number(e.target.value))}
+              aria-label="predicate"
+            >
+              {BOOL_PREDICATES.map((p, i) => (
+                <option key={i} value={i}>{p.label}</option>
+              ))}
+            </select>
           ) : (
-            <input
-              type={isNumeric && op !== "in" && op !== "notin" ? "number" : "text"}
-              value={value}
-              onChange={(e) => setValue(e.target.value)}
-              disabled={valueDisabled}
-              placeholder={op === "in" || op === "notin" ? "a|b|c" : "value"}
-              size={10}
-              // Numeric inputs accept any precision; don't force step.
-              step={isNumeric && op !== "in" && op !== "notin" ? "any" : undefined}
-            />
+            <>
+              <div className="cell-filter-builder-row">
+                <select
+                  className="cell-filter-builder-select"
+                  value={op}
+                  onChange={(e) => setOp(e.target.value as BuilderOp)}
+                  aria-label="operator"
+                >
+                  {allowedOps.map((o) => (
+                    <option key={o} value={o}>{OP_DROPDOWN_LABEL[o]}</option>
+                  ))}
+                </select>
+                {/* Inline value widget for the simple cases (text,
+                    numeric, single-value dropdown). between/checklist
+                    render full-width below this row instead.
+                    Null/nonnull ops take no value at all — the op
+                    name is the predicate ("column is null"), so we
+                    omit the widget entirely rather than show a
+                    disabled placeholder. */}
+                {!isBetween && !useChecklist && !valueDisabled && (
+                  useDropdown ? (
+                    <select
+                      className="cell-filter-builder-select"
+                      value={value}
+                      onChange={(e) => setValue(e.target.value)}
+                      aria-label="value"
+                    >
+                      <option value="">— pick value —</option>
+                      {enumValues!.map((v) => (
+                        <option key={v} value={v}>{v}</option>
+                      ))}
+                    </select>
+                  ) : (
+                    <input
+                      className="cell-filter-builder-input"
+                      type={isNumeric && op !== "in" && op !== "notin" ? "number" : "text"}
+                      value={value}
+                      onChange={(e) => setValue(e.target.value)}
+                      placeholder={op === "in" || op === "notin" ? "a|b|c" : "value"}
+                      // Numeric inputs accept any precision; don't force step.
+                      step={isNumeric && op !== "in" && op !== "notin" ? "any" : undefined}
+                    />
+                  )
+                )}
+              </div>
+              {/* Wide value widgets break to the row below the op
+                  picker so they have room to breathe at popover width. */}
+              {isBetween && (
+                <span className="cell-filter-between">
+                  <input
+                    type="number"
+                    step="any"
+                    className="cell-filter-between-input"
+                    value={betweenLo}
+                    onChange={(e) => setBetweenLo(e.target.value)}
+                    placeholder="low"
+                    aria-label="lower bound"
+                  />
+                  <span className="cell-filter-between-sep">and</span>
+                  <input
+                    type="number"
+                    step="any"
+                    className="cell-filter-between-input"
+                    value={betweenHi}
+                    onChange={(e) => setBetweenHi(e.target.value)}
+                    placeholder="high"
+                    aria-label="upper bound"
+                  />
+                </span>
+              )}
+              {useChecklist && (
+                // Multi-value membership — checkbox list backed by the
+                // same pipe-separated wire format the in/notin predicate
+                // grammar already uses.
+                <ValueChecklist
+                  options={enumValues!}
+                  value={value}
+                  onChange={setValue}
+                />
+              )}
+            </>
           )}
-        </>
-      )}
-      <button type="submit" disabled={!canSubmit}>add</button>
-      <button type="button" onClick={onCancel}>cancel</button>
+        </div>
+      </div>
+      {/* Footer: cancel + add, right-aligned and separated from the
+          data controls by a divider. Mirrors the .cell-filter-menu-
+          footer pattern in the surrounding popover so the user reads
+          "decide / commit" in the same spot every time. */}
+      <div className="cell-filter-builder-footer">
+        <button
+          type="button"
+          className="cell-filter-builder-btn"
+          onClick={onCancel}
+        >
+          cancel
+        </button>
+        <button
+          type="submit"
+          className="cell-filter-builder-btn primary"
+          disabled={!canSubmit}
+        >
+          add
+        </button>
+      </div>
     </form>
+  );
+}
+
+/** Checkbox-list multi-select backed by the pipe-separated wire format
+ *  in/notin already uses. Surfaces a search box once the option count
+ *  passes a threshold — cell_type columns can have 30+ values and a
+ *  flat list becomes tedious to scan. Selecting/deselecting any
+ *  option re-serializes the pipe-joined string into the parent's
+ *  `value` state, so canSubmit (which checks `value !== ""`) stays
+ *  honest without the checklist needing its own readiness signal. */
+function ValueChecklist({
+  options,
+  value,
+  onChange,
+}: {
+  options: string[];
+  value: string;
+  onChange: (next: string) => void;
+}) {
+  const [search, setSearch] = useState("");
+  const selected = useMemo(
+    () => new Set(value.split("|").filter(Boolean)),
+    [value],
+  );
+  // Search becomes worth the chrome around ~12 entries — below that
+  // the user can eyeball the list faster than typing.
+  const SEARCH_THRESHOLD = 12;
+  const showSearch = options.length >= SEARCH_THRESHOLD;
+  const filtered = useMemo(() => {
+    if (!search) return options;
+    const needle = search.toLowerCase();
+    return options.filter((o) => o.toLowerCase().includes(needle));
+  }, [options, search]);
+  const toggle = (v: string) => {
+    const next = new Set(selected);
+    if (next.has(v)) next.delete(v);
+    else next.add(v);
+    onChange([...next].join("|"));
+  };
+  const selectAllVisible = () => {
+    const next = new Set(selected);
+    for (const v of filtered) next.add(v);
+    onChange([...next].join("|"));
+  };
+  const clearAll = () => onChange("");
+  return (
+    <div className="cell-filter-checklist">
+      {showSearch && (
+        <input
+          type="text"
+          className="cell-filter-checklist-search"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder={`search ${options.length} values…`}
+          aria-label="filter value list"
+        />
+      )}
+      <div className="cell-filter-checklist-actions">
+        <button
+          type="button"
+          className="cell-filter-checklist-link"
+          onClick={selectAllVisible}
+          disabled={filtered.length === 0}
+          title={
+            search
+              ? `Select all ${filtered.length} matching values`
+              : `Select all ${options.length} values`
+          }
+        >
+          select all{search ? ` (${filtered.length})` : ""}
+        </button>
+        <button
+          type="button"
+          className="cell-filter-checklist-link"
+          onClick={clearAll}
+          disabled={selected.size === 0}
+        >
+          clear ({selected.size})
+        </button>
+      </div>
+      <div className="cell-filter-checklist-items">
+        {filtered.length === 0 ? (
+          <div className="cell-filter-checklist-empty">no matches</div>
+        ) : (
+          filtered.map((v) => (
+            <label key={v} className="cell-filter-checklist-item">
+              <input
+                type="checkbox"
+                checked={selected.has(v)}
+                onChange={() => toggle(v)}
+              />
+              <span>{v}</span>
+            </label>
+          ))
+        )}
+      </div>
+    </div>
   );
 }

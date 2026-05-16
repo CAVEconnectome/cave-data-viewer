@@ -5,6 +5,7 @@ import {
   useEmbeddingScatter,
   useResolveRoots,
 } from "../../api/embeddings";
+import { useTablesUniqueValues } from "../../api/queries";
 import { useCrossNavHref } from "../../hooks/useCrossNavHref";
 import {
   parseMatVersion,
@@ -48,7 +49,7 @@ function ClearPill({ label, active, onClear, variant }: ClearPillProps) {
         onClear();
       }}
     >
-      × clear {label}
+      × Clear<span className="explore-pill-suffix"> {label}</span>
     </span>
   );
 }
@@ -56,6 +57,12 @@ function ClearPill({ label, active, onClear, variant }: ClearPillProps) {
 interface NglActionPillProps {
   label: string;
   count: number;
+  /** Optional total bag size for the "selected" pill — when the user's
+   *  selection bag contains members that are out of scope, the pill
+   *  reads `selected (40 of 52)` so the divergence is visible. Omit
+   *  for pills (like "visible") where count is the only meaningful
+   *  number. */
+  bagTotal?: number;
   disabled: boolean;
   liveDisabled: boolean;
   onOpen: () => void;
@@ -74,18 +81,29 @@ interface NglActionPillProps {
 function NglActionPill({
   label,
   count,
+  bagTotal,
   disabled,
   liveDisabled,
   onOpen,
 }: NglActionPillProps) {
-  const sampled = Math.min(count, NGL_LINK_CAP);
+  const hasOutOfScope = bagTotal !== undefined && bagTotal > count;
+  const willSample = count > NGL_LINK_CAP;
+  // Tooltip carries the sampling detail so the pill label doesn't
+  // need the "(500/1942)" cruft. The pill shows the true count; the
+  // sample-cap is an implementation detail the user only sees on hover.
   const title = liveDisabled
     ? "Switch to a materialized version to open in Neuroglancer"
     : count === 0
-      ? `No ${label} cells to open`
-      : count > NGL_LINK_CAP
-        ? `Open a random sample of ${NGL_LINK_CAP} cells from the ${count.toLocaleString()} ${label}`
-        : `Open ${count.toLocaleString()} ${label} cells in Neuroglancer`;
+      ? hasOutOfScope
+        ? `Your selection has ${bagTotal!.toLocaleString()} cells but none are in scope — widen the Filter Scope to open them`
+        : `No ${label} cells to open`
+      : willSample
+        ? `Open a random sample of ${NGL_LINK_CAP} cells from the ${count.toLocaleString()} in-scope ${label}${
+            hasOutOfScope ? ` (${bagTotal!.toLocaleString()} total in selection, ${(bagTotal! - count).toLocaleString()} out of scope)` : ""
+          }`
+        : hasOutOfScope
+          ? `Open ${count.toLocaleString()} in-scope ${label} cells in Neuroglancer (${(bagTotal! - count).toLocaleString()} more in selection but out of scope)`
+          : `Open ${count.toLocaleString()} ${label} cells in Neuroglancer`;
   return (
     <span
       role="button"
@@ -98,11 +116,14 @@ function NglActionPill({
         onOpen();
       }}
     >
-      ↗ {label} ({sampled.toLocaleString()}
-      {count > NGL_LINK_CAP && (
-        <>/{count.toLocaleString()}</>
-      )}
-      )
+      ↗ {label.charAt(0).toUpperCase() + label.slice(1)}
+      <span className="explore-pill-count">
+        {" "}({count.toLocaleString()}
+        {hasOutOfScope && (
+          <> of {bagTotal!.toLocaleString()}</>
+        )}
+        )
+      </span>
     </span>
   );
 }
@@ -114,7 +135,7 @@ import { ChannelPicker } from "./ChannelPicker";
 import { DecorationPicker } from "./DecorationPicker";
 import { EmbeddingPicker } from "./EmbeddingPicker";
 import { FeatureTablePicker } from "./FeatureTablePicker";
-import { SavedSetsPanel } from "./SavedSetsPanel";
+import { SavedSetsMenu } from "./SavedSetsPanel";
 import { SummaryPanel } from "./SummaryPanel";
 import {
   UniverseScatter,
@@ -148,12 +169,21 @@ export function FeatureExplorer() {
   const [ft] = useUrlParam("ft");
   const [emb] = useUrlParam("emb");
   const [decRaw] = useUrlParam("dec");
-  const [cells] = useUrlParam("cells");
-  // Unified selection state: cell_ids the user has chosen, by either
-  // mechanism — row checkboxes in the table OR lassoing on the
-  // scatter. Lassoing is a *selection action*, not a table filter —
-  // a polygon over the scatter behaves the same as ticking each
-  // contained cell's checkbox.
+  const [cells, setCells] = useUrlParam("cells");
+  // Out-of-scope cell rendering mode for the universe scatter. "ghost"
+  // (default) shows them desaturated in the background as context;
+  // "hide" omits them entirely. In both modes out-of-scope cells are
+  // non-pickable — out of scope is out of scope, period.
+  const [scopeModeRaw, setScopeModeRaw] = useUrlParam("scope_mode");
+  const scopeMode: "ghost" | "hide" = scopeModeRaw === "hide" ? "hide" : "ghost";
+  // Selection bag — cell_ids the user has chosen, by any mechanism:
+  // row checkboxes in the table, lassoing on the scatter, Cell ID
+  // Search. The bag is the *stable* user-marked set: Filter Scope
+  // changes never mutate it. At render time the visible "selected"
+  // set is derived as `bag ∩ inScopeCellIds` so the user can narrow
+  // the scope, see fewer marked cells, then widen and the rest come
+  // back. Without this preservation, every filter tweak would silently
+  // lose work.
   //
   // Lives in local component state (not URL) — large lassos overflow
   // Node's 8KB header limit when the URL becomes a request line on
@@ -161,17 +191,21 @@ export function FeatureExplorer() {
   // the user opted out of URL persistence here. The rest of the view
   // config — ?cells, ?dec, ?ft, ?emb, channel bindings — stays in
   // URL state for shareability.
-  const [selTableLocal, setSelTableLocal] = useState<string[]>([]);
-  const setSelTable = useCallback((csv: string | null) => {
-    setSelTableLocal(csv ? csv.split(",").filter(Boolean) : []);
-  }, []);
+  const [selectionBag, setSelectionBag] = useState<string[]>([]);
+  // Direct-scope snapshot — the bag at the moment "Filter to selection"
+  // was clicked, frozen into the active scope. Local state for the same
+  // overflow reason: a 5k-cell snapshot can't ride the URL. Direct scope
+  // overrides the predicate-based ?cells= scope when set; the popover
+  // header reflects which source is active. The bag itself is untouched
+  // by this action — snapshot is a *copy*, not a move.
+  const [directScopeBag, setDirectScopeBag] = useState<string[]>([]);
   // Set-typed mutators for the named-set algebra below — operating on
   // raw arrays would require redundant split-and-join on every call.
   const replaceSelection = useCallback((cellIds: string[]) => {
-    setSelTableLocal(cellIds);
+    setSelectionBag(cellIds);
   }, []);
   const unionIntoSelection = useCallback((cellIds: string[]) => {
-    setSelTableLocal((prev) => {
+    setSelectionBag((prev) => {
       const seen = new Set(prev);
       const out = [...prev];
       for (const c of cellIds) {
@@ -184,7 +218,7 @@ export function FeatureExplorer() {
     });
   }, []);
   const subtractFromSelection = useCallback((cellIds: string[]) => {
-    setSelTableLocal((prev) => {
+    setSelectionBag((prev) => {
       const drop = new Set(cellIds);
       return prev.filter((c) => !drop.has(c));
     });
@@ -199,6 +233,13 @@ export function FeatureExplorer() {
   const [sizeBinding] = useUrlParam("size");
   const [sizeMinRaw] = useUrlParam("size_min");
   const [sizeMaxRaw] = useUrlParam("size_max");
+  // Data range for the size channel — mirrors color_min / color_max
+  // for the color channel. Null defers to the data extent (no
+  // clipping); explicit values clamp out-of-range cells to the size
+  // endpoints so a long-tail outlier doesn't compress the size
+  // gradient onto a few cells.
+  const [sizeDataMinRaw] = useUrlParam("size_data_min");
+  const [sizeDataMaxRaw] = useUrlParam("size_data_max");
   const [colorMinRaw] = useUrlParam("color_min");
   const [colorMaxRaw] = useUrlParam("color_max");
   const [colormapId] = useUrlParam("cmap");
@@ -208,19 +249,15 @@ export function FeatureExplorer() {
   // drawer handle to pull up the table.
   const [tableRaw, setTable] = useUrlParam("table");
   const tableOpen = tableRaw === "open";
-  // "Limit visible to selection" — a *snapshot* of cell_ids the user
-  // froze at the moment they clicked the action. The table narrows
-  // to these. Distinct from the live selection so the user can
-  // modify their selection (check/uncheck rows, lasso more) without
-  // the visible-set shifting under their interactions.
-  // Same URL-overflow reasoning as the selection state — kept local.
-  const [limitToCellIds, setLimitToCellIds] = useState<string[]>([]);
-  const setLimitTo = useCallback((csv: string | null) => {
-    setLimitToCellIds(csv ? csv.split(",").filter(Boolean) : []);
-  }, []);
   // Size range falls back to client defaults when URL is silent.
   const sizeMinPx = sizeMinRaw ? parseFloat(sizeMinRaw) : 2.0;
   const sizeMaxPx = sizeMaxRaw ? parseFloat(sizeMaxRaw) : 18.0;
+  // Size data-range clipping — null-default same as color. Values
+  // outside [sizeDataMin, sizeDataMax] clamp to the size endpoints
+  // so a long-tail outlier doesn't squash the size gradient onto a
+  // few cells.
+  const sizeDataMin = sizeDataMinRaw ? parseFloat(sizeDataMinRaw) : null;
+  const sizeDataMax = sizeDataMaxRaw ? parseFloat(sizeDataMaxRaw) : null;
   // Color clipping is null-default — the slider's bounds come from
   // the data extent at render time, and null means "use the full
   // extent." Explicit URL values clamp the colorscale endpoints.
@@ -234,6 +271,13 @@ export function FeatureExplorer() {
 
   const matVersion = parseMatVersion(mv);
   const decorationTables = decRaw ? decRaw.split(",").filter(Boolean) : [];
+  // Distinct-value universe for every attached decoration table, merged
+  // into a single `${table}.${col}` map. Feeds the Filter Scope
+  // predicate builder so string columns get a dropdown / checkbox list
+  // instead of free-text — same UX as the table view. Backed by the
+  // 7-day immutable `dcv_unique_values_cache`, so warm pages pay
+  // nothing here.
+  const tableValues = useTablesUniqueValues(ds, decorationTables, matVersion);
 
   // Resizable rail width. Persists to localStorage so reloads + cross-
   // nav preserve it; clamped to [260, 640] inside the hook.
@@ -245,14 +289,18 @@ export function FeatureExplorer() {
 
   // Imperative handle on the universe scatter. Used by CellIdSearch to
   // re-frame the camera onto a freshly-resolved cell (or set of cells)
-  // after `replaceSelection(...)` populates the highlight set. The
-  // scatter's `fitView` reads `partition.highlight` which depends on the
-  // `highlightedCellIds` prop — so the call has to be deferred until
-  // React has flushed the selection state change and the scatter has
-  // re-committed its partition. `requestAnimationFrame` is enough: the
-  // state update fires synchronously, React schedules a render, then
-  // rAF runs after the commit phase, and `ref.current.fitView` is the
-  // latest closure (useImperativeHandle re-binds on fitView change).
+  // after `replaceSelection(...)` writes to the bag. The scatter's
+  // `fitView` reads `partition.selected` which depends on the
+  // `selectedCellIds` prop (= effectiveSelection = bag ∩ in-scope) —
+  // so the call has to be deferred until React has flushed the
+  // selection state change and the scatter has re-committed its
+  // partition. `requestAnimationFrame` is enough: the state update
+  // fires synchronously, React schedules a render, then rAF runs after
+  // the commit phase, and `ref.current.fitView` is the latest closure
+  // (useImperativeHandle re-binds on fitView change). Note that if the
+  // searched cell is out of scope, effectiveSelection won't include it
+  // and fitView will frame the full universe — out of scope is out of
+  // scope, period.
   const scatterRef = useRef<UniverseScatterHandle | null>(null);
   const fitToSelection = useCallback(() => {
     requestAnimationFrame(() => {
@@ -279,11 +327,11 @@ export function FeatureExplorer() {
     setSavePromptOpen(false);
   };
   const commitSavePrompt = () => {
-    if (selTableLocal.length === 0) {
+    if (selectionBag.length === 0) {
       setSavePromptOpen(false);
       return;
     }
-    namedSelections.save(saveDraftName, selTableLocal);
+    namedSelections.save(saveDraftName, selectionBag);
     setSavePromptOpen(false);
   };
 
@@ -313,13 +361,6 @@ export function FeatureExplorer() {
       );
     }
   }, [catalog.data, featureTables, ft, emb, setUrl]);
-
-  // The unified selection set: cell_ids from row checkboxes AND
-  // lasso. One source of truth — populated by either mechanism,
-  // read by the scatter highlight, the table's row-checked state,
-  // and the NGL "selected" action. Local state (see setSelTable
-  // comment above on why we don't put this in URL state).
-  const rowSelectedCellIds = selTableLocal;
 
   // Scatter response — fetched by UniverseScatter too, but TanStack
   // Query dedupes by queryKey so there's only one network call. We
@@ -358,6 +399,22 @@ export function FeatureExplorer() {
     if (!Number.isFinite(lo)) return null;
     return { lo, hi };
   }, [scatter.data?.color]);
+  // Size slider bounds: data extent of the bound size column. Mirrors
+  // colorBound — used to seed the data-range slider and to provide
+  // the slider's full-range endpoints.
+  const sizeBound = useMemo(() => {
+    const s = scatter.data?.size;
+    if (!s) return null;
+    let lo = Number.POSITIVE_INFINITY;
+    let hi = Number.NEGATIVE_INFINITY;
+    for (const v of s.values) {
+      if (typeof v !== "number" || !Number.isFinite(v)) continue;
+      if (v < lo) lo = v;
+      if (v > hi) hi = v;
+    }
+    if (!Number.isFinite(lo)) return null;
+    return { lo, hi };
+  }, [scatter.data?.size]);
 
   // Universe Set for the Cell ID Search's `cell_id` mode. The scatter
   // already loaded the cell_id array; wrap it in a Set so membership
@@ -370,10 +427,14 @@ export function FeatureExplorer() {
     return new Set(ids);
   }, [scatter.data?.cell_ids]);
 
-  // /cells fetch — the cell-list table reads from this. With lasso
-  // now a selection mechanism (not a filter), the request is driven
-  // purely by the filter expression `?cells=` from CellFilterPanel.
-  // matched_count reflects "everything passing the filter."
+  // /cells fetch — the cell-list table reads from this. Two scope
+  // sources can narrow the result:
+  //   - `cells` (predicate): ?cells= URL param edited via the
+  //     CellFilterPanel inside the Filter Scope popover.
+  //   - `directScopeBag`: in-memory snapshot from "Filter to selection."
+  // The backend ANDs both server-side via `sel_cell_ids` so we don't
+  // need a separate code path for the snapshot.
+  // matched_count reflects "everything in the active scope."
   const cellList = useCellList(
     ds && ft
       ? {
@@ -382,28 +443,44 @@ export function FeatureExplorer() {
           matVersion,
           decorationTables,
           cells,
+          selCellIds: directScopeBag.length > 0 ? directScopeBag : null,
         }
       : null,
   );
 
-  // Selection (the "mark" set in scope/view/mark) — the union of two
-  // mechanisms that both produce selections, not one overriding the
-  // other:
-  //   - Predicate selection: cells matching the CellFilterPanel
-  //     expression (`?cells=`). Only counted when a filter is active —
-  //     without one, cellList returns the full universe, which would
-  //     trivially mark everything.
-  //   - Brush selection: row checkboxes + scatter lasso, both pooled
-  //     into `rowSelectedCellIds`.
-  // The two compose: filter to a population, then lasso a subset, and
-  // both stay marked on the plot. Empty union → no overlay.
-  const highlightedCellIds = useMemo(() => {
-    const fromPredicate = cells && cellList.data ? cellList.data.cell_ids : [];
-    if (fromPredicate.length === 0 && rowSelectedCellIds.length === 0) return null;
-    const union = new Set<string>(fromPredicate);
-    for (const id of rowSelectedCellIds) union.add(id);
-    return union;
-  }, [rowSelectedCellIds, cells, cellList.data]);
+  // In-scope set (the "view" in scope/view/mark) — null means the full
+  // universe is in scope (no filter, no snapshot). When any scope is
+  // active, the cellList response carries the in-scope cell_ids
+  // (backend has already done predicate + snapshot intersection).
+  const hasScope = !!cells || directScopeBag.length > 0;
+  const inScopeCellIds = useMemo<Set<string> | null>(() => {
+    if (!hasScope) return null;
+    if (!cellList.data) return null;
+    return new Set(cellList.data.cell_ids);
+  }, [hasScope, cellList.data]);
+
+  // Effective selection (the "mark" set) — the bag intersected with the
+  // active scope. Drives the orange highlight overlay, the NGL
+  // "selected" pill count, and the table's checked-row state. The bag
+  // itself is preserved across scope changes; this intersection is
+  // recomputed every render so widening the scope re-surfaces members
+  // that were temporarily inactive.
+  const effectiveSelection = useMemo<Set<string> | null>(() => {
+    if (selectionBag.length === 0) return null;
+    if (!inScopeCellIds) return new Set(selectionBag);
+    const out = new Set<string>();
+    for (const id of selectionBag) {
+      if (inScopeCellIds.has(id)) out.add(id);
+    }
+    return out;
+  }, [selectionBag, inScopeCellIds]);
+  // Visible selection as an ordered array — same content as
+  // effectiveSelection but in the bag's insertion order. Used by the
+  // table (selectedIds prop) and the NGL "selected" action.
+  const effectiveSelectionList = useMemo<string[]>(() => {
+    if (!effectiveSelection) return [];
+    return selectionBag.filter((id) => effectiveSelection.has(id));
+  }, [selectionBag, effectiveSelection]);
 
   // Batch cell_id → root_id resolution for the visible rows. The
   // resolver universe-caches per (ds, mv) server-side so a 94k-cell
@@ -578,15 +655,6 @@ export function FeatureExplorer() {
             }
           />
         )}
-        <CellIdSearch
-          ds={ds}
-          featureTableId={ft}
-          matVersion={matVersion}
-          universeCellIds={universeCellIds}
-          onReplaceSelection={replaceSelection}
-          onUnionIntoSelection={unionIntoSelection}
-          onFitToSelection={fitToSelection}
-        />
         <ChannelPicker
           featureTable={currentFt}
           cellsColumnGroups={cellList.data?.column_groups}
@@ -596,6 +664,9 @@ export function FeatureExplorer() {
           sizeBy={sizeBinding}
           sizeMinPx={sizeMinPx}
           sizeMaxPx={sizeMaxPx}
+          sizeBound={sizeBound}
+          sizeDataMin={sizeDataMin}
+          sizeDataMax={sizeDataMax}
           colorBound={colorBound}
           colorMin={colorMin}
           colorMax={colorMax}
@@ -617,6 +688,12 @@ export function FeatureExplorer() {
               ...(next.sizeMaxPx !== undefined
                 ? { size_max: String(next.sizeMaxPx) }
                 : {}),
+              ...(next.sizeDataMin !== undefined
+                ? { size_data_min: next.sizeDataMin === null ? null : String(next.sizeDataMin) }
+                : {}),
+              ...(next.sizeDataMax !== undefined
+                ? { size_data_max: next.sizeDataMax === null ? null : String(next.sizeDataMax) }
+                : {}),
               ...(next.colorMin !== undefined
                 ? { color_min: next.colorMin === null ? null : String(next.colorMin) }
                 : {}),
@@ -635,23 +712,13 @@ export function FeatureExplorer() {
         />
         <SummaryPanel
           scatter={scatter.data}
-          highlightedCellIds={highlightedCellIds}
+          inScopeCellIds={inScopeCellIds}
+          selectedCellIds={effectiveSelection}
           ds={ds}
           featureTable={currentFt}
           cellsColumnGroups={cellList.data?.column_groups}
           matVersion={matVersion}
           decorationTables={decorationTables}
-        />
-        <SavedSetsPanel
-          selections={namedSelections.selections}
-          currentSelection={selTableLocal}
-          onLoad={(s: NamedSelection) => replaceSelection(s.cellIds)}
-          onAdd={(s: NamedSelection) => unionIntoSelection(s.cellIds)}
-          onSubtract={(s: NamedSelection) => subtractFromSelection(s.cellIds)}
-          onRename={(s: NamedSelection, name: string) =>
-            namedSelections.rename(s.id, name)
-          }
-          onRemove={(s: NamedSelection) => namedSelections.remove(s.id)}
         />
       </aside>
       {/* Vertical drag handle between rail and scatter. Hover state in
@@ -679,27 +746,31 @@ export function FeatureExplorer() {
             sizeBy={sizeBinding}
             sizeMinPx={sizeMinPx}
             sizeMaxPx={sizeMaxPx}
+            sizeDataMin={sizeDataMin}
+            sizeDataMax={sizeDataMax}
             colorMin={colorMin}
             colorMax={colorMax}
             colormapId={colormapId}
             colorCenter={colorCenter}
             decorationTables={decorationTables}
             matVersion={matVersion}
-            highlightedCellIds={highlightedCellIds}
+            inScopeCellIds={inScopeCellIds}
+            selectedCellIds={effectiveSelection}
+            scopeMode={scopeMode}
             onLassoSelect={(polygonIds) => {
-              // Lasso writes into the unified selection. Intersect with
-              // the in-scope set so the user can't "select" cells that
-              // don't pass the current filter — out-of-scope cells
-              // wouldn't show in the table or have meaningful NGL
-              // resolution there anyway. When no filter is active the
-              // in-scope set is the full universe, so the intersection
-              // collapses to the polygon hit-test result.
-              const scope = cellList.data
-                ? new Set(cellList.data.cell_ids)
-                : null;
-              const inScope =
-                scope === null ? polygonIds : polygonIds.filter((id) => scope.has(id));
-              setSelTable(inScope.length > 0 ? inScope.join(",") : null);
+              // Lasso writes into the selection bag. The scatter's
+              // hit-test already excludes out-of-scope cells, so the
+              // incoming polygonIds are guaranteed in-scope. Replace
+              // only the in-scope portion of the bag — out-of-scope
+              // selections (e.g. a Cell ID Search that landed outside
+              // the active scope) are preserved across the lasso.
+              setSelectionBag((prev) => {
+                if (!inScopeCellIds) return polygonIds;
+                const preserved = prev.filter(
+                  (id) => !inScopeCellIds.has(id),
+                );
+                return [...preserved, ...polygonIds];
+              });
             }}
           />
         </div>
@@ -779,114 +850,154 @@ export function FeatureExplorer() {
                     ? { [currentFt.id]: currentFt.categories }
                     : undefined
                 }
+                availableValues={tableValues.values}
+                scopeMode={scopeMode}
+                onScopeModeChange={(next) =>
+                  // Default ghost: only emit "hide" to URL state, so the
+                  // common case stays out of the share-link param soup.
+                  setScopeModeRaw(next === "hide" ? "hide" : null)
+                }
+                selectionBagCount={selectionBag.length}
+                onFilterToSelection={() => {
+                  // Snapshot copies the bag; the bag itself is untouched.
+                  // If a predicate scope is also active, snapshotting
+                  // wins (CellFilterMenu's header reflects "snapshot"
+                  // and the predicate editor greys out). Clearing scope
+                  // returns to predicate / universe — bag survives both.
+                  setDirectScopeBag([...selectionBag]);
+                }}
+                directScopeCount={directScopeBag.length}
+                onClearScope={() => {
+                  // Clear both sources in one click — the most common
+                  // "back to the full universe" gesture. Bag is
+                  // untouched; widening the scope re-surfaces any
+                  // previously inactive members.
+                  setDirectScopeBag([]);
+                  setCells(null);
+                }}
               />
             </span>
-            <span className="explore-pill-separator" aria-hidden />
-            {/* NGL actions — grouped on the left side with the
-                count and selection context (where filtering and
-                selection actually happen). Both buttons are always
-                rendered; "selected" greys out when nothing is row-
-                selected so the user can see the action exists even
-                when it's not actionable. Live mode disables both. */}
-            <NglActionPill
-              label="visible"
-              count={cellList.data?.matched_count ?? 0}
-              disabled={
-                !cellList.data ||
-                cellList.data.matched_count === 0 ||
-                matVersion === "live" ||
-                ngl.isPending
-              }
-              liveDisabled={matVersion === "live"}
-              onOpen={() =>
-                cellList.data && openInNgl(cellList.data.cell_ids)
-              }
-            />
-            <NglActionPill
-              label="selected"
-              count={rowSelectedCellIds.length}
-              disabled={
-                rowSelectedCellIds.length === 0 ||
-                matVersion === "live" ||
-                ngl.isPending
-              }
-              liveDisabled={matVersion === "live"}
-              onOpen={() => openInNgl(rowSelectedCellIds)}
-            />
-            {/* Single clear-selection pill — covers both lasso and
-                row-click selections now that they share the same
-                URL key. Greyed when there's nothing to clear. */}
-            <span className="explore-pill-separator" aria-hidden />
-            <ClearPill
-              label="selection"
-              active={rowSelectedCellIds.length > 0}
-              onClear={() => setSelTable(null)}
-              variant="rowsel"
-            />
-            {/* Save the current selection as a named cell set. Persists
-                in localStorage; surfaces in the rail's SavedSetsPanel
-                for later load/union/subtract. Disabled when there's
-                nothing to save. The wrapper stops drawer-toggle
-                propagation so the popover doesn't open/close the
-                drawer when the user types into the rename input. */}
-            <span
-              className="explore-pill-wrap"
-              onClick={(e) => e.stopPropagation()}
-              role="presentation"
-            >
-              <span
-                role="button"
-                className={`explore-save-pill${
-                  rowSelectedCellIds.length === 0 ? " disabled" : ""
-                }`}
-                aria-disabled={rowSelectedCellIds.length === 0}
-                title={
-                  rowSelectedCellIds.length === 0
-                    ? "Make a selection first"
-                    : `Save ${rowSelectedCellIds.length.toLocaleString()} cells as a named set`
+            {/* NGL group — visible + selected open cells in
+                Neuroglancer. Internal flex-wrap: nowrap keeps the
+                two pills together; the outer toolbar wraps on group
+                boundaries. */}
+            <span className="explore-pill-group">
+              <NglActionPill
+                label="visible"
+                count={cellList.data?.matched_count ?? 0}
+                disabled={
+                  !cellList.data ||
+                  cellList.data.matched_count === 0 ||
+                  matVersion === "live" ||
+                  ngl.isPending
                 }
-                onClick={() => {
-                  if (rowSelectedCellIds.length === 0) return;
-                  if (savePromptOpen) {
-                    closeSavePrompt();
-                  } else {
-                    openSavePrompt();
-                  }
-                }}
+                liveDisabled={matVersion === "live"}
+                onOpen={() =>
+                  cellList.data && openInNgl(cellList.data.cell_ids)
+                }
+              />
+              <NglActionPill
+                label="selected"
+                count={effectiveSelectionList.length}
+                bagTotal={selectionBag.length}
+                disabled={
+                  effectiveSelectionList.length === 0 ||
+                  matVersion === "live" ||
+                  ngl.isPending
+                }
+                liveDisabled={matVersion === "live"}
+                onOpen={() => openInNgl(effectiveSelectionList)}
+              />
+            </span>
+            {/* Selection group — clear + save + sets. Kept together
+                because they're "things that act on the selection bag"
+                and reading them as a cluster is clearer than reading
+                them next to the NGL actions. */}
+            <span className="explore-pill-group">
+              <ClearPill
+                label="selection"
+                active={selectionBag.length > 0}
+                onClear={() => setSelectionBag([])}
+                variant="rowsel"
+              />
+              {/* Save the current selection as a named cell set. */}
+              <span
+                className="explore-pill-wrap"
+                onClick={(e) => e.stopPropagation()}
+                role="presentation"
               >
-                ★ Save selection
-              </span>
-              {savePromptOpen && rowSelectedCellIds.length > 0 && (
-                <span className="explore-save-prompt">
-                  <input
-                    type="text"
-                    className="explore-save-prompt-input"
-                    value={saveDraftName}
-                    autoFocus
-                    onChange={(e) => setSaveDraftName(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") commitSavePrompt();
-                      if (e.key === "Escape") closeSavePrompt();
-                    }}
-                  />
-                  <button
-                    type="button"
-                    className="explore-save-prompt-ok"
-                    onClick={commitSavePrompt}
-                    title="Save"
-                  >
-                    ✓
-                  </button>
-                  <button
-                    type="button"
-                    className="explore-save-prompt-cancel"
-                    onClick={closeSavePrompt}
-                    title="Cancel"
-                  >
-                    ×
-                  </button>
+                <span
+                  role="button"
+                  className={`explore-save-pill${
+                    selectionBag.length === 0 ? " disabled" : ""
+                  }`}
+                  aria-disabled={selectionBag.length === 0}
+                  title={
+                    selectionBag.length === 0
+                      ? "Make a selection first"
+                      : `Save all ${selectionBag.length.toLocaleString()} selected cells as a named set (includes any out-of-scope members)`
+                  }
+                  onClick={() => {
+                    if (selectionBag.length === 0) return;
+                    if (savePromptOpen) {
+                      closeSavePrompt();
+                    } else {
+                      openSavePrompt();
+                    }
+                  }}
+                >
+                  ★ Save<span className="explore-pill-suffix"> selection</span>
                 </span>
-              )}
+                {savePromptOpen && selectionBag.length > 0 && (
+                  <span className="explore-save-prompt">
+                    <input
+                      type="text"
+                      className="explore-save-prompt-input"
+                      value={saveDraftName}
+                      autoFocus
+                      onChange={(e) => setSaveDraftName(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") commitSavePrompt();
+                        if (e.key === "Escape") closeSavePrompt();
+                      }}
+                    />
+                    <button
+                      type="button"
+                      className="explore-save-prompt-ok"
+                      onClick={commitSavePrompt}
+                      title="Save"
+                    >
+                      ✓
+                    </button>
+                    <button
+                      type="button"
+                      className="explore-save-prompt-cancel"
+                      onClick={closeSavePrompt}
+                      title="Cancel"
+                    >
+                      ×
+                    </button>
+                  </span>
+                )}
+              </span>
+              {/* Saved sets popover — sibling to Save selection. */}
+              <span
+                className="explore-pill-wrap"
+                onClick={(e) => e.stopPropagation()}
+                role="presentation"
+              >
+                <SavedSetsMenu
+                  selections={namedSelections.selections}
+                  currentSelection={selectionBag}
+                  onLoad={(s: NamedSelection) => replaceSelection(s.cellIds)}
+                  onAdd={(s: NamedSelection) => unionIntoSelection(s.cellIds)}
+                  onSubtract={(s: NamedSelection) => subtractFromSelection(s.cellIds)}
+                  onRename={(s: NamedSelection, name: string) =>
+                    namedSelections.rename(s.id, name)
+                  }
+                  onRemove={(s: NamedSelection) => namedSelections.remove(s.id)}
+                />
+              </span>
             </span>
           </button>
           {tableOpen && enrichedCells && enrichedCells.rows.length > 0 && (
@@ -898,44 +1009,24 @@ export function FeatureExplorer() {
               )}
               <PartnersTable
                 extraActions={
-                  <>
-                    <button
-                      type="button"
-                      className="explore-toolbar-btn"
-                      disabled={rowSelectedCellIds.length === 0}
-                      title={
-                        rowSelectedCellIds.length === 0
-                          ? "Select some rows first, then snapshot the selection into the visible set"
-                          : `Snapshot ${rowSelectedCellIds.length} selected cells as the visible set — the table narrows to these and stays stable while you modify the selection`
-                      }
-                      onClick={() => setLimitTo(rowSelectedCellIds.join(","))}
-                    >
-                      Limit visible to selection
-                      {rowSelectedCellIds.length > 0 && (
-                        <span className="explore-toolbar-btn-count">
-                          &nbsp;({rowSelectedCellIds.length})
-                        </span>
-                      )}
-                    </button>
-                    <button
-                      type="button"
-                      className="explore-toolbar-btn"
-                      disabled={limitToCellIds.length === 0}
-                      title={
-                        limitToCellIds.length === 0
-                          ? "Nothing limiting the visible set right now"
-                          : "Drop the snapshot — table returns to the full filter scope"
-                      }
-                      onClick={() => setLimitTo(null)}
-                    >
-                      Reset visible
-                    </button>
-                    {limitToCellIds.length > 0 && (
-                      <span className="explore-toolbar-hint">
-                        limited to {limitToCellIds.length.toLocaleString()} snapshot
-                      </span>
-                    )}
-                  </>
+                  // Find Cells lives in the table toolbar because it's
+                  // a table-scoped action (writes resolved cells into
+                  // the selection bag, which is what the table reads
+                  // as its row-checked state). Limit-visible / reset-
+                  // visible used to live here; Filter Scope's
+                  // "Filter to selection" subsumed them — that's a
+                  // scope-level narrowing (also affects scatter,
+                  // summary panels, NGL pills) rather than a
+                  // table-only one, so it wins on every dimension.
+                  <CellIdSearch
+                    ds={ds}
+                    featureTableId={ft}
+                    matVersion={matVersion}
+                    universeCellIds={universeCellIds}
+                    onReplaceSelection={replaceSelection}
+                    onUnionIntoSelection={unionIntoSelection}
+                    onFitToSelection={fitToSelection}
+                  />
                 }
                 ds={ds}
                 rootId={ft}
@@ -954,13 +1045,20 @@ export function FeatureExplorer() {
                 crossNavHref={cellCrossNavHref}
                 enableNglAction={false}
                 rowsLabel="cells"
-                selectedIds={rowSelectedCellIds}
-                onSelectedIdsChange={(ids) =>
-                  setSelTable(ids.length > 0 ? ids.join(",") : null)
-                }
-                externalSelection={
-                  limitToCellIds.length > 0 ? limitToCellIds : null
-                }
+                selectedIds={effectiveSelectionList}
+                onSelectedIdsChange={(ids) => {
+                  // Table row checkboxes only report the in-scope subset
+                  // (only in-scope rows are visible). Preserve any
+                  // out-of-scope bag members across the update so a
+                  // row-toggle doesn't silently drop them.
+                  setSelectionBag((prev) => {
+                    if (!inScopeCellIds) return ids;
+                    const preserved = prev.filter(
+                      (id) => !inScopeCellIds.has(id),
+                    );
+                    return [...preserved, ...ids];
+                  });
+                }}
                 onRowNglClick={openCellInNgl}
               />
             </div>
@@ -970,3 +1068,4 @@ export function FeatureExplorer() {
     </div>
   );
 }
+

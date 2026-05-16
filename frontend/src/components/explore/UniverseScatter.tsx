@@ -48,6 +48,15 @@ interface Props {
   sizeBy?: string | null;
   sizeMinPx?: number;
   sizeMaxPx?: number;
+  /** Optional clipping for the size channel's data range. Values
+   *  outside [sizeDataMin, sizeDataMax] clamp to the size endpoints
+   *  (sizeMinPx / sizeMaxPx) so a long-tail outlier doesn't squash
+   *  the size gradient onto a few cells. In-range values get the
+   *  full rank-scaled gradient within the surviving subset. Null =
+   *  use the full data extent (no clipping). Mirrors the color
+   *  channel's clipping behavior. */
+  sizeDataMin?: number | null;
+  sizeDataMax?: number | null;
   /** Optional clipping for the numeric color channel. Values outside
    *  [colorMin, colorMax] clamp to the endpoint hex so long-tail
    *  outliers can't blow out the full colorscale onto a few cells. */
@@ -64,12 +73,25 @@ interface Props {
   colorCenter?: number | null;
   decorationTables?: string[];
   matVersion?: number | "live" | null;
-  /** Cell_ids to render in the highlight layer (orange or, when color
-   *  is bound, the channel color). The complement renders in the base
-   *  layer (light gray when highlighting, solid blue otherwise).
-   *  Empty/null = no highlight; single base layer at full weight. */
-  highlightedCellIds?: Set<string> | null;
-  /** Called with the lasso-selected cell_ids. Suppressed on empty
+  /** Cells passing the active Filter Scope. Null means the full
+   *  universe is in scope (no predicate, no snapshot) — everything
+   *  renders normally. When set, cells *not* in this set are
+   *  out-of-scope and render per `scopeMode` (ghosted or hidden) and
+   *  cannot be lasso-selected — out of scope is out of scope, period. */
+  inScopeCellIds?: Set<string> | null;
+  /** Cells in the active selection AND currently in scope — the
+   *  orange highlight overlay. Null/empty = no overlay. The bag may
+   *  hold more cells than this (out-of-scope selections are preserved
+   *  in FeatureExplorer's state but render as out-of-scope here). */
+  selectedCellIds?: Set<string> | null;
+  /** Out-of-scope rendering mode. "ghost" (default) keeps out-of-scope
+   *  cells as faint background context; "hide" omits them entirely. In
+   *  both modes they're non-pickable. Ignored when `inScopeCellIds` is
+   *  null (nothing is out of scope). */
+  scopeMode?: "ghost" | "hide";
+  /** Called with the lasso-selected cell_ids — guaranteed in-scope
+   *  because the partition omits or ghosts out-of-scope cells (and
+   *  hit-test filters them out either way). Suppressed on empty
    *  selections so a phantom drag doesn't clear a real selection. */
   onLassoSelect?: (cellIds: string[]) => void;
   /** Called when the user clicks a single point. */
@@ -188,13 +210,17 @@ export const UniverseScatter = forwardRef<UniverseScatterHandle, Props>(function
     sizeBy,
     sizeMinPx,
     sizeMaxPx,
+    sizeDataMin,
+    sizeDataMax,
     colorMin,
     colorMax,
     colormapId,
     colorCenter,
     decorationTables,
     matVersion,
-    highlightedCellIds,
+    inScopeCellIds,
+    selectedCellIds,
+    scopeMode = "ghost",
     onLassoSelect,
     onPointClick,
     height,
@@ -242,7 +268,8 @@ export const UniverseScatter = forwardRef<UniverseScatterHandle, Props>(function
     [query.data],
   );
 
-  // Per-point resolved color/size arrays + base/highlight partition.
+  // Per-point resolved color/size arrays + three-way partition
+  // (out-of-scope / in-scope-not-selected / in-scope-selected).
   // Positions are pre-normalized to a unit square so the
   // OrthographicView's uniform scaling doesn't squash one axis flat
   // when the data ranges differ wildly (depth: 1–1500 vs folding ratio:
@@ -250,24 +277,31 @@ export const UniverseScatter = forwardRef<UniverseScatterHandle, Props>(function
   // add them) inverse-transform tick positions through `extent`.
   const partition = useMemo(
     () =>
-      buildPartition(query.data, highlightedCellIds, extent, {
+      buildPartition(query.data, inScopeCellIds, selectedCellIds, extent, {
         sizeMinPx: sizeMinPx ?? 2,
         sizeMaxPx: sizeMaxPx ?? 18,
+        sizeDataMin: sizeDataMin ?? null,
+        sizeDataMax: sizeDataMax ?? null,
         colorMin: colorMin ?? null,
         colorMax: colorMax ?? null,
         colormap,
         colorCenter: colorCenter ?? null,
+        scopeMode,
       }),
     [
       query.data,
-      highlightedCellIds,
+      inScopeCellIds,
+      selectedCellIds,
       extent,
       sizeMinPx,
       sizeMaxPx,
+      sizeDataMin,
+      sizeDataMax,
       colorMin,
       colorMax,
       colormap,
       colorCenter,
+      scopeMode,
     ],
   );
 
@@ -341,19 +375,21 @@ export const UniverseScatter = forwardRef<UniverseScatterHandle, Props>(function
   }, [axesKey, query.data, measuredHeight]);
 
   const fitView = useCallback(() => {
-    // When a highlight is active, frame the viewport on the
-    // highlighted cells specifically — that's almost always what
-    // "fit" means in the moment (the user is looking for them).
-    // Otherwise fit the full unit square (default extent).
-    if (partition && partition.highlight.length > 0) {
-      // Highlight positions are in the same normalized [0,1]×[0,1]
+    // When a selection is active, frame the viewport on the
+    // in-scope selected cells specifically — that's almost always
+    // what "fit" means in the moment (the user is looking for them).
+    // Out-of-scope bag members are deliberately excluded — out of
+    // scope is out of scope, period. Otherwise fit the full unit
+    // square (default extent).
+    if (partition && partition.selected.length > 0) {
+      // Selected positions are in the same normalized [0,1]×[0,1]
       // space the view targets. Find their bounding box, pad ~15%
       // for breathing room, set view center + zoom to that.
       let minX = 1;
       let maxX = 0;
       let minY = 1;
       let maxY = 0;
-      for (const r of partition.highlight) {
+      for (const r of partition.selected) {
         const [x, y] = r.position;
         if (x < minX) minX = x;
         if (x > maxX) maxX = x;
@@ -402,49 +438,81 @@ export const UniverseScatter = forwardRef<UniverseScatterHandle, Props>(function
 
   const layers = useMemo(() => {
     if (!partition) return [];
-    const base = new ScatterplotLayer({
-      id: "universe-base",
-      data: partition.base,
-      pickable: true,
-      stroked: false,
-      filled: true,
-      radiusUnits: "pixels",
-      // `getPosition` returns native [x, y] from each row; ditto color/radius.
-      getPosition: (d: RenderRow) => d.position,
-      getFillColor: (d: RenderRow) => d.color,
-      getRadius: (d: RenderRow) => d.radius,
-      // Picking is cheap regardless of layer size — deck.gl reads a 1×1
-      // pixel from the picking buffer rather than iterating points in JS.
-      updateTriggers: {
-        getFillColor: partition.colorRevision,
-        getRadius: partition.sizeRevision,
-      },
-    });
-    if (partition.highlight.length === 0) return [base];
-    // Thin black stroke on every selected marker. The fill carries
-    // most of the selection signal against a heavily-recessed base
-    // layer; the stroke is just enough edge to keep marks legible at
-    // any fill color, including pale colormap ends. The exponential
-    // size bonus in `buildPartition` handles single-cell findability.
-    const hl = new ScatterplotLayer({
-      id: "universe-highlight",
-      data: partition.highlight,
-      pickable: true,
-      stroked: true,
-      filled: true,
-      radiusUnits: "pixels",
-      lineWidthUnits: "pixels",
-      getPosition: (d: RenderRow) => d.position,
-      getFillColor: (d: RenderRow) => d.color,
-      getRadius: (d: RenderRow) => d.radius,
-      getLineColor: [0, 0, 0, 200],
-      getLineWidth: 1,
-      updateTriggers: {
-        getFillColor: partition.colorRevision,
-        getRadius: partition.sizeRevision,
-      },
-    });
-    return [base, hl];
+    const out: ScatterplotLayer<RenderRow>[] = [];
+    // Out-of-scope layer (non-pickable). Skipped when hide mode is
+    // active OR when nothing is out of scope. Renders below in-scope
+    // and selected so the active set always paints on top.
+    if (partition.outOfScope.length > 0) {
+      out.push(
+        new ScatterplotLayer({
+          id: "universe-outscope",
+          data: partition.outOfScope,
+          // Non-pickable: out of scope is out of scope, period — the
+          // user can't hover-tooltip or click-select a ghosted cell.
+          pickable: false,
+          stroked: false,
+          filled: true,
+          radiusUnits: "pixels",
+          getPosition: (d: RenderRow) => d.position,
+          getFillColor: (d: RenderRow) => d.color,
+          getRadius: (d: RenderRow) => d.radius,
+          updateTriggers: {
+            getFillColor: partition.colorRevision,
+            getRadius: partition.sizeRevision,
+          },
+        }),
+      );
+    }
+    // In-scope base layer (pickable). This is the "active" universe
+    // the user can interact with.
+    out.push(
+      new ScatterplotLayer({
+        id: "universe-base",
+        data: partition.inScopeBase,
+        pickable: true,
+        stroked: false,
+        filled: true,
+        radiusUnits: "pixels",
+        // `getPosition` returns native [x, y] from each row; ditto color/radius.
+        getPosition: (d: RenderRow) => d.position,
+        getFillColor: (d: RenderRow) => d.color,
+        getRadius: (d: RenderRow) => d.radius,
+        // Picking is cheap regardless of layer size — deck.gl reads a 1×1
+        // pixel from the picking buffer rather than iterating points in JS.
+        updateTriggers: {
+          getFillColor: partition.colorRevision,
+          getRadius: partition.sizeRevision,
+        },
+      }),
+    );
+    if (partition.selected.length > 0) {
+      // Thin black stroke on every selected marker. The fill carries
+      // most of the selection signal against a heavily-recessed base
+      // layer; the stroke is just enough edge to keep marks legible at
+      // any fill color, including pale colormap ends. The exponential
+      // size bonus in `buildPartition` handles single-cell findability.
+      out.push(
+        new ScatterplotLayer({
+          id: "universe-selected",
+          data: partition.selected,
+          pickable: true,
+          stroked: true,
+          filled: true,
+          radiusUnits: "pixels",
+          lineWidthUnits: "pixels",
+          getPosition: (d: RenderRow) => d.position,
+          getFillColor: (d: RenderRow) => d.color,
+          getRadius: (d: RenderRow) => d.radius,
+          getLineColor: [0, 0, 0, 200],
+          getLineWidth: 1,
+          updateTriggers: {
+            getFillColor: partition.colorRevision,
+            getRadius: partition.sizeRevision,
+          },
+        }),
+      );
+    }
+    return out;
   }, [partition]);
 
   const handleClick = useCallback(
@@ -520,12 +588,14 @@ export const UniverseScatter = forwardRef<UniverseScatterHandle, Props>(function
       const [x, y] = viewport.unproject([px, py]);
       return [x, y];
     });
-    // Test every rendered point against the polygon. ~94k × ~10
-    // polygon edges = 1M ops; sub-50ms in JS at this scale, fine
-    // without needing GPU-side picking.
+    // Test every in-scope point against the polygon. Out-of-scope
+    // cells are skipped — out of scope is out of scope, period — so
+    // a lasso that crosses ghosted cells can't accidentally select
+    // them. ~94k × ~10 polygon edges = 1M ops; sub-50ms in JS at
+    // this scale, fine without needing GPU-side picking.
     const selected: string[] = [];
-    const all = [...partition.base, ...partition.highlight];
-    for (const row of all) {
+    const inScopeRows = [...partition.inScopeBase, ...partition.selected];
+    for (const row of inScopeRows) {
       if (pointInPolygon(row.position, polyData)) selected.push(row.id);
     }
     if (selected.length === 0) return; // suppress empty-lasso noise
@@ -756,8 +826,20 @@ function pointInPolygon(
 // --- partition + extent helpers --------------------------------------------
 
 interface Partition {
-  base: RenderRow[];
-  highlight: RenderRow[];
+  /** Out-of-scope cells. Empty when no Filter Scope is active OR when
+   *  scopeMode is "hide" (in which case they're omitted entirely so
+   *  the scatter renders only the active set). Non-pickable in the
+   *  layer config. Rendered ghosted (pale + low alpha). */
+  outOfScope: RenderRow[];
+  /** In-scope cells that aren't currently selected. The "active
+   *  universe" — these are pickable, render in normal channel color,
+   *  and form the base layer the user interacts with. */
+  inScopeBase: RenderRow[];
+  /** In-scope cells in the active selection — the orange highlight
+   *  overlay layered on top of inScopeBase with a stroke + size bump.
+   *  Out-of-scope bag members are NOT in this list (they live in
+   *  outOfScope and look like other ghosted cells). */
+  selected: RenderRow[];
   /** Bumps when color resolution changes so deck.gl's updateTriggers
    *  invalidate the GPU buffer. Identity-stable when color is unchanged. */
   colorRevision: string;
@@ -766,11 +848,18 @@ interface Partition {
 
 function buildPartition(
   data: EmbeddingScatterResponse | undefined,
-  highlight: Set<string> | null | undefined,
+  inScope: Set<string> | null | undefined,
+  selected: Set<string> | null | undefined,
   extent: Extent | null,
   opts: {
     sizeMinPx: number;
     sizeMaxPx: number;
+    /** Size-channel data-range clipping. Null = use the full data
+     *  extent (no clipping). When set, values outside the range
+     *  clamp to the size endpoints; in-range values get the full
+     *  rank-scaled gradient within the surviving subset. */
+    sizeDataMin: number | null;
+    sizeDataMax: number | null;
     /** Numeric-color clipping endpoints. Null = use the full data
      *  extent (no clipping). When set, values clamp to the endpoint
      *  colors. */
@@ -783,6 +872,9 @@ function buildPartition(
      *  colormap's category is "diverging" — non-diverging maps render
      *  linearly regardless. Null falls back to the linear stretch. */
     colorCenter: number | null;
+    /** "ghost" keeps out-of-scope cells visible as background context;
+     *  "hide" omits them entirely. */
+    scopeMode: "ghost" | "hide";
   },
 ): Partition | null {
   if (!data || !extent) return null;
@@ -795,7 +887,13 @@ function buildPartition(
   // now driven by the size-range slider without a refetch.
   let sizePx: number[] | null = null;
   if (data.size) {
-    sizePx = rankScaleToPx(data.size.values, opts.sizeMinPx, opts.sizeMaxPx);
+    sizePx = rankScaleToPx(
+      data.size.values,
+      opts.sizeMinPx,
+      opts.sizeMaxPx,
+      opts.sizeDataMin,
+      opts.sizeDataMax,
+    );
   }
   // Per-axis linear scalers to [0, 1]. Constant-axis (xMax === xMin)
   // collapses to 0.5 so every point lands at the middle of that axis
@@ -806,7 +904,13 @@ function buildPartition(
   const yScale = ySpan > 0 ? 1 / ySpan : 0;
   const colorBlock = data.color;
   const sizeBlock = data.size;
-  const hasHighlight = !!highlight && highlight.size > 0;
+  const hasScope = !!inScope;
+  const hasSelected = !!selected && selected.size > 0;
+  // "Recede the rest" condition — when a scope OR a selection is
+  // active, the unmarked in-scope cells render in a more recessive
+  // style so the selection (or, when there's no selection, the in-
+  // scope set vs out-of-scope ghost) reads cleanly.
+  const hasHighlight = hasSelected;
 
   // Precompute per-point color RGBA. Categorical → lookup color_map;
   // numeric → continuous Viridis; unbound → fall back to base/highlight
@@ -835,14 +939,26 @@ function buildPartition(
     }
   }
 
-  const base: RenderRow[] = [];
-  const hl: RenderRow[] = [];
+  const outOfScope: RenderRow[] = [];
+  const inScopeBase: RenderRow[] = [];
+  const selectedRows: RenderRow[] = [];
   for (let i = 0; i < n; i++) {
     const id = data.cell_ids[i];
     const x = data.x[i];
     const y = data.y[i];
     if (x === null || y === null || x === undefined || y === undefined) continue;
-    const isHighlight = hasHighlight && highlight!.has(id);
+    const isInScope = !hasScope || inScope!.has(id);
+    // "hide" mode: skip out-of-scope cells entirely. Saves a non-
+    // trivial fraction of GPU/CPU work when the scope is small (e.g.
+    // 1k cells out of 94k). Selection is by definition in-scope
+    // (effectiveSelection is computed as bag ∩ in-scope), so we
+    // never skip a selected row.
+    if (!isInScope && opts.scopeMode === "hide") continue;
+    const isSelected = hasSelected && selected!.has(id);
+    // Treat selection-driven recede the same way the old code did —
+    // local alias for the rest of the per-point math which uses the
+    // "highlight is active" condition to bump alpha / desaturation.
+    const isHighlight = isSelected;
 
     let rgb: [number, number, number];
     if (colorBlock?.kind === "categorical") {
@@ -883,12 +999,22 @@ function buildPartition(
     }
     // When highlight is active AND a color channel is bound, the
     // base layer's channel color competes with the highlight for
-    // attention. Desaturate the non-highlighted points heavily so
-    // the highlight (which keeps full saturation) reads as the
-    // dominant signal. No-op when there's no color binding — base
-    // is already gray.
-    if (!isHighlight && hasHighlight && colorBlock) {
+    // attention. Desaturate the non-highlighted in-scope points
+    // heavily so the highlight (which keeps full saturation) reads
+    // as the dominant signal. No-op when there's no color binding —
+    // base is already gray.
+    if (isInScope && !isHighlight && hasHighlight && colorBlock) {
       rgb = desaturate(rgb, BASE_DESATURATE_WHEN_HIGHLIGHT);
+    }
+    // Out-of-scope cells (ghost mode only — hide path skipped them
+    // upstream). Override channel color entirely so they read as a
+    // recessed background regardless of what the active color
+    // binding is doing — the scope distinction outranks the channel
+    // signal. They also lose alpha and any per-cell size variation
+    // so the in-scope set always dominates visually.
+    if (!isInScope) {
+      rgb = [BASE_RGBA_WITH_HIGHLIGHT[0], BASE_RGBA_WITH_HIGHLIGHT[1], BASE_RGBA_WITH_HIGHLIGHT[2]];
+      alpha = BASE_ALPHA_WHEN_HIGHLIGHT;
     }
 
     // Size:
@@ -914,39 +1040,53 @@ function buildPartition(
       color: [rgb[0], rgb[1], rgb[2], alpha],
       radius,
     };
-    if (isHighlight) hl.push(row);
-    else base.push(row);
+    if (!isInScope) outOfScope.push(row);
+    else if (isSelected) selectedRows.push(row);
+    else inScopeBase.push(row);
   }
 
-  // Sparse-highlight visibility boost. With ~94k cells, picking out
+  // Sparse-selection visibility boost. With ~94k cells, picking out
   // a handful of highlighted points is genuinely hard at default
   // size. Bump highlight radii continuously as the count shrinks —
   // small sets get markedly larger, the threshold dissolves so there
   // isn't a visible "snap" as the user lassos one more cell into a
   // medium-sized set.
   //
-  // Curve: at 1 highlighted cell, +8px bonus; at 500, ~0. Continuous
+  // Curve: at 1 selected cell, +8px bonus; at 500, ~0. Continuous
   // exponential decay. Combined with the always-on stroke on the
-  // highlight layer (see `getLineColor` in the layer config), even
+  // selected layer (see `getLineColor` in the layer config), even
   // single-cell selections become findable against a dense background.
-  if (hl.length > 0 && hl.length <= 500) {
-    const bonus = 8 * Math.exp(-hl.length / 80);
-    for (const row of hl) {
+  if (selectedRows.length > 0 && selectedRows.length <= 500) {
+    const bonus = 8 * Math.exp(-selectedRows.length / 80);
+    for (const row of selectedRows) {
       row.radius += bonus;
     }
   }
 
   // Revision strings drive deck.gl's updateTriggers — change ⇒ rebuild
-  // the GPU buffers. Including the binding identity here is enough; the
-  // per-point arrays are immutable for a given binding set.
-  const colorRevision = `${colorBlock?.column ?? ""}|${colorBlock?.kind ?? ""}|${opts.colormap.id}|${opts.colorMin ?? ""}|${opts.colorMax ?? ""}|${isDiverging ? opts.colorCenter ?? "" : ""}|${hasHighlight ? "hl" : "no-hl"}`;
-  const sizeRevision = `${sizeBlock?.column ?? ""}|${opts.sizeMinPx}|${opts.sizeMaxPx}|${hl.length}|${hasHighlight ? "hl" : "no-hl"}`;
-  return { base, highlight: hl, colorRevision, sizeRevision };
+  // the GPU buffers. Including the binding identity + scope/selection
+  // tokens here is enough; the per-point arrays are immutable for a
+  // given binding set.
+  const colorRevision = `${colorBlock?.column ?? ""}|${colorBlock?.kind ?? ""}|${opts.colormap.id}|${opts.colorMin ?? ""}|${opts.colorMax ?? ""}|${isDiverging ? opts.colorCenter ?? "" : ""}|${hasHighlight ? "sel" : "no-sel"}|${hasScope ? `scope-${opts.scopeMode}` : "no-scope"}`;
+  const sizeRevision = `${sizeBlock?.column ?? ""}|${opts.sizeMinPx}|${opts.sizeMaxPx}|${opts.sizeDataMin ?? ""}|${opts.sizeDataMax ?? ""}|${selectedRows.length}|${hasHighlight ? "sel" : "no-sel"}|${hasScope ? `scope-${opts.scopeMode}` : "no-scope"}`;
+  return {
+    outOfScope,
+    inScopeBase,
+    selected: selectedRows,
+    colorRevision,
+    sizeRevision,
+  };
 }
 
 /** Percentile-rank scaling: each value maps to its position in the
  *  sorted-by-value index, then linearly into [lo, hi]. NaN values
  *  land at `lo` so they're visible but deprioritized.
+ *
+ *  When `dataMin` / `dataMax` are set, values outside that data range
+ *  clamp to the size endpoints (≤ dataMin → lo, ≥ dataMax → hi) and
+ *  only in-range values participate in the rank computation. This
+ *  mirrors the color channel's clipping: a long-tail outlier doesn't
+ *  squash the gradient onto the rest of the distribution.
  *
  *  O(n log n) for the sort; ~80ms on 94k values, memoized in
  *  buildPartition. Mirrors the backend's _scale_size_rank that we
@@ -956,28 +1096,41 @@ function rankScaleToPx(
   values: Array<number | null>,
   lo: number,
   hi: number,
+  dataMin: number | null,
+  dataMax: number | null,
 ): number[] {
   const n = values.length;
-  // Sort indices by value to compute ranks. NaN/null entries get
-  // a sentinel rank of 0 (lo) without participating in the sort
-  // among real values.
-  const idx: number[] = [];
+  const result = new Array<number>(n);
+  // Default everything to lo. NaN / null cells, and cells we don't
+  // overwrite below (out-of-range when clipping is active), keep the
+  // default — same behavior as the un-clipped path's NaN handling.
+  for (let i = 0; i < n; i++) result[i] = lo;
+  // Bucket indices: in-range (participate in rank), or pinned to one
+  // of the size endpoints. NaN/null sit in the default-lo bucket.
+  const inRange: number[] = [];
   for (let i = 0; i < n; i++) {
     const v = values[i];
-    if (v !== null && Number.isFinite(v)) idx.push(i);
+    if (v === null || !Number.isFinite(v)) continue;
+    if (dataMin !== null && v <= dataMin) {
+      result[i] = lo;
+      continue;
+    }
+    if (dataMax !== null && v >= dataMax) {
+      result[i] = hi;
+      continue;
+    }
+    inRange.push(i);
   }
-  idx.sort((a, b) => (values[a] as number) - (values[b] as number));
-  const result = new Array<number>(n);
-  // Default everything to lo; sorted indices overwrite below.
-  for (let i = 0; i < n; i++) result[i] = lo;
-  const m = idx.length;
+  // Rank-scale only the in-range subset across the full pixel
+  // range. With no clipping (the default), this is the whole
+  // dataset and the behavior matches the previous implementation.
+  inRange.sort((a, b) => (values[a] as number) - (values[b] as number));
+  const m = inRange.length;
   if (m === 0) return result;
-  // Map sorted positions into [lo, hi]. Ties: average rank handled
-  // implicitly by stable sort + linear position, close enough.
   const span = hi - lo;
   for (let k = 0; k < m; k++) {
     const pct = m === 1 ? 1 : k / (m - 1);
-    result[idx[k]] = lo + pct * span;
+    result[inRange[k]] = lo + pct * span;
   }
   return result;
 }

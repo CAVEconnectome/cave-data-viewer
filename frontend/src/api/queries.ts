@@ -1,5 +1,11 @@
-import { useEffect } from "react";
-import { useMutation, useQuery, useQueryClient, type QueryKey } from "@tanstack/react-query";
+import { useEffect, useMemo } from "react";
+import {
+  useMutation,
+  useQueries,
+  useQuery,
+  useQueryClient,
+  type QueryKey,
+} from "@tanstack/react-query";
 import { apiFetch } from "./client";
 import type {
   CellIdLookupResponse,
@@ -124,6 +130,67 @@ export function useTableUniqueValues(
     retry: META_RETRY,
     retryDelay: META_RETRY_DELAY,
   });
+}
+
+/**
+ * Fetch the distinct-value universe for several tables in parallel and
+ * merge into a single map keyed by qualified column (`${table}.${col}`).
+ *
+ * Designed for surfaces that need a categorical dropdown across an
+ * arbitrary set of attached decoration tables (the Filter Scope
+ * predicate builder is the primary caller). Each underlying query reuses
+ * the same TanStack Query cache entry as `useTableUniqueValues`, so
+ * pages that already loaded a table's values pay nothing on entry.
+ *
+ * `live` mat_version is treated as "no version" by the backend; the
+ * unique-values cache is materialization-stable so a live caller falls
+ * back to whatever's currently cached server-side without forcing a fetch.
+ *
+ * Returns the merged map along with a coarse readiness flag — useful
+ * for branching UI between "loading…" and "render with whatever's here."
+ */
+export function useTablesUniqueValues(
+  ds: string | null,
+  tables: string[],
+  matVersion: number | "live" | null,
+): { values: Record<string, string[]>; isLoading: boolean } {
+  const queries = useQueries({
+    queries: tables.map((table) => ({
+      queryKey: ["table_unique_values", ds, table, matVersion] as QueryKey,
+      queryFn: () =>
+        apiFetch<TableUniqueValuesResponse>(
+          `/api/v1/datastacks/${ds}/tables/${table}/values`,
+          {
+            query: {
+              mat_version: matVersion === "live" ? undefined : matVersion ?? undefined,
+            },
+          },
+        ),
+      enabled: !!ds && !!table,
+      staleTime: 24 * 60 * 60 * 1000,
+      retry: META_RETRY,
+      retryDelay: META_RETRY_DELAY,
+    })),
+  });
+  // Merge as a `${table}.${column}` map so the predicate builder can do
+  // a single lookup on the qualified column key it already has.
+  const values = useMemo(() => {
+    const out: Record<string, string[]> = {};
+    queries.forEach((q, i) => {
+      const table = tables[i];
+      const data = q.data;
+      if (!data) return;
+      for (const [col, vals] of Object.entries(data.values ?? {})) {
+        out[`${table}.${col}`] = vals;
+      }
+    });
+    return out;
+    // The queries array identity is new every render; keying memo on
+    // table identifiers + per-query data is what actually changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tables.join("|"), ...queries.map((q) => q.data)]);
+  const isLoading = queries.some((q) => q.isLoading);
+  return { values, isLoading };
 }
 
 export function useTables(ds: string | null, matVersion: number | "live" | null) {
