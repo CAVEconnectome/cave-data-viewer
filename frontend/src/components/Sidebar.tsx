@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import {
   useDatastackInfo,
   useDatastacks,
@@ -166,6 +166,8 @@ export function Sidebar({ navigateToView, collapsed, onToggleCollapsed }: Sideba
           )}
           {info.data && <NeutralNeuroglancerLink ds={ds!} mv={mv} />}
 
+          <ExamplesLink />
+
           <nav className="nav">
             <button
               onClick={() => navigate(`/${ds ? `?ds=${ds}${mv ? `&mv=${mv}` : ""}` : ""}`)}
@@ -201,6 +203,17 @@ export function Sidebar({ navigateToView, collapsed, onToggleCollapsed }: Sideba
         </>
       )}
     </aside>
+  );
+}
+
+function ExamplesLink() {
+  const [params] = useSearchParams();
+  const ds = params.get("ds");
+  const to = ds ? `/examples?ds=${encodeURIComponent(ds)}` : "/examples";
+  return (
+    <div className="sidebar-examples-link">
+      <Link to={to}>Examples →</Link>
+    </div>
   );
 }
 

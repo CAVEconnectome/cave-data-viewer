@@ -5433,3 +5433,11 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
   gap: 1rem;
 }
+
+.sidebar-examples-link { padding: 0.5rem 0; }
+.sidebar-examples-link a {
+  color: var(--accent, #2a3f6b);
+  text-decoration: none;
+  font-weight: 500;
+}
+.sidebar-examples-link a:hover { text-decoration: underline; }
