@@ -136,14 +136,18 @@ def test_set_writes_through_to_l2():
 
 
 class FakeExecutor:
-    """Minimal `RevalidationExecutor` substitute. Records submissions
-    and runs them synchronously so the test can observe the L2 write."""
+    """Minimal ThreadPoolExecutor-shaped substitute. Records submissions
+    and runs them synchronously so the test can observe the L2 write.
+
+    The L2 writer uses a plain `concurrent.futures.ThreadPoolExecutor`
+    (not `RevalidationExecutor`) because L2 writes are idempotent and
+    need no per-key dedup — they go out as bare `submit(fn)`."""
 
     def __init__(self) -> None:
         self.submissions = []
 
-    def submit(self, key, fn) -> None:
-        self.submissions.append((key, fn))
+    def submit(self, fn) -> None:
+        self.submissions.append(fn)
         fn()  # run synchronously so we can assert on the L2 store after
 
 
@@ -154,11 +158,9 @@ def test_set_uses_executor_when_provided():
         soft_ttl=10, hard_ttl=100, l2=l2, executor=executor
     )
     cache.set("k", "v")
-    # L2 write was submitted as a job, namespaced under `gcs_write`
+    # L2 write was submitted as a job (one bare callable; no per-key dedup).
     assert len(executor.submissions) == 1
-    job_key, _ = executor.submissions[0]
-    assert job_key == ("gcs_write", "k")
-    # Executor ran the job synchronously, so L2 should now hold it
+    # Executor ran the job synchronously, so L2 should now hold it.
     assert l2.store["k"][0] == "v"
 
 

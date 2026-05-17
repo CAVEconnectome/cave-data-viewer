@@ -127,10 +127,12 @@ def test_build_l2_stores_populates_all_kinds_per_retention_class():
         config = {"GCS_CACHE_BUCKET": "my-bucket", "GCS_CACHE_PREFIX": "cdv/"}
     stores = build_l2_stores(App())
     assert set(stores.keys()) == {"default", "longlived"}
+    # Inner-key set tracks `_KINDS` in object_store.py — import it to avoid
+    # restating the list and going stale every time a new cache kind lands.
+    from cave_data_viewer.api.services.object_store import _KINDS
+    expected_kinds = set(_KINDS)
     for retention in ("default", "longlived"):
-        assert set(stores[retention].keys()) == {
-            "num_soma", "table", "synapse",
-        }
+        assert set(stores[retention].keys()) == expected_kinds
     assert stores["default"]["table"]._prefix == "cdv/default/table/"
     assert stores["longlived"]["synapse"]._prefix == "cdv/longlived/synapse/"
 
