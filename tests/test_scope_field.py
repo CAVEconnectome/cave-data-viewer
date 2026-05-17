@@ -57,3 +57,22 @@ def test_scope_roundtrips_on_explorer_recipe() -> None:
     out = recipes.get_recipe(store, user_id=42, ds="ds_x", recipe_id="personal-bbbb")
     assert out is not None
     assert out["scope"] == body["scope"]
+
+
+def test_scope_predicate_count_cap_enforced() -> None:
+    """Scope with more than 100 predicates is rejected."""
+    import pytest
+
+    store = InMemoryStore()
+    body = {
+        "version": 1,
+        "kind": "connectivity",
+        "title": "too many",
+        "scope": {
+            "predicates": [
+                {"column": f"c{i}", "op": "eq", "value": i} for i in range(101)
+            ],
+        },
+    }
+    with pytest.raises(recipes.RecipeValidationError):
+        recipes.put_recipe(store, user_id=42, ds="ds_x", recipe_id="personal-cccc", recipe_dict=body)

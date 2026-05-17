@@ -108,6 +108,11 @@ SUPPORTED_SCHEMA_VERSIONS: frozenset[int] = frozenset({1})
 # introduced.
 ALLOWED_KINDS: frozenset[str] = frozenset({"connectivity", "explorer"})
 
+# Max number of predicates inside `scope.predicates`. The `scope` value
+# is a dict (not a list), so it can't be expressed in _FIELD_LIMITS
+# directly; it's enforced by _enforce_scope_predicates_cap instead.
+_MAX_SCOPE_PREDICATES = 100
+
 # Field-length sanity caps (defense in depth — not schema validation).
 # These bound the on-disk shape regardless of what the SPA sends.
 #
@@ -438,6 +443,24 @@ def _ordered_for_disk(d: dict) -> dict:
     return out
 
 
+def _enforce_scope_predicates_cap(d: dict) -> None:
+    """Apply the predicate-count cap on the optional `scope:` block.
+    Lives outside `_FIELD_LIMITS` because the cap targets a nested key
+    (`scope.predicates`) rather than the top-level `scope` value itself
+    — `scope` is a dict, not a list, so the tuple-style list cap in
+    `_enforce_limits_map` doesn't apply cleanly."""
+    scope = d.get("scope")
+    if not isinstance(scope, dict):
+        return
+    preds = scope.get("predicates")
+    if not isinstance(preds, list):
+        return
+    if len(preds) > _MAX_SCOPE_PREDICATES:
+        raise RecipeValidationError(
+            f"scope.predicates: too many entries ({len(preds)} > {_MAX_SCOPE_PREDICATES})"
+        )
+
+
 def _enforce_field_limits(d: dict) -> None:
     """Enforce top-level field caps from `_FIELD_LIMITS`, then recurse
     one level into `explorer:` (if present) using
@@ -446,6 +469,7 @@ def _enforce_field_limits(d: dict) -> None:
     intentionally shallow, with the per-PUT byte cap in the endpoint
     as the real defense for adversarial payloads."""
     _enforce_limits_map(d, _FIELD_LIMITS, prefix="")
+    _enforce_scope_predicates_cap(d)
     nested_explorer = d.get("explorer")
     if isinstance(nested_explorer, dict):
         _enforce_limits_map(nested_explorer, _EXPLORER_FIELD_LIMITS, prefix="explorer.")
