@@ -28,6 +28,7 @@ import { dump as yamlDump, JSON_SCHEMA, load as yamlLoad } from "js-yaml";
 
 import type { ExplorerRecipe, ExplorerState } from "../../api/types";
 import type { RecipeKindAdapter, RecipeDiffSummary } from "./types";
+import { parseScopeBlock } from "../recipeFromYaml";
 
 /** URL keys owned by the explorer adapter. applyToParams clears these
  *  before re-setting from the recipe, so a recipe with no `x` clears
@@ -166,6 +167,7 @@ export const explorerAdapter: RecipeKindAdapter<ExplorerRecipe> = {
             title: recipe.title,
             description: recipe.description ?? undefined,
             explorer: stripUndefined(recipe.explorer as Record<string, unknown>),
+            ...(recipe.scope !== undefined ? { scope: recipe.scope } : {}),
           },
         ],
       },
@@ -332,6 +334,9 @@ export function coerceExplorerFromYaml(
     state.scope_mode = null;
   }
 
+  const where = typeof parsed.id === "string" ? `recipe "${parsed.id}"` : meta.id;
+  const scope = parseScopeBlock(parsed.scope, where);
+
   return {
     id,
     kind: "explorer",
@@ -341,6 +346,7 @@ export function coerceExplorerFromYaml(
         ? parsed.description
         : meta.description ?? null,
     explorer: state,
+    ...(scope !== undefined ? { scope } : {}),
   };
 }
 

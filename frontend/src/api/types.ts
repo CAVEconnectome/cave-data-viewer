@@ -321,6 +321,19 @@ export interface Example extends TourBase {
   root: string;
 }
 
+export type ScopePredicateOp = "in" | "eq" | "ne" | "gt" | "gte" | "lt" | "lte";
+
+export interface ScopePredicate {
+  column: string;
+  op: ScopePredicateOp;
+  value?: unknown;
+  values?: unknown[];
+}
+
+export interface RecipeScope {
+  predicates: ScopePredicate[];
+}
+
 /** Discriminator value for the Recipe union. New kinds get added here
  *  alongside the backend `ALLOWED_KINDS` in services/recipes.py. */
 export type RecipeKind = "connectivity" | "explorer";
@@ -328,6 +341,7 @@ export type RecipeKind = "connectivity" | "explorer";
 /** Connectivity-shape recipe — the original /neuron overlay. */
 export interface ConnectivityRecipe extends TourBase {
   kind: "connectivity";
+  scope?: RecipeScope;
 }
 
 /** /explore workspace state captured for save/restore. Mirrors the
@@ -375,6 +389,7 @@ export interface ExplorerRecipe {
   description?: string | null;
   kind: "explorer";
   explorer: ExplorerState;
+  scope?: RecipeScope;
   version?: number;
   tags?: string[];
   saved_at?: string;
