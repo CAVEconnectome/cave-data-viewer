@@ -158,6 +158,10 @@ export const explorerAdapter: RecipeKindAdapter<ExplorerRecipe> = {
   },
 
   toYaml(recipe) {
+    // NOTE: Only fields meaningful for re-import are listed here. Server-set
+    // metadata (version, tags, saved_at) is intentionally omitted from YAML
+    // export — if you add a new user-facing field to ExplorerRecipe, add it
+    // to this object too or it will silently drop on download.
     return yamlDump(
       {
         recipes: [

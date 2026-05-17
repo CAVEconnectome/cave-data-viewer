@@ -37,6 +37,8 @@ export interface RecipeParseResult {
   errors: string[];
 }
 
+const VALID_SCOPE_OPS = new Set<string>(["in", "eq", "ne", "gt", "gte", "lt", "lte"]);
+
 // Hardening: cap input size before handing it to the YAML parser. A
 // hostile (or accidentally enormous) blob shouldn't be able to OOM the
 // tab. 256 KB is generous — the recipe shape is shallow and any plausible
@@ -115,6 +117,7 @@ export function parseScopeBlock(raw: unknown, _where: string): RecipeScope | und
     if (typeof p !== "object" || p == null) continue;
     const r = p as Record<string, unknown>;
     if (typeof r.column !== "string" || typeof r.op !== "string") continue;
+    if (!VALID_SCOPE_OPS.has(r.op)) continue;  // drop invalid op silently — tolerant parser
     out.push({
       column: r.column,
       op: r.op as ScopePredicateOp,
@@ -122,6 +125,7 @@ export function parseScopeBlock(raw: unknown, _where: string): RecipeScope | und
       values: Array.isArray(r.values) ? r.values : undefined,
     });
   }
+  if (out.length === 0) return undefined;
   return { predicates: out };
 }
 
