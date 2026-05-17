@@ -33,7 +33,7 @@ def _lts_set(ds: str) -> set[int]:
     try:
         return reg.longlived_set(ds)
     except Exception:
-        logger.exception("LTS lookup failed for ds=%s", ds)
+        logger.warning("LTS lookup failed for ds=%s", ds, exc_info=True)
         return set()
 
 

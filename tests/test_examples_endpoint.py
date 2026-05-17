@@ -106,3 +106,26 @@ def test_unknown_datastack_empty_list(app_with_registry, client) -> None:
     resp = client.get("/api/v1/examples?ds=unknown")
     assert resp.status_code == 200
     assert resp.get_json() == {"items": [], "hidden_count": 0}
+
+
+def test_get_asset_returns_file(app_with_registry, client, tmp_path, monkeypatch) -> None:
+    """Asset endpoint returns the file bytes with the right content-type."""
+    asset = tmp_path / "thumb.png"
+    asset.write_bytes(b"\x89PNG\r\n\x1a\nfake-png-bytes")
+
+    registry = app_with_registry.extensions["dcv_recipe_registry"]
+    monkeypatch.setattr(
+        registry, "asset_path",
+        lambda ds, filename: asset if filename == "thumb.png" else None,
+    )
+
+    resp = client.get("/api/v1/examples/ds_x/_assets/thumb.png")
+    assert resp.status_code == 200
+    assert resp.headers.get("Content-Type", "").startswith("image/png")
+    assert resp.data.startswith(b"\x89PNG")
+
+
+def test_get_asset_missing_returns_404(app_with_registry, client) -> None:
+    """Asset endpoint returns 404 when registry says no such asset."""
+    resp = client.get("/api/v1/examples/ds_x/_assets/missing.png")
+    assert resp.status_code == 404

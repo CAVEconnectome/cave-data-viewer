@@ -10,6 +10,13 @@ from __future__ import annotations
 
 import os
 
+# Set the dev-auth-bypass env var at module load time, BEFORE any test file
+# triggers the import of cave_data_viewer.api.auth. The auth module evaluates
+# the env var at import time and caches the result for the session; setting
+# it inside the app() fixture is too late once any earlier-loaded test has
+# triggered the api.auth import.
+os.environ["CDV_DEV_AUTH_BYPASS"] = "1"
+
 import pytest
 
 
@@ -22,7 +29,6 @@ def app():
     exercise endpoints touching CAVE should mock `request_client` or stick
     to endpoints that don't (e.g. `/plots/specs`, `/health`).
     """
-    os.environ["CDV_DEV_AUTH_BYPASS"] = "1"
     from cave_data_viewer.api import create_app
     return create_app()
 
