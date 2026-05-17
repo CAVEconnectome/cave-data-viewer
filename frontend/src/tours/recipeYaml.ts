@@ -14,9 +14,9 @@
  * containing newlines, dotted-table-column references quoted (matching
  * the convention in docs/tours.md and the shipped YAML).
  */
-import type { Recipe, TourPlot, TourPlotBindings } from "../api/types";
+import type { ConnectivityRecipe, TourPlot, TourPlotBindings } from "../api/types";
 
-export function recipeToYaml(recipe: Recipe): string {
+export function recipeToYaml(recipe: ConnectivityRecipe): string {
   // Wrap as the single-recipe-in-a-recipes-list shape so a paste-in lands
   // under the right key.
   const lines: string[] = [];
@@ -25,10 +25,11 @@ export function recipeToYaml(recipe: Recipe): string {
   return lines.join("\n") + "\n";
 }
 
-function emitRecipe(recipe: Recipe, lines: string[], indent: number): void {
+function emitRecipe(recipe: ConnectivityRecipe, lines: string[], indent: number): void {
   const pad = " ".repeat(indent);
   // First field of a list item is on the dash line.
   lines.push(`${" ".repeat(indent - 2)}- id: ${quoteIfNeeded(recipe.id)}`);
+  lines.push(`${pad}kind: connectivity`);
   lines.push(`${pad}title: ${quoteIfNeeded(recipe.title)}`);
   if (recipe.description) {
     emitDescription(recipe.description, lines, indent);

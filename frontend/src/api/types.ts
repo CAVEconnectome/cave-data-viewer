@@ -292,6 +292,8 @@ export interface TourPlot {
   unfiltered?: boolean | null;
 }
 
+/** Common shape for connectivity Examples and Recipes. Explorer recipes
+ *  do NOT extend this — they have a different field set entirely. */
 export interface TourBase {
   id: string;
   title: string;
@@ -307,13 +309,10 @@ export interface TourBase {
    *  schema changes use this for negotiation. See
    *  `cave_data_viewer/api/services/recipes.py`. */
   version?: number;
-  /** Reserved for a future personal/team/shared distinction. Not yet
-   *  surfaced in the UI; the field name is reserved on both sides so a
-   *  newer client can introduce it without an older server stripping it.
-   */
-  kind?: string;
   /** Reserved for a future organization/search-labels feature. */
   tags?: string[];
+  /** Server-stamped at PUT time. */
+  saved_at?: string;
 }
 
 export interface Example extends TourBase {
@@ -322,12 +321,81 @@ export interface Example extends TourBase {
   root: string;
 }
 
-export type Recipe = TourBase;
+/** Discriminator value for the Recipe union. New kinds get added here
+ *  alongside the backend `ALLOWED_KINDS` in services/recipes.py. */
+export type RecipeKind = "connectivity" | "explorer";
+
+/** Connectivity-shape recipe — the original /neuron overlay. */
+export interface ConnectivityRecipe extends TourBase {
+  kind: "connectivity";
+}
+
+/** /explore workspace state captured for save/restore. Mirrors the
+ *  backend `ExplorerState` in `services/datastack_config.py`. Most
+ *  fields round-trip the explorer URL params one-for-one; `selection`
+ *  is the cell_id bag that can't fit in the URL and lives only in the
+ *  recipe payload. */
+export interface ExplorerState {
+  /** Feature-table id (also the `?ft=` URL key). */
+  ft?: string | null;
+  /** Embedding id within the feature table (`?emb=`). */
+  emb?: string | null;
+  /** Shared with connectivity — same URL keys, same meaning. */
+  decoration_tables?: string[];
+  cells?: string | null;
+  scope_mode?: "ghost" | "hide" | null;
+  sel_filters?: string[];
+  x?: string | null;
+  y?: string | null;
+  color?: string | null;
+  size?: string | null;
+  cmap?: string | null;
+  color_min?: number | null;
+  color_max?: number | null;
+  color_center?: number | null;
+  size_min?: number | null;
+  size_max?: number | null;
+  size_data_min?: number | null;
+  size_data_max?: number | null;
+  growth_space?: string | null;
+  growth_variance?: number | null;
+  growth_reduction?: string | null;
+  growth_threshold?: number | null;
+  growth_features?: string[];
+  growth_topn?: number | null;
+  /** The cell_id Selection bag. Capped at 100,000 entries server-side
+   *  (see _EXPLORER_FIELD_LIMITS); the YAML upload path is the escape
+   *  hatch for anything larger. */
+  selection?: string[];
+}
+
+export interface ExplorerRecipe {
+  id: string;
+  title: string;
+  description?: string | null;
+  kind: "explorer";
+  explorer: ExplorerState;
+  version?: number;
+  tags?: string[];
+  saved_at?: string;
+}
+
+/** Discriminated union over `kind`. All recipe consumers dispatch on
+ *  `recipe.kind` to pick the right adapter (see tours/adapters/). */
+export type Recipe = ConnectivityRecipe | ExplorerRecipe;
 
 export interface ToursResponse {
   datastack: string;
   examples: Example[];
   recipes: Recipe[];
+  /** Server-reported count of saved recipes the user has on disk that
+   *  were skipped because they lack a recognized `kind`. Surfaced as a
+   *  banner on the landing page so the user understands why some
+   *  previously-saved items aren't showing up. Only populated on the
+   *  per-user list endpoint (`/me/recipes/<ds>`); operator
+   *  `/datastacks/<ds>/tours` always returns 0 because operator YAMLs
+   *  are validated at load time. */
+  invalid_count?: number;
 }
 
 // Plotly's figure JSON. We don't try to type the full Plotly trace shape —

@@ -2,17 +2,18 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useDatastacks, useTours } from "../api/queries";
 import { useSwitchDatastack, useUrlParam } from "../hooks/useUrlState";
-import type { Example, Recipe } from "../api/types";
-import { buildExampleParams, buildRecipeOpenParams } from "../tours/urlMint";
+import type { ConnectivityRecipe, Example, Recipe } from "../api/types";
+import { buildExampleParams } from "../tours/urlMint";
 import { useApplyRecipe } from "../tours/useApplyRecipe";
 import {
+  getInvalidCount,
   listForDs as listPersonalRecipes,
   remove as removePersonalRecipe,
   save as savePersonalRecipe,
   subscribe as subscribePersonalRecipes,
 } from "../tours/personalRecipes";
+import { adapterForRecipe } from "../tours/adapters/registry";
 import { parseRecipesFromYaml } from "../tours/recipeFromYaml";
-import { recipeToYaml } from "../tours/recipeYaml";
 
 // Persisted across sessions so a returning user lands on whichever datastack
 // they last engaged with — the operator-controlled API order is irrelevant
@@ -144,6 +145,12 @@ function DatastackTours({ ds }: { ds: string }) {
   const [, setPersonalTick] = useState(0);
   useEffect(() => subscribePersonalRecipes(() => setPersonalTick((n) => n + 1)), []);
   const personalRecipes = listPersonalRecipes(ds);
+  // Server-reported count of saved recipes the user has on disk that
+  // were skipped because they lack a recognized `kind` (legacy
+  // pre-discriminator items, or items with a kind this SPA doesn't
+  // know). Surface as a banner so the user understands why some
+  // previously-saved items aren't visible.
+  const invalidCount = getInvalidCount(ds);
 
   const operatorRecipes = data?.recipes ?? [];
   const examples = data?.examples ?? [];
@@ -152,6 +159,13 @@ function DatastackTours({ ds }: { ds: string }) {
 
   return (
     <section className="landing-datastack">
+      {invalidCount > 0 && (
+        <p className="warning recipe-invalid-banner">
+          {invalidCount} recipe{invalidCount === 1 ? " is" : "s are"} from a
+          previous schema and {invalidCount === 1 ? "is" : "are"} hidden. Re-create
+          {invalidCount === 1 ? " it" : " them"} to restore.
+        </p>
+      )}
       {tours.isLoading && <p className="muted">Loading examples and recipes…</p>}
       {tours.isError && (
         <p className="error">
@@ -341,6 +355,16 @@ function RecipeUploadResult({
 }
 
 function summarizeTour(t: Example | Recipe): string {
+  // Example has no `kind` field (it's always connectivity-flavored in v1)
+  // and carries the connectivity fields directly. Recipes dispatch on
+  // `kind` for the per-kind summary.
+  if (!("kind" in t) || t.kind === "connectivity") {
+    return summarizeConnectivity(t as ConnectivityRecipe | Example);
+  }
+  return summarizeExplorer(t);
+}
+
+function summarizeConnectivity(t: ConnectivityRecipe | Example): string {
   const parts: string[] = [];
   if (t.decoration_tables.length > 0) {
     parts.push(
@@ -351,6 +375,27 @@ function summarizeTour(t: Example | Recipe): string {
     parts.push(`${t.plots.length} plot${t.plots.length === 1 ? "" : "s"}`);
   }
   if (t.cells) parts.push("cell filter");
+  return parts.join(" · ");
+}
+
+function summarizeExplorer(t: Extract<Recipe, { kind: "explorer" }>): string {
+  const parts: string[] = [];
+  const s = t.explorer;
+  if (s.ft) parts.push(`ft: ${s.ft}`);
+  if (s.emb) parts.push(`emb: ${s.emb}`);
+  const bound = ["x", "y", "color", "size"].filter(
+    (k) => Boolean((s as Record<string, unknown>)[k]),
+  ).length;
+  if (bound > 0) parts.push(`${bound} scatter binding${bound === 1 ? "" : "s"}`);
+  if (s.decoration_tables && s.decoration_tables.length > 0) {
+    parts.push(
+      `${s.decoration_tables.length} decoration${s.decoration_tables.length === 1 ? "" : "s"}`,
+    );
+  }
+  if (s.cells) parts.push("cell filter");
+  if (s.selection && s.selection.length > 0) {
+    parts.push(`${s.selection.length} selected`);
+  }
   return parts.join(" · ");
 }
 
@@ -381,24 +426,27 @@ function RecipeCard({ ds, recipe, personal }: { ds: string; recipe: Recipe; pers
   const [currentMv] = useUrlParam("mv");
   const [currentRoot] = useUrlParam("root");
   const applyRecipe = useApplyRecipe();
-  // Apply overlays the recipe onto a loaded cell — requires same ds + a root.
-  // Open preconfigures the workspace and lands on /neuron with no root, so
-  // the user fills it in. Mutually exclusive in the UI to avoid two CTAs
-  // racing for the same click; Apply is preferred when available because
-  // it's the more common workflow (user already exploring a cell, wants to
-  // try a different lens on it).
+  const adapter = adapterForRecipe(recipe);
+  // Apply overlays the recipe onto a loaded view — connectivity
+  // requires same ds + a root, explorer just requires same ds. The
+  // adapter's hasNavContext does the kind-aware check.
   const sameDs = currentDs === ds;
-  const canApply = sameDs && !!currentRoot;
+  // canApply is shown via the CTA label ("Apply" vs "Open"); the
+  // actual fallback to Open when nav context is missing happens
+  // inside useApplyRecipe via the adapter.
+  const dummyParams = new URLSearchParams(window.location.search);
+  const canApply = sameDs && adapter.hasNavContext(dummyParams);
   const open = () => {
-    // mv preserved from the sidebar only when the user is already on this
-    // datastack — switching to a different datastack's recipe should land
-    // the user without a stale mat_version that doesn't apply to the new ds.
+    // mv preserved from the sidebar only when the user is already on
+    // this datastack — switching to a different datastack's recipe
+    // should land the user without a stale mat_version that doesn't
+    // apply to the new ds.
     const mvToCarry = sameDs ? currentMv : null;
-    const params = buildRecipeOpenParams(ds, recipe, mvToCarry);
-    navigate(`/neuron?${params.toString()}`);
+    const params = adapter.buildOpenParams(ds, recipe, mvToCarry);
+    navigate(`${adapter.openRoute}?${params.toString()}`);
   };
   const onDownload = () => {
-    const yaml = recipeToYaml(recipe);
+    const yaml = adapter.toYaml(recipe);
     const blob = new Blob([yaml], { type: "application/x-yaml;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -416,7 +464,10 @@ function RecipeCard({ ds, recipe, personal }: { ds: string; recipe: Recipe; pers
   };
   return (
     <div className={`tour-card${personal ? " is-personal" : ""}`}>
-      <h5>{recipe.title}</h5>
+      <div className="tour-card-header">
+        <h5>{recipe.title}</h5>
+        <span className={`recipe-kind-chip kind-${recipe.kind}`}>{recipe.kind}</span>
+      </div>
       {recipe.description && <p className="tour-desc">{recipe.description}</p>}
       {summarizeTour(recipe) && <p className="tour-meta">{summarizeTour(recipe)}</p>}
       <div className="tour-card-actions">
@@ -425,7 +476,11 @@ function RecipeCard({ ds, recipe, personal }: { ds: string; recipe: Recipe; pers
             type="button"
             className="tour-cta"
             onClick={() => applyRecipe(recipe)}
-            title={`Overlay onto cell ${currentRoot.slice(0, 6)}…${currentRoot.slice(-4)}`}
+            title={
+              recipe.kind === "connectivity" && currentRoot
+                ? `Overlay onto cell ${currentRoot.slice(0, 6)}…${currentRoot.slice(-4)}`
+                : "Apply this recipe to the current view"
+            }
           >
             Apply
           </button>

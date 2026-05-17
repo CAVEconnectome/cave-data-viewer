@@ -28,7 +28,7 @@ export function NeuronView() {
   // URL change, and restore the saved baseline when a fresh entry lands
   // here without overlay (e.g., from a table-row click). Owns its own
   // URL observation; placement here is just for thematic grouping.
-  useSessionRecipe();
+  useSessionRecipe("connectivity");
   const decorationTables = decRaw ? decRaw.split(",").filter(Boolean) : [];
 
   const [draftRoot, setDraftRoot] = useState(root ?? "");

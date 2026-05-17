@@ -15,7 +15,7 @@
  * (`plot-1`, `plot-2`, ...) for diff readability — they get re-minted
  * fresh by `applyTourConfigToParams` on apply.
  */
-import type { Recipe, TourPlot, TourPlotBindings } from "../api/types";
+import type { ConnectivityRecipe, TourPlot, TourPlotBindings } from "../api/types";
 import { parseVizParam, parsePlotsList, parseUnfilterList, vizParamKey } from "../plots/urlState";
 import { parsePanelId } from "./urlMint";
 
@@ -28,7 +28,7 @@ export interface RecipeMeta {
 export function parseRecipeFromUrl(
   searchParams: URLSearchParams,
   meta: RecipeMeta,
-): Recipe {
+): ConnectivityRecipe {
   const decoration_tables = csv(searchParams.get("dec"));
   const cells = searchParams.get("cells") || null;
   const hide = csv(searchParams.get("hide"));
@@ -83,6 +83,7 @@ export function parseRecipeFromUrl(
     id: meta.id,
     title: meta.title,
     description: meta.description ?? null,
+    kind: "connectivity",
     decoration_tables,
     plots,
     cells,

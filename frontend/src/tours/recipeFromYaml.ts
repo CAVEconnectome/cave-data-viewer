@@ -27,8 +27,9 @@
  * sidebar has something to render).
  */
 import { JSON_SCHEMA, load as yamlLoad } from "js-yaml";
-import type { Recipe, TourPlot, TourPlotBindings } from "../api/types";
+import type { Recipe, RecipeKind } from "../api/types";
 import { newPersonalId } from "./personalRecipes";
+import { adapterFor, ALL_KINDS } from "./adapters/registry";
 
 export interface RecipeParseResult {
   recipes: Recipe[];
@@ -123,27 +124,31 @@ function coerceRecipe(
     return { recipe: null, warnings, errors };
   }
 
-  // Reject reserved Example fields — `mat_version` and `root` make this
-  // an Example, not a Recipe. We refuse rather than silently dropping
-  // them so the user understands what they uploaded.
-  if (obj.mat_version != null || obj.root != null) {
+  // Kind is required — no silent default. Mirrors the server's hard
+  // cutover rule for the recipe schema.
+  const kindRaw = obj.kind;
+  if (typeof kindRaw !== "string" || !(ALL_KINDS as readonly string[]).includes(kindRaw)) {
+    errors.push(
+      `${where}: missing or unknown \`kind\` (expected one of: ${ALL_KINDS.join(", ")}). Skipped.`,
+    );
+    return { recipe: null, warnings, errors };
+  }
+  const kind = kindRaw as RecipeKind;
+
+  // Reject reserved Example fields for connectivity — `mat_version`
+  // and `root` make this an Example, not a Recipe. Explorer recipes
+  // don't have an Example analog so we don't check for them.
+  if (kind === "connectivity" && (obj.mat_version != null || obj.root != null)) {
     errors.push(
       `${where}: looks like an Example (has mat_version/root), not a Recipe. Skipped.`,
     );
     return { recipe: null, warnings, errors };
   }
 
-  const description = typeof obj.description === "string" ? obj.description : null;
-  const decoration_tables = stringArray(obj.decoration_tables, where, "decoration_tables", warnings);
-  const cells = typeof obj.cells === "string" && obj.cells.length > 0 ? obj.cells : null;
-  const hide = stringArray(obj.hide, where, "hide", warnings);
-  const show = stringArray(obj.show, where, "show", warnings);
-  const coll = stringArray(obj.coll, where, "coll", warnings);
-  const plots = coercePlots(obj.plots, where, warnings);
-
   // Mint a fresh personal id; preserve the YAML's id in the description
   // suffix so the user can correlate uploaded entries with their source.
   const sourceId = typeof obj.id === "string" && obj.id ? obj.id : null;
+  const description = typeof obj.description === "string" ? obj.description : null;
   const finalDescription = description
     ? sourceId
       ? `${description} (source id: ${sourceId})`
@@ -152,76 +157,20 @@ function coerceRecipe(
       ? `(source id: ${sourceId})`
       : null;
 
-  return {
-    recipe: {
-      id: newPersonalId(),
-      title,
-      description: finalDescription,
-      decoration_tables,
-      plots,
-      cells,
-      hide,
-      show,
-      coll,
-    },
-    warnings,
-    errors,
-  };
-}
-
-function coercePlots(raw: unknown, where: string, warnings: string[]): TourPlot[] {
-  if (raw == null) return [];
-  if (!Array.isArray(raw)) {
-    warnings.push(`${where}: \`plots\` is not a list, ignored.`);
-    return [];
-  }
-  const out: TourPlot[] = [];
-  raw.forEach((entry, i) => {
-    if (!isRecord(entry)) {
-      warnings.push(`${where}: plot #${i + 1} is not an object, dropped.`);
-      return;
-    }
-    const o = entry as Record<string, unknown>;
-    const plot: TourPlot = {};
-    if (typeof o.id === "string") plot.id = o.id;
-    if (typeof o.summary_kind === "string") plot.summary_kind = o.summary_kind;
-    if (isRecord(o.bindings)) plot.bindings = coerceBindings(o.bindings as Record<string, unknown>);
-    if (o.unfiltered === true) plot.unfiltered = true;
-    if (!plot.summary_kind && !plot.bindings) {
-      // Permissive: an empty panel renders as a blank editor in the SPA,
-      // which is a valid "user fills me in" state.
-    }
-    out.push(plot);
+  // Dispatch to the kind-specific adapter for the rest of the
+  // coercion. The adapter knows what fields its recipe carries and
+  // how to be tolerant about their shapes.
+  const adapter = adapterFor(kind);
+  const recipe = adapter.fromYaml(obj, {
+    id: newPersonalId(),
+    title,
+    description: finalDescription ?? undefined,
   });
-  return out;
-}
-
-function coerceBindings(raw: Record<string, unknown>): TourPlotBindings {
-  const out: TourPlotBindings = {};
-  for (const k of ["x", "y", "hue", "size", "weight", "scope"] as const) {
-    const v = raw[k];
-    if (typeof v === "string" && v.length > 0) (out as Record<string, string>)[k] = v;
+  if (!recipe) {
+    errors.push(`${where}: shape doesn't match \`kind: ${kind}\`, skipped.`);
+    return { recipe: null, warnings, errors };
   }
-  if (raw.show_cell_depth === false) out.show_cell_depth = false;
-  return out;
-}
-
-function stringArray(
-  raw: unknown,
-  where: string,
-  field: string,
-  warnings: string[],
-): string[] {
-  if (raw == null) return [];
-  if (!Array.isArray(raw)) {
-    warnings.push(`${where}: \`${field}\` is not a list, ignored.`);
-    return [];
-  }
-  const out: string[] = [];
-  for (const item of raw) {
-    if (typeof item === "string" && item.length > 0) out.push(item);
-  }
-  return out;
+  return { recipe, warnings, errors };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

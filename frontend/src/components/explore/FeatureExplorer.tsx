@@ -135,7 +135,10 @@ import { ChannelPicker } from "./ChannelPicker";
 import { CollapsibleSection } from "./CollapsibleSection";
 import { DecorationPicker } from "./DecorationPicker";
 import { EmbeddingPicker } from "./EmbeddingPicker";
+import { ExplorerShareMenu } from "./ExplorerShareMenu";
 import { FeatureTablePicker } from "./FeatureTablePicker";
+import { useSessionRecipe } from "../../tours/sessionRecipe";
+import { consumePendingApplyExtras } from "../../tours/useApplyRecipe";
 import {
   GrowSelectionPanel,
   type DistanceProbe,
@@ -198,6 +201,29 @@ export function FeatureExplorer() {
   // config — ?cells, ?dec, ?ft, ?emb, channel bindings — stays in
   // URL state for shareability.
   const [selectionBag, setSelectionBag] = useState<string[]>([]);
+  // Per-(ds, kind) session-recipe save/restore for /explore. Mirrors
+  // /neuron's call. The Selection bag itself is NOT in session state
+  // — only URL-shaped overlay. Cross-session restore of a curated
+  // selection is what "Save as my recipe" + ExplorerShareMenu is for.
+  useSessionRecipe("explorer");
+  // One-shot: when an explorer recipe was just applied via
+  // useApplyRecipe, the Selection bag from the recipe is staged in
+  // localStorage. Consume it on first ds-bearing render and push it
+  // into component state.
+  useEffect(() => {
+    if (!ds) return;
+    const extras = consumePendingApplyExtras(ds, "explorer");
+    if (!extras) return;
+    const sel = Array.isArray(extras.selection)
+      ? (extras.selection.filter((x) => typeof x === "string") as string[])
+      : null;
+    if (sel && sel.length > 0) {
+      setSelectionBag(sel);
+    }
+    // ds is the only dep we care about — the consumer is intentionally
+    // one-shot per ds.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ds]);
   // Direct-scope snapshot — the bag at the moment "Filter to selection"
   // was clicked, frozen into the active scope. Local state for the same
   // overflow reason: a 5k-cell snapshot can't ride the URL. Direct scope
@@ -763,6 +789,9 @@ export function FeatureExplorer() {
       style={{ gridTemplateColumns: `${railWidth}px 6px 1fr` }}
     >
       <aside className="explore-rail">
+        {ds && (
+          <ExplorerShareMenu ds={ds} selection={selectionBag} />
+        )}
         <CollapsibleSection
           title="Configuration"
           enabled

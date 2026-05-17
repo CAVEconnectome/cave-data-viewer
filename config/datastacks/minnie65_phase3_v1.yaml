@@ -77,6 +77,7 @@ examples:
 
 recipes:
   - id: comprehensive-microns-v0
+    kind: connectivity
     title: Comprehensive View
     description: Cell type plus proofreading and comprehensive cell type and connectivity plots.
     decoration_tables:
@@ -122,6 +123,7 @@ recipes:
         scope: input
     cells: "proofreading_status_and_strategy.status_axon:eq:true"
   - id: classic-microns-v0
+    kind: connectivity
     title: Classic View
     description: Cell type plus proofreading and simple output cell type and connectivity plots equivalent to the prior version.
     decoration_tables:

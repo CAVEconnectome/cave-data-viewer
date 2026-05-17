@@ -1,39 +1,42 @@
 /**
- * Per-datastack "current view" persistence. The URL is the source of truth
- * for an active workspace; this module mirrors the overlay portion of that
- * URL (decoration tables, plots + bindings, cell filter, column visibility)
- * into localStorage so the user's configured view survives:
+ * Per-(datastack, kind) "current view" persistence. The URL is the source
+ * of truth for an active workspace; this module mirrors the overlay
+ * portion of that URL into localStorage so the user's configured view
+ * survives:
  *
- *   - Cross-navigation that drops overlay — most notably, table-row clicks
- *     into /neuron land at `?ds=&mv=&root=` with no overlay params. Without
- *     this, the user's decorations and plots are lost on every cross-nav.
- *   - Cross-session reloads — closing the browser and reopening picks up
- *     where the user left off.
+ *   - Cross-navigation that drops overlay — most notably, table-row
+ *     clicks into /neuron land at `?ds=&mv=&root=` with no overlay
+ *     params. Without this, the user's decorations and plots are lost
+ *     on every cross-nav.
+ *   - Cross-session reloads — closing the browser and reopening picks
+ *     up where the user left off.
  *   - Per-datastack switches — each datastack carries its own baseline,
  *     because recipes reference datastack-bound table names.
  *
- * The rule: the last-changed overlay on a datastack is the default for the
- * next /neuron view of that datastack. Save runs continuously; restore only
- * fires on a fresh entry where overlay is absent — never overwrites an
- * active view. A `(ds, root)` ref guard distinguishes "user just navigated
- * here via an entry path that dropped overlay" (restore baseline) from
- * "user just cleared all overlay on the current cell" (save the empty
- * baseline so the cleared state survives cross-nav).
+ * Now per-kind too: the connectivity view (/neuron) and the explorer
+ * view (/explore) can each have an independent baseline for the same
+ * datastack. A user who narrows scope on /explore, hops to /neuron to
+ * add decorations, then comes back to /explore expects to find the
+ * explorer state intact. Per-(ds, kind) keys make that work cleanly.
  *
- * Storage shape (per-datastack key, JSON-encoded):
+ * Storage shape (per-(ds, kind) key, JSON-encoded):
  *
- *     cdv:v1:session_recipe:<datastack>  →  { version: 1, recipe: Recipe | null }
+ *     cdv:v1:session_recipe:<datastack>:<kind>  →  { version: 1, recipe: Recipe | null }
  *
- * `recipe: null` is an explicit "user cleared everything" signal — distinct
- * from "no entry yet". Per-datastack keys (rather than a single byDs map)
- * keep each save atomic and avoid read-merge-write contention with other
- * tabs.
+ * `recipe: null` is an explicit "user cleared everything" signal —
+ * distinct from "no entry yet". Per-key shape (rather than a single
+ * byDsByKind map) keeps each save atomic and avoids read-merge-write
+ * contention with other tabs.
+ *
+ * Legacy keys: items at the pre-discriminator key
+ * `cdv:v1:session_recipe:<ds>` are read once at module load and
+ * migrated to `:<ds>:connectivity`. After migration the legacy key is
+ * removed.
  */
 import { useEffect, useRef } from "react";
 import { useSearchParams } from "react-router-dom";
-import type { Recipe } from "../api/types";
-import { applyTourConfigToParams } from "./urlMint";
-import { parseRecipeFromUrl, urlHasRecipeContent } from "./recipeFromUrl";
+import type { Recipe, RecipeKind } from "../api/types";
+import { adapterFor } from "./adapters/registry";
 
 const KEY_PREFIX = "cdv:v1:session_recipe:";
 
@@ -42,20 +45,54 @@ interface StoredEntry {
   recipe: Recipe | null;
 }
 
-function storageKey(ds: string): string {
-  return `${KEY_PREFIX}${ds}`;
+function storageKey(ds: string, kind: RecipeKind): string {
+  return `${KEY_PREFIX}${ds}:${kind}`;
 }
 
+// One-shot migration of legacy unkinded keys into their connectivity
+// equivalents. Runs at module load (idempotent — only fires when the
+// legacy key still exists). Future-kind keys aren't reachable through
+// the legacy path, so the migration is safe to always target
+// `:connectivity`.
+function migrateLegacyKeys(): void {
+  if (typeof localStorage === "undefined") return;
+  const legacy: { key: string; ds: string }[] = [];
+  for (let i = 0; i < localStorage.length; i++) {
+    const k = localStorage.key(i);
+    if (!k || !k.startsWith(KEY_PREFIX)) continue;
+    const tail = k.slice(KEY_PREFIX.length);
+    // Legacy shape has exactly one segment (no second `:<kind>`).
+    if (!tail.includes(":")) legacy.push({ key: k, ds: tail });
+  }
+  for (const { key, ds } of legacy) {
+    try {
+      const raw = localStorage.getItem(key);
+      if (raw) {
+        localStorage.setItem(storageKey(ds, "connectivity"), raw);
+      }
+    } catch {
+      // ignore — best-effort migration
+    }
+    try {
+      localStorage.removeItem(key);
+    } catch {
+      // ignore
+    }
+  }
+}
+
+migrateLegacyKeys();
+
 /**
- * Read the saved session recipe for a datastack. Null when nothing's saved
- * yet, when the user explicitly cleared (saved-null), or when JSON / shape
- * validation fails. Callers treat null and a content-less recipe identically
- * — both mean "don't restore anything."
+ * Read the saved session recipe for a (datastack, kind). Null when
+ * nothing's saved yet, when the user explicitly cleared (saved-null),
+ * or when JSON / shape validation fails. Callers treat null and a
+ * content-less recipe identically — both mean "don't restore anything."
  */
-export function loadSessionRecipe(ds: string): Recipe | null {
+export function loadSessionRecipe(ds: string, kind: RecipeKind): Recipe | null {
   if (!ds) return null;
   try {
-    const raw = localStorage.getItem(storageKey(ds));
+    const raw = localStorage.getItem(storageKey(ds, kind));
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Partial<StoredEntry>;
     if (
@@ -65,83 +102,84 @@ export function loadSessionRecipe(ds: string): Recipe | null {
       (parsed.recipe === null ||
         (parsed.recipe && typeof parsed.recipe === "object"))
     ) {
-      return (parsed.recipe ?? null) as Recipe | null;
+      const r = (parsed.recipe ?? null) as Recipe | null;
+      // Guard against kind mismatch in case a legacy migration deposited
+      // a non-connectivity body into the connectivity slot. Treat the
+      // mismatch as "no baseline" rather than silently apply the wrong
+      // kind's payload.
+      if (r && r.kind !== kind) return null;
+      return r;
     }
     return null;
   } catch {
-    // Quota / private-mode / malformed JSON — treat as no entry.
     return null;
   }
 }
 
 /**
- * Persist the current overlay for a datastack. `null` records an explicit
- * empty baseline (user cleared everything) so the next restore is a no-op
- * rather than resurrecting an earlier saved state.
+ * Persist the current overlay for a (datastack, kind). `null` records
+ * an explicit empty baseline (user cleared everything) so the next
+ * restore is a no-op rather than resurrecting an earlier saved state.
  */
-export function saveSessionRecipe(ds: string, recipe: Recipe | null): void {
+export function saveSessionRecipe(
+  ds: string,
+  kind: RecipeKind,
+  recipe: Recipe | null,
+): void {
   if (!ds) return;
   try {
     const entry: StoredEntry = { version: 1, recipe };
-    localStorage.setItem(storageKey(ds), JSON.stringify(entry));
+    localStorage.setItem(storageKey(ds, kind), JSON.stringify(entry));
   } catch {
-    // Storage failure is non-fatal — the URL is still authoritative for the
-    // current view; only cross-navigation persistence degrades.
+    // Storage failure is non-fatal — the URL is still authoritative
+    // for the current view; only cross-navigation persistence degrades.
   }
 }
 
-function recipeHasContent(r: Recipe | null): boolean {
-  if (!r) return false;
-  return (
-    r.decoration_tables.length > 0 ||
-    r.plots.length > 0 ||
-    !!r.cells ||
-    r.hide.length > 0 ||
-    r.show.length > 0 ||
-    r.coll.length > 0
-  );
-}
-
-// Synthetic meta values for parseRecipeFromUrl — the Recipe type requires
-// id/title/description but session recipes are private state, never displayed
-// or referenced by id; these labels exist only to satisfy the type and aid
-// debugging if someone inspects localStorage.
+// Synthetic meta values for adapter.parseFromUrl — the Recipe type
+// requires id/title but session recipes are private state, never
+// displayed or referenced by id; these labels exist only to satisfy
+// the type and aid debugging if someone inspects localStorage.
 const SESSION_META = {
   id: "session",
   title: "Session view",
 };
 
 /**
- * Wire the per-datastack save/restore behavior into a /neuron page mount.
- * Place a single call near the top of NeuronView; the hook owns all URL
- * observation and localStorage I/O.
+ * Wire the per-(datastack, kind) save/restore behavior into a view
+ * mount. Place a single call near the top of NeuronView
+ * (kind="connectivity") and FeatureExplorer (kind="explorer"); the
+ * hook owns all URL observation and localStorage I/O.
  *
- *   Save:    whenever `ds` is set and the URL has overlay content, snapshot
- *            the URL into the per-datastack storage key. Save fires
- *            regardless of whether `root` is set — overlay configuration is
- *            datastack-scoped, not cell-scoped.
+ *   Save:    whenever `ds` is set and the URL has overlay content for
+ *            this kind, snapshot the URL into the (ds, kind) storage
+ *            key.
+ *   Restore: when `ds` changes (fresh mount, cross-nav, or datastack
+ *            switch) and the URL has no overlay AND a non-empty saved
+ *            recipe exists for this (ds, kind), apply it via the
+ *            adapter's applyToParams and rewrite the URL with
+ *            `replace: true`.
+ *   Empty:   when `ds` is the same as last seen but the URL no longer
+ *            has overlay content, save `null` so the cleared state
+ *            becomes the new baseline.
  *
- *   Restore: when `ds` changes (fresh mount, cross-nav, or datastack switch)
- *            and the URL has no overlay AND a non-empty saved recipe exists,
- *            apply it via `applyTourConfigToParams` and rewrite the URL with
- *            `replace: true`. Tracking `lastDsRef` (not the prior ds+root
- *            pair) is what makes the datastack-picker case work: the picker
- *            clears `root` along with everything else, so a (ds, root)
- *            pair-key would never see "new ds" without also waiting for a
- *            cell to be picked.
+ * Save and restore are mutually exclusive on any single URL state, so
+ * the hook can't loop on itself: restore only fires on overlay-empty
+ * URLs; overlay-empty URLs without a non-empty saved baseline don't
+ * write anything that would change the URL.
  *
- *   Empty:   when `ds` is the same as last seen but the URL no longer has
- *            overlay content, save `null` so the cleared state survives the
- *            next cross-nav.
- *
- * Save and restore are mutually exclusive on any single URL state, so the
- * hook can't loop on itself: restore only fires on overlay-empty URLs;
- * overlay-empty URLs without a non-empty saved baseline don't write
- * anything that would change the URL.
+ * The explorer's Selection bag is NOT round-tripped through the
+ * session recipe — it lives in component state and isn't worth
+ * persisting across cross-nav. (Cross-session restore of a hand-
+ * curated selection is what "Save as my recipe" is for.) Adapters
+ * that don't carry extras handle this naturally; the explorer
+ * adapter just ignores `meta.extras.selection` here because we don't
+ * supply it.
  */
-export function useSessionRecipe(): void {
+export function useSessionRecipe(kind: RecipeKind): void {
   const [params, setParams] = useSearchParams();
   const lastDsRef = useRef<string | null>(null);
+  const adapter = adapterFor(kind);
 
   useEffect(() => {
     const ds = params.get("ds");
@@ -150,34 +188,43 @@ export function useSessionRecipe(): void {
     const dsChanged = lastDsRef.current !== ds;
     lastDsRef.current = ds;
 
-    if (urlHasRecipeContent(params)) {
-      // Capture current overlay — covers both fresh entry via overlay-
-      // preserving paths (Apply, landing Open) and in-place edits. A
-      // shared link landing with `?ds=B&dec=foo` lands here too: the URL
-      // wins over a saved baseline, which is the right precedence.
-      const recipe = parseRecipeFromUrl(params, SESSION_META);
-      saveSessionRecipe(ds, recipe);
+    if (adapter.urlHasContent(params)) {
+      const recipe = adapter.parseFromUrl(params, SESSION_META);
+      saveSessionRecipe(ds, kind, recipe);
       return;
     }
 
     if (dsChanged) {
-      const saved = loadSessionRecipe(ds);
-      if (recipeHasContent(saved)) {
-        // Fresh arrival on this ds with empty overlay + non-empty baseline
-        // → restore. The next render will see the restored URL and save it
-        // as-is (no-op since it already matches). Fires on first mount
-        // (lastDsRef starts null) and on every datastack switch.
-        const next = applyTourConfigToParams(params, saved!);
+      const saved = loadSessionRecipe(ds, kind);
+      if (saved && adapter.urlHasContent(new URLSearchParams())) {
+        // Defensive shouldn't-reach: urlHasContent on an empty URL is
+        // false; we keep the branch for clarity that "non-empty saved"
+        // is the trigger.
+      }
+      if (saved && hasAnyField(saved)) {
+        const next = adapter.applyToParams(params, saved);
         setParams(next, { replace: true });
       }
-      // Empty baseline → nothing to do; user gets a clean view.
       return;
     }
 
-    // Same datastack, overlay just got cleared by the user — save empty so
-    // the cleared state becomes the new baseline (matches the "last-changed
-    // overlay is the default" rule). Without this, the next cross-nav would
-    // restore the pre-clear state.
-    saveSessionRecipe(ds, null);
-  }, [params, setParams]);
+    saveSessionRecipe(ds, kind, null);
+  }, [params, setParams, kind, adapter]);
+}
+
+/** True when the saved recipe carries any non-empty field. Kept tiny
+ *  — adapter.urlHasContent is the URL-shaped predicate; this is the
+ *  Recipe-shaped equivalent for the load path. Walks the recipe via
+ *  Object.values rather than touching kind-specific fields so it
+ *  stays correct for any future kind. */
+function hasAnyField(r: Recipe): boolean {
+  for (const [key, value] of Object.entries(r)) {
+    if (key === "id" || key === "title" || key === "kind" || key === "version") continue;
+    if (value === null || value === undefined) continue;
+    if (typeof value === "string" && value.length === 0) continue;
+    if (Array.isArray(value) && value.length === 0) continue;
+    if (typeof value === "object" && Object.keys(value as object).length === 0) continue;
+    return true;
+  }
+  return false;
 }

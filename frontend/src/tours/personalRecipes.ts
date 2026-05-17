@@ -33,8 +33,9 @@
  * upload of stale local state — the server is authoritative.
  */
 import { dump as yamlDump, JSON_SCHEMA, load as yamlLoad } from "js-yaml";
-import type { Recipe } from "../api/types";
+import type { Recipe, RecipeKind } from "../api/types";
 import { migrateStorageKey } from "../hooks/storageMigration";
+import { ALL_KINDS, adapterForRecipe } from "./adapters/registry";
 
 const STORAGE_KEY = "cdv:v1:recipes";
 const CHANGE_EVENT = "cdv:personal-recipes-changed";
@@ -79,7 +80,39 @@ function writeAll(data: StoredRecipes): void {
 }
 
 export function listForDs(ds: string): Recipe[] {
-  return readAll().byDs[ds] ?? [];
+  // Drop anything in localStorage that doesn't carry a kind the
+  // client knows about. Defensive against a stale browser bundle
+  // reading newer-server data with a future kind, AND against legacy
+  // pre-discriminator items that may still be sitting in localStorage
+  // from before the migration.
+  const known = new Set<string>(ALL_KINDS);
+  return (readAll().byDs[ds] ?? []).filter((r) =>
+    typeof r.kind === "string" && known.has(r.kind),
+  );
+}
+
+/** Like `listForDs` but filtered to a specific set of kinds — used by
+ *  the route-aware sidebar (which only wants kinds the current view
+ *  knows how to apply). Pass `null` or omit to get every known kind
+ *  (same as `listForDs`). */
+export function listForDsAndKind(
+  ds: string,
+  kinds: Set<RecipeKind> | null = null,
+): Recipe[] {
+  const all = listForDs(ds);
+  if (!kinds || kinds.size === 0) return all;
+  return all.filter((r) => kinds.has(r.kind));
+}
+
+// Server-reported count of stored-but-unreadable recipes per ds. The
+// server skip-logs items without a recognized `kind` and returns the
+// count; the SPA renders a banner so the user understands why some
+// previously-saved items aren't visible. Keyed by ds; updated by the
+// reconcile path and exposed via `getInvalidCount`.
+const _invalidCountByDs: Map<string, number> = new Map();
+
+export function getInvalidCount(ds: string): number {
+  return _invalidCountByDs.get(ds) ?? 0;
 }
 
 export function save(ds: string, recipe: Recipe): void {
@@ -170,22 +203,36 @@ export function _serverSyncMode(): ServerMode {
 }
 
 function recipeToYamlBody(recipe: Recipe): string {
-  // Flat document at root — js-yaml's dump emits a Recipe object as a
-  // YAML mapping that matches what the server's PyYAML safe_dump
-  // produces. sortKeys: false preserves insertion order so id/title
-  // lead the document for `gsutil cat` readability. JSON_SCHEMA keeps
-  // the parser/emitter restricted to JSON-compatible YAML — no anchors,
-  // no custom tags.
+  // Per-kind adapters control the on-the-wire YAML shape:
+  // connectivity uses the hand-rolled emitter for operator-YAML
+  // paste fidelity; explorer uses js-yaml because its nested shape
+  // is deeper than the emitter handles. The adapter wraps the
+  // recipe under a top-level `recipes:` list to match operator
+  // config; for a PUT we want just the inner object, so we parse
+  // the adapter's output and re-dump the first item.
   //
-  // Stamp `version` if the recipe doesn't already carry one. Server
-  // would default it to CURRENT_SCHEMA_VERSION anyway, but stamping
-  // here means every byte we send is unambiguous and a future
-  // multi-version server doesn't have to infer.
+  // Stamp `version` if missing so the wire payload is unambiguous.
   const versioned: Recipe =
     recipe.version === undefined
       ? { ...recipe, version: CLIENT_SCHEMA_VERSION }
       : recipe;
-  return yamlDump(versioned, { schema: JSON_SCHEMA, sortKeys: false });
+  const adapter = adapterForRecipe(versioned);
+  // Both adapters emit `recipes:\n  - <item>\n…` — unwrap to send
+  // just the item, since the PUT endpoint takes a single recipe
+  // body, not a list.
+  const wrapped = adapter.toYaml(versioned);
+  const parsed = yamlLoad(wrapped, { schema: JSON_SCHEMA }) as
+    | { recipes?: unknown[] }
+    | undefined;
+  const item = parsed?.recipes?.[0];
+  if (!item) {
+    // Adapter contract violation — fall back to a flat dump rather
+    // than throwing. Server will validate either way.
+    return wrapped;
+  }
+  // Re-emit just the item using js-yaml so the on-the-wire format
+  // is canonical regardless of which adapter produced it.
+  return yamlDump(item, { schema: JSON_SCHEMA, sortKeys: false });
 }
 
 function scheduleServerPut(ds: string, recipe: Recipe): void {
@@ -256,31 +303,49 @@ async function fetchServerConfig(): Promise<ServerConfig> {
   return (await resp.json()) as ServerConfig;
 }
 
-async function fetchServerList(ds: string): Promise<Recipe[]> {
+interface ServerListResult {
+  recipes: Recipe[];
+  invalidCount: number;
+}
+
+async function fetchServerList(ds: string): Promise<ServerListResult> {
   const resp = await fetch(`/api/v1/me/recipes/${encodeURIComponent(ds)}`, {
     credentials: "include",
     headers: { Accept: "application/yaml" },
   });
   if (!resp.ok) throw new Error(`list ${resp.status}`);
   const text = await resp.text();
-  // Empty body is a valid "no recipes" — yamlLoad('') returns undefined.
-  if (!text) return [];
+  if (!text) return { recipes: [], invalidCount: 0 };
   let parsed: unknown;
   try {
     parsed = yamlLoad(text, { schema: JSON_SCHEMA });
   } catch (err) {
     console.warn("[recipes] failed to parse server list YAML", err);
-    return [];
+    return { recipes: [], invalidCount: 0 };
   }
   if (
     parsed &&
     typeof parsed === "object" &&
     Array.isArray((parsed as { recipes?: unknown }).recipes)
   ) {
-    // Trust the server-side shape — we own both ends.
-    return (parsed as { recipes: Recipe[] }).recipes;
+    const raw = (parsed as { recipes: unknown[]; invalid_count?: number }).recipes;
+    const invalidCount = Number((parsed as { invalid_count?: number }).invalid_count) || 0;
+    // Drop items with unknown kinds — defensive against a newer
+    // server shipping a kind this SPA hasn't been built for. The
+    // server already filtered no-kind items (and counted them in
+    // invalid_count); this is a second pass for kinds the SPA itself
+    // doesn't know.
+    const known = new Set<string>(ALL_KINDS);
+    const recipes = raw.filter(
+      (r): r is Recipe =>
+        typeof r === "object" &&
+        r !== null &&
+        typeof (r as Recipe).kind === "string" &&
+        known.has((r as Recipe).kind),
+    );
+    return { recipes, invalidCount };
   }
-  return [];
+  return { recipes: [], invalidCount: 0 };
 }
 
 async function flushRetryQueue(): Promise<void> {
@@ -307,20 +372,25 @@ async function flushRetryQueue(): Promise<void> {
 // edited; an "edit existing recipe" UI would need to preserve unknowns
 // explicitly).
 async function reconcileDs(ds: string): Promise<void> {
-  let serverList: Recipe[];
+  let serverResult: ServerListResult;
   try {
-    serverList = await fetchServerList(ds);
+    serverResult = await fetchServerList(ds);
   } catch (err) {
     console.warn(`[recipes] reconcile ${ds} failed`, err);
     return;
   }
 
   const all = readAll();
-  const localList = all.byDs[ds] ?? [];
+  // localList feeds first-server-visit migration. Only the items
+  // with a known kind are eligible to upload — legacy unkinded
+  // items in localStorage stay there but never get pushed.
+  const localList = (all.byDs[ds] ?? []).filter(
+    (r) => typeof r.kind === "string" && (ALL_KINDS as readonly string[]).includes(r.kind),
+  );
   const migKey = `${MIG_KEY_PREFIX}${ds}`;
   const migrated = localStorage.getItem(migKey) === "1";
 
-  if (serverList.length === 0 && localList.length > 0 && !migrated) {
+  if (serverResult.recipes.length === 0 && localList.length > 0 && !migrated) {
     // First-server-visit migration: push local up. Once any server
     // recipe exists OR the migrated flag is set, an empty server list
     // means "user deleted everything on another machine" — never
@@ -330,9 +400,9 @@ async function reconcileDs(ds: string): Promise<void> {
     );
     localStorage.setItem(migKey, "1");
     try {
-      serverList = await fetchServerList(ds);
+      serverResult = await fetchServerList(ds);
     } catch {
-      // Stale serverList; the next reconcile will catch up.
+      // Stale serverResult; the next reconcile will catch up.
     }
   } else if (!migrated) {
     // Server has data already — mark migrated so subsequent reconciles
@@ -340,8 +410,13 @@ async function reconcileDs(ds: string): Promise<void> {
     localStorage.setItem(migKey, "1");
   }
 
+  // Capture invalid-count so the banner can render. Stored separately
+  // from the recipe list so subscribers don't have to thread it through
+  // every consumer.
+  _invalidCountByDs.set(ds, serverResult.invalidCount);
+
   // Server is authoritative. Replace local with server contents.
-  writeAll({ version: 1, byDs: { ...readAll().byDs, [ds]: serverList } });
+  writeAll({ version: 1, byDs: { ...readAll().byDs, [ds]: serverResult.recipes } });
 }
 
 async function bootstrapServerSync(): Promise<void> {

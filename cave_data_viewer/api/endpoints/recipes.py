@@ -12,7 +12,9 @@ Auth model:
 
 Body bounds (defense against DoS / quota abuse, not schema validation —
 we own both ends of the YAML, see services/recipes.py):
-- 64 KB max body size per PUT
+- 8 MB max body size per PUT (generous because explorer recipes can
+  carry a Selection bag of ~10^5 cell_ids — the per-(user, ds) count
+  cap is the primary quota; this is just the upper sanity bound)
 - 100 recipes per (user, datastack) max
 - per-field length caps in services/recipes.py
 """
@@ -27,10 +29,16 @@ from ..services import recipes as recipes_svc
 
 bp = Blueprint("recipes", __name__, url_prefix="/me/recipes")
 
-# 64 KB. A recipe is a few KB at most; this caps YAML billion-laughs
-# expansion targets and accidental megabyte payloads. Checked at the
-# endpoint top so we never feed a huge string into safe_load.
-MAX_PUT_BYTES = 64 * 1024
+# 8 MB. Explorer recipes carry a Selection bag of cell_ids that can
+# legitimately run ~10^5 entries × ~20 chars each ≈ 2 MB raw + YAML
+# overhead. The cap is set generously above that so a typical large
+# saved selection never hits it, with the per-(user, ds) recipe count
+# cap (100) acting as the primary quota. Beyond this size, the YAML
+# upload / download path is the escape hatch.
+#
+# Checked at the endpoint top so we never feed a huge string into
+# safe_load.
+MAX_PUT_BYTES = 8 * 1024 * 1024
 
 
 def _resolve_user() -> int:
@@ -87,6 +95,13 @@ def config():
     base = {
         "schema_version": recipes_svc.CURRENT_SCHEMA_VERSION,
         "supported_schema_versions": sorted(recipes_svc.SUPPORTED_SCHEMA_VERSIONS),
+        # `kinds` advertises the recipe kinds this server can read and
+        # write. The SPA reads it at startup so it can refuse to send a
+        # PUT for a kind the server hasn't shipped yet (e.g. a future
+        # `table` kind), and so a newer SPA against an older server
+        # surfaces a clean "your client is newer than the server"
+        # rather than a 400 on save.
+        "kinds": sorted(recipes_svc.ALLOWED_KINDS),
     }
     if is_dev_bypass():
         return jsonify({**base, "enabled": False, "reason": "dev_bypass"})
@@ -101,12 +116,18 @@ def list_for_ds(ds: str):
     """Return all of the calling user's recipes for `ds` as a YAML
     document with a top-level `recipes:` list (mirrors operator-config
     shape exactly, so a user could literally paste the body under
-    `recipes:` in a datastack YAML)."""
+    `recipes:` in a datastack YAML).
+
+    Recipes missing a recognized `kind` are skipped server-side and
+    reported via the `invalid_count` field. The SPA surfaces this as a
+    banner ("N recipes from a previous schema are hidden") so the user
+    understands why some of their saved items aren't visible — without
+    blocking access to the still-valid ones."""
     _check_datastack(ds)
     user_id = _resolve_user()
     store = _resolve_store()
-    items = recipes_svc.list_recipes(store, user_id, ds)
-    return _yaml_response({"recipes": items})
+    items, invalid_count = recipes_svc.list_recipes(store, user_id, ds)
+    return _yaml_response({"recipes": items, "invalid_count": invalid_count})
 
 
 @bp.route("/<ds>/<recipe_id>", methods=["PUT"])

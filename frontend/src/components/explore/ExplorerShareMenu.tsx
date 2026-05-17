@@ -1,51 +1,53 @@
+/**
+ * Share / Save affordance for /explore. Mirrors the connectivity
+ * ShareMenu (Copy query link, Copy recipe link, Save as my recipe)
+ * but routes through the explorer adapter and — crucially — captures
+ * the Selection bag at save time.
+ *
+ * Mount this inside FeatureExplorer (not the global Sidebar) because
+ * the Selection bag lives in FeatureExplorer's component state and
+ * isn't reachable from the Sidebar without lifting it into a global
+ * store. The global Sidebar's ShareMenu detects /explore via
+ * useApplicableRecipeKinds and renders nothing, so this is the sole
+ * share affordance on the route.
+ */
 import { useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { parseRecipeFromUrl, urlHasRecipeContent } from "../tours/recipeFromUrl";
-import { newPersonalId, save as savePersonal } from "../tours/personalRecipes";
+
+import { explorerAdapter } from "../../tours/adapters/explorerAdapter";
+import { newPersonalId, save as savePersonal } from "../../tours/personalRecipes";
 import {
   buildQueryLink,
   buildRecipeLink,
-  CONNECTIVITY_RECIPE_STRIP_KEYS,
-  CONNECTIVITY_RECIPE_STRIP_PREFIXES,
-} from "../tours/shareLinks";
-import { useApplicableRecipeKinds } from "../tours/useApplicableRecipeKinds";
+  EXPLORER_RECIPE_STRIP_KEYS,
+  EXPLORER_RECIPE_STRIP_PREFIXES,
+} from "../../tours/shareLinks";
 
-/**
- * Sidebar disclosure for sharing the current view (as a query link or a
- * recipe link) and saving it to localStorage as a personal recipe.
- *
- * - "Copy query link" — exact current URL; reproduces the view including
- *   pinned mv + root.
- * - "Copy recipe link" — current URL stripped of mv/root/from/sel_*. When
- *   opened, the recipe-Open path takes over: mv auto-defaults to latest,
- *   user picks a cell.
- * - "Save as my recipe" — expands an inline form. On Save, mints a Recipe
- *   from URL state and persists in localStorage. Disabled when the URL
- *   has no decoration/plot/filter state to capture.
- *
- * The disclosure starts collapsed — it's a tertiary affordance, not a
- * primary workflow — but it sits above the existing Recipes widget so
- * related actions cluster.
- */
-export function ShareMenu({ ds }: { ds: string }) {
+interface Props {
+  ds: string;
+  /** The current Selection bag (cell_ids). Captured into the saved
+   *  recipe verbatim — recipes preserve user intent, NOT the
+   *  filter-scope intersection. See [[feature-explorer-scope-vs-selection-model]]. */
+  selection: string[];
+}
+
+export function ExplorerShareMenu({ ds, selection }: Props) {
   const [searchParams] = useSearchParams();
   const [showSaveForm, setShowSaveForm] = useState(false);
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [copied, setCopied] = useState<"query" | "recipe" | null>(null);
   const [savedFlash, setSavedFlash] = useState(false);
-  const applicableKinds = useApplicableRecipeKinds();
 
-  // Connectivity-only. /explore mounts ExplorerShareMenu inside the
-  // explorer rail because the Selection bag (which an explorer save
-  // needs to capture) only lives in FeatureExplorer's component
-  // state. Landing (`/`) shows neither — there's no "current view"
-  // to share from the picker.
-  if (!applicableKinds.has("connectivity") || applicableKinds.size !== 1) {
-    return null;
-  }
-
-  const hasContent = urlHasRecipeContent(searchParams);
+  // "Has content" considers both URL-shape state (scatter bindings,
+  // growth params, decorations, cells filter) and the Selection bag.
+  // A user with nothing but a hand-curated lasso should still be able
+  // to save — the bag IS the recipe payload in that case.
+  const hasContent = explorerAdapter.urlHasContent(searchParams, {
+    id: "tmp",
+    title: "tmp",
+    extras: { selection },
+  });
 
   const onCopy = async (kind: "query" | "recipe") => {
     const link =
@@ -53,14 +55,12 @@ export function ShareMenu({ ds }: { ds: string }) {
         ? buildQueryLink()
         : buildRecipeLink(
             searchParams,
-            CONNECTIVITY_RECIPE_STRIP_KEYS,
-            CONNECTIVITY_RECIPE_STRIP_PREFIXES,
+            EXPLORER_RECIPE_STRIP_KEYS,
+            EXPLORER_RECIPE_STRIP_PREFIXES,
           );
     try {
       await navigator.clipboard.writeText(link);
     } catch {
-      // Fall back to a prompt the user can manually copy from. Old browsers
-      // and HTTP origins don't have async clipboard access.
       window.prompt("Copy link:", link);
       return;
     }
@@ -72,10 +72,11 @@ export function ShareMenu({ ds }: { ds: string }) {
     e.preventDefault();
     const trimmed = title.trim();
     if (!trimmed) return;
-    const recipe = parseRecipeFromUrl(searchParams, {
+    const recipe = explorerAdapter.parseFromUrl(searchParams, {
       id: newPersonalId(),
       title: trimmed,
       description: description.trim() || undefined,
+      extras: { selection },
     });
     savePersonal(ds, recipe);
     setTitle("");
@@ -85,8 +86,15 @@ export function ShareMenu({ ds }: { ds: string }) {
     window.setTimeout(() => setSavedFlash(false), 1500);
   };
 
+  const selectionHint =
+    selection.length > 0
+      ? ` (incl. ${selection.length.toLocaleString()} selected cell${
+          selection.length === 1 ? "" : "s"
+        })`
+      : "";
+
   return (
-    <details className="sidebar-share" open>
+    <details className="sidebar-share explorer-share" open>
       <summary>Share / Save</summary>
       <div className="sidebar-share-actions">
         <button type="button" onClick={() => onCopy("query")}>
@@ -101,8 +109,8 @@ export function ShareMenu({ ds }: { ds: string }) {
           disabled={!hasContent}
           title={
             hasContent
-              ? "Save the current decorations, plots, and filters as a personal recipe"
-              : "Configure decorations or plots before saving"
+              ? `Save the current explorer view${selectionHint}`
+              : "Configure scatter bindings or build a selection before saving"
           }
         >
           {savedFlash ? "Saved!" : showSaveForm ? "Cancel" : "Save as my recipe"}
@@ -115,7 +123,7 @@ export function ShareMenu({ ds }: { ds: string }) {
                 type="text"
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
-                placeholder="My favorite view"
+                placeholder="My explorer view"
                 autoFocus
                 required
               />
@@ -129,6 +137,12 @@ export function ShareMenu({ ds }: { ds: string }) {
                 placeholder="What this view is good for"
               />
             </label>
+            {selection.length > 0 && (
+              <p className="muted small">
+                Will include {selection.length.toLocaleString()} selected
+                cell{selection.length === 1 ? "" : "s"}.
+              </p>
+            )}
             <button type="submit" disabled={!title.trim()}>Save</button>
           </form>
         )}

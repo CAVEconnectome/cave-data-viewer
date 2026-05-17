@@ -1,7 +1,7 @@
 import logging
 import time as _time
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any, Literal, Union
 
 import yaml
 from cachetools import LRUCache
@@ -40,6 +40,23 @@ def _warn_unknown_fields(model_class: type[BaseModel], data: Any, source: Path) 
         _walk_annotation(fields[key].annotation, value, source)
 
 
+def _arm_matches_kind(arm: Any, kind: str) -> bool:
+    """True when `arm` is a BaseModel subclass whose `kind` field is a
+    Literal that includes `kind`. Used by the union-walker so the
+    discriminator picks the right arm and we don't log false "unknown
+    field" warnings against the wrong one."""
+    import typing
+    if not (isinstance(arm, type) and issubclass(arm, BaseModel)):
+        return False
+    kind_field = arm.model_fields.get("kind")
+    if kind_field is None:
+        return False
+    ann = kind_field.annotation
+    if typing.get_origin(ann) is typing.Literal:
+        return kind in typing.get_args(ann)
+    return False
+
+
 def _walk_annotation(annotation: Any, value: Any, source: Path) -> None:
     """Descend `value` according to `annotation`'s structure.
 
@@ -58,6 +75,19 @@ def _walk_annotation(annotation: Any, value: Any, source: Path) -> None:
             _warn_unknown_fields(annotation, value, source)
         return
     if origin in (typing.Union, types.UnionType):
+        # Discriminated-union path: if the value carries a `kind` field
+        # whose value matches a union arm's `kind` Literal, walk ONLY
+        # that arm. Without this, an explorer recipe walked against the
+        # connectivity arm (or vice versa) would log a stream of spurious
+        # "unknown field" warnings about fields that legitimately belong
+        # to the other arm.
+        if isinstance(value, dict):
+            kind = value.get("kind")
+            if isinstance(kind, str):
+                for arg in args:
+                    if _arm_matches_kind(arg, kind):
+                        _walk_annotation(arg, value, source)
+                        return
         for arg in args:
             _walk_annotation(arg, value, source)
         return
@@ -354,9 +384,14 @@ class TourPlot(BaseModel):
 
 
 class TourBase(BaseModel):
-    """Fields common to Examples and Recipes. Subclasses add the bits that
-    distinguish the two (Example pins data; Recipe is a configuration
-    overlay only)."""
+    """Fields common to Examples and connectivity Recipes. Kept as the
+    parent for Example (still single-shape) and ConnectivityRecipe (the
+    discriminated-union arm for `kind: connectivity`).
+
+    Explorer recipes do NOT inherit from TourBase — their payload has
+    almost nothing in common (no plots/hide/show/coll), so composition
+    via ExplorerState keeps the on-disk YAML cleaner than dragging
+    connectivity fields onto a class that doesn't use them."""
     id: str
     title: str
     description: str | None = None
@@ -379,16 +414,104 @@ class Example(TourBase):
 
     `mat_version` is integer-only; "live" examples don't make sense
     operator-curated (they'd drift). `root` is a stringified int64 root id
-    (root ids exceed JS Number precision)."""
+    (root ids exceed JS Number precision).
+
+    Examples are connectivity-flavored only in v1 — operator-curated
+    explorer landings aren't supported. If a future need arises, add an
+    `ExplorerExample` and lift Example into a discriminated union the
+    same way Recipe was."""
     mat_version: int
     root: str
 
 
-class Recipe(TourBase):
-    """Configuration overlay only — no data binding. The CTA is "Apply",
-    which merges the recipe's decorations + plots + filters onto the
-    user's currently-loaded cell. By construction has no `mat_version` or
-    `root`; if it did, it'd be an Example."""
+class ConnectivityRecipe(TourBase):
+    """Connectivity-shaped recipe overlay. The CTA is "Apply", which
+    merges the recipe's decorations + plots + filters onto the user's
+    currently-loaded cell in /neuron. By construction has no
+    `mat_version` or `root` (that'd be an Example).
+
+    The `kind` literal is the discriminator for the Recipe union below —
+    every connectivity recipe carries `kind: connectivity`."""
+    kind: Literal["connectivity"] = "connectivity"
+
+
+class ExplorerState(BaseModel):
+    """Saved /explore workspace state.
+
+    Captures the explorer's URL params (which round-trip through the URL
+    today) plus its Selection bag (which does NOT — the bag can run
+    thousands of cell_ids long and a URL won't carry it). Persisting the
+    bag here is the whole reason explorer recipes exist: without it, a
+    user with a hand-curated lasso + Cell-ID-Search selection has no
+    durable way to come back to that selection later.
+
+    Grouped into nested sub-objects so the on-disk YAML reads well; the
+    SPA's explorerAdapter flattens these into URL params at apply time
+    (and pulls Selection out separately to push into the selection-bag
+    store, since it's not URL-backed)."""
+    # Identity: which feature table + which embedding view within it.
+    ft: str | None = None
+    emb: str | None = None
+    # Shared with connectivity (same URL keys; same meaning). Adapters on
+    # both sides write these identically so cross-view continuity holds.
+    decoration_tables: list[str] = Field(default_factory=list)
+    cells: str | None = None
+    # Explorer-only.
+    scope_mode: Literal["ghost", "hide"] | None = None
+    sel_filters: list[str] = Field(default_factory=list)
+    # Scatter bindings.
+    x: str | None = None
+    y: str | None = None
+    color: str | None = None
+    size: str | None = None
+    cmap: str | None = None
+    color_min: float | None = None
+    color_max: float | None = None
+    color_center: float | None = None
+    size_min: float | None = None
+    size_max: float | None = None
+    size_data_min: float | None = None
+    size_data_max: float | None = None
+    # Selection-growth controls (similarity probe).
+    growth_space: str | None = None
+    growth_variance: float | None = None
+    growth_reduction: str | None = None
+    growth_threshold: float | None = None
+    growth_features: list[str] = Field(default_factory=list)
+    growth_topn: int | None = None
+    # The Selection bag — list of cell_ids accumulated from row
+    # checkboxes, lasso, and Cell-ID Search. NOT a URL param (would
+    # exceed practical URL length); persisted here so a saved recipe
+    # can restore the user's hand-curated set. Capped via _FIELD_LIMITS
+    # in services/recipes.py (10_000 ids, 32 chars each).
+    selection: list[str] = Field(default_factory=list)
+
+
+class ExplorerRecipe(BaseModel):
+    """Explorer-shaped recipe. The CTA is "Apply", which navigates the
+    user to /explore (or merges state if already there) and restores
+    feature-table / embedding / scatter bindings / decorations / scope /
+    selection bag.
+
+    Doesn't inherit from TourBase — explorer has its own field set with
+    no plots/hide/show/coll. Common metadata fields (id/title/...) are
+    mirrored explicitly to keep the model self-contained."""
+    id: str
+    title: str
+    description: str | None = None
+    kind: Literal["explorer"] = "explorer"
+    explorer: ExplorerState = Field(default_factory=ExplorerState)
+
+
+# Discriminated union. Pydantic picks the arm by the value of `kind`;
+# anything missing/unknown raises a validation error at model_validate
+# time — which is exactly the "hard cutover on missing kind" behavior
+# the design calls for. Operator-recipe entries in datastack YAMLs and
+# personal recipes loaded via services/recipes.py both flow through this.
+Recipe = Annotated[
+    Union[ConnectivityRecipe, ExplorerRecipe],
+    Field(discriminator="kind"),
+]
 
 
 class DatastackConfig(BaseModel):

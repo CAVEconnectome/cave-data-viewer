@@ -10,15 +10,16 @@ import type { Recipe } from "../api/types";
 import { useNglLink } from "../hooks/useNglLink";
 import { parseMatVersion, useSetUrlParams, useSwitchDatastack, useUrlParam } from "../hooks/useUrlState";
 import type { ViewFamily } from "../hooks/useViewSnapshot";
-import { applyTourConfigToParams, buildRecipeOpenParams } from "../tours/urlMint";
+import { applyTourConfigToParams } from "../tours/urlMint";
 import { useApplyRecipe } from "../tours/useApplyRecipe";
 import {
-  listForDs as listPersonalRecipes,
+  listForDsAndKind,
   remove as removePersonalRecipe,
   subscribe as subscribePersonalRecipes,
 } from "../tours/personalRecipes";
 import { urlHasRecipeContent } from "../tours/recipeFromUrl";
-import { recipeToYaml } from "../tours/recipeYaml";
+import { adapterForRecipe } from "../tours/adapters/registry";
+import { useApplicableRecipeKinds } from "../tours/useApplicableRecipeKinds";
 import { saveSessionRecipe } from "../tours/sessionRecipe";
 import { ShareMenu } from "./ShareMenu";
 
@@ -274,7 +275,9 @@ function SidebarResetView({ ds }: { ds: string }) {
         }),
       { replace: true },
     );
-    saveSessionRecipe(ds, null);
+    // SidebarResetView is only mounted on /neuron — connectivity is
+    // the only kind whose URL state it knows how to clear.
+    saveSessionRecipe(ds, "connectivity", null);
   };
   return (
     <div className="sidebar-reset-view">
@@ -334,14 +337,20 @@ function SidebarRecipes({ ds, mv }: { ds: string; mv: string | null }) {
   const [root] = useUrlParam("root");
   const navigate = useNavigate();
   const applyRecipe = useApplyRecipe();
+  const applicableKinds = useApplicableRecipeKinds();
   // Personal recipes live in localStorage. Subscribe to mutation events
   // emitted by `personalRecipes.save/remove` so the list re-renders when
   // ShareMenu (a sibling, not a parent) writes a new entry.
   const [, setPersonalTick] = useState(0);
   useEffect(() => subscribePersonalRecipes(() => setPersonalTick((n) => n + 1)), []);
-  const personalRecipes: Recipe[] = listPersonalRecipes(ds);
-
-  const operatorRecipes: Recipe[] = tours.data?.recipes ?? [];
+  // Filter to kinds applicable to the current route. /neuron shows only
+  // connectivity recipes; /explore shows only explorer recipes. Hiding
+  // the inapplicable ones keeps the rail focused on actions the user
+  // can take from where they are.
+  const personalRecipes: Recipe[] = listForDsAndKind(ds, applicableKinds);
+  const operatorRecipes: Recipe[] = (tours.data?.recipes ?? []).filter((r) =>
+    applicableKinds.has(r.kind),
+  );
 
   // Always show the disclosure once we know about either list. Loading
   // state is tracked separately so the user sees "loading…" rather than
@@ -351,19 +360,19 @@ function SidebarRecipes({ ds, mv }: { ds: string; mv: string | null }) {
     return null;
   }
 
-  // Apply when a cell is loaded; otherwise Open the recipe into a fresh
-  // /neuron with the configuration preset and no root. Same logic as the
-  // landing-page RecipeCard so the UX is consistent regardless of where
-  // the user clicks Recipes from.
+  // useApplyRecipe handles both apply-onto-loaded-cell and open-without-cell
+  // internally (via the adapter's hasNavContext + buildOpenParams). The
+  // sidebar just renders the right CTA label so the user knows what's
+  // about to happen.
   const canApply = !!root;
   const onClick = (r: Recipe) => {
-    if (canApply) {
-      applyRecipe(r);
-    } else {
-      const params = buildRecipeOpenParams(ds, r, mv);
-      navigate(`/neuron?${params.toString()}`);
-    }
+    applyRecipe(r);
   };
+  // Silence unused-binding lints — `mv` and `navigate` are no longer
+  // needed here directly, but kept in the function signature for
+  // future kind-specific routing decisions.
+  void mv;
+  void navigate;
   const total = personalRecipes.length + operatorRecipes.length;
   const summaryText =
     toursLoading && operatorRecipes.length === 0
@@ -449,7 +458,7 @@ function PersonalRecipeRow({
   onApply: () => void;
 }) {
   const onDownload = () => {
-    const yaml = recipeToYaml(recipe);
+    const yaml = adapterForRecipe(recipe).toYaml(recipe);
     const blob = new Blob([yaml], { type: "application/x-yaml;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");

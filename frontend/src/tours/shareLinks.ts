@@ -1,30 +1,49 @@
 /**
  * URL builders for the Share menu.
  *
- *   buildQueryLink()                       — exact current view (mv + root)
- *   buildRecipeLink(searchParams, origin)  — recipe overlay (no mv/root/from/sel_*)
+ *   buildQueryLink()                                 — exact current view
+ *   buildRecipeLink(searchParams, stripKeys, ...)    — recipe overlay
  *
- * "Recipe link" deliberately omits `mv` so the existing blank-mv → latest
- * defaulting in Workspace.tsx kicks in at apply time. Operator recipes do
- * the same; this matches their semantics.
+ * "Recipe link" deliberately omits per-kind navigation keys so the
+ * recipe applies cleanly into a fresh workspace. Each ShareMenu
+ * supplies the strip lists appropriate to its kind:
+ *
+ *   - Connectivity: strip `mv`, `root`, `from`, plus the `sel_`
+ *     prefix (panel-id-keyed brushing state that doesn't belong in
+ *     an overlay configuration).
+ *   - Explorer: strip `mv`, `from`, `table` (drawer open/close). The
+ *     explorer's `sel_filters` is part of the recipe state itself
+ *     (active column-filter chips); it's NOT a per-panel selection
+ *     and should NOT be stripped.
  */
-
-const NAV_KEYS_TO_STRIP = ["mv", "root", "from"];
 
 export function buildQueryLink(): string {
   return window.location.href;
 }
 
-export function buildRecipeLink(searchParams: URLSearchParams, base?: string): string {
+export function buildRecipeLink(
+  searchParams: URLSearchParams,
+  stripKeys: readonly string[],
+  stripPrefixes: readonly string[],
+  base?: string,
+): string {
   const next = new URLSearchParams(searchParams);
-  for (const key of NAV_KEYS_TO_STRIP) next.delete(key);
-  // sel_* keys reference panel ids that are valid in the current session
-  // but encode brushing state, which doesn't belong in a recipe overlay
-  // (it's per-cell selection state, not configuration).
-  for (const key of [...next.keys()]) {
-    if (key.startsWith("sel_")) next.delete(key);
+  for (const key of stripKeys) next.delete(key);
+  if (stripPrefixes.length > 0) {
+    for (const key of [...next.keys()]) {
+      if (stripPrefixes.some((p) => key.startsWith(p))) next.delete(key);
+    }
   }
   const origin = base ?? `${window.location.origin}${window.location.pathname}`;
   const qs = next.toString();
   return qs ? `${origin}?${qs}` : origin;
 }
+
+/** Default strip list for connectivity ShareMenu. Exported so the
+ *  per-kind share menus stay declarative — each just imports the
+ *  constant rather than hand-typing keys at the call site. */
+export const CONNECTIVITY_RECIPE_STRIP_KEYS = ["mv", "root", "from"] as const;
+export const CONNECTIVITY_RECIPE_STRIP_PREFIXES = ["sel_"] as const;
+
+export const EXPLORER_RECIPE_STRIP_KEYS = ["mv", "from", "table"] as const;
+export const EXPLORER_RECIPE_STRIP_PREFIXES: readonly string[] = [];

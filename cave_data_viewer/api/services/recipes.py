@@ -1,15 +1,37 @@
 """Per-user recipe storage backed by GCS.
 
-Personal recipes are tiny YAML documents (decoration_tables, plots, cell
-filter, hide/show/coll arrays) saved per (user, datastack, recipe_id). The
-on-disk format mirrors operator recipes in `config/datastacks/<ds>.yaml`'s
-`recipes:` section exactly — same schema, same parser, exportable to
-operator config without transformation.
+Personal recipes are YAML documents saved per (user, datastack,
+recipe_id). Two kinds today:
+
+- `kind: connectivity` — decoration_tables, plots, cells, hide/show/coll
+  arrays. The original /neuron overlay shape.
+- `kind: explorer` — a single nested `explorer:` block holding the
+  /explore workspace state (feature_table id, embedding id, scatter
+  bindings, similarity/growth controls, decorations, scope, AND the
+  cell_id Selection bag — which can't roundtrip through the URL because
+  it can run to tens of thousands of ids).
+
+Both kinds carry a `kind` discriminator. Documents missing `kind` are
+treated as legacy / invalid: list_recipes skip-logs them with a counter
+the SPA surfaces as a banner; get_recipe raises LegacyRecipeError; PUT
+without `kind` raises RecipeValidationError → 400. There is no in-app
+migration; users re-create or re-upload via the YAML route.
+
+The on-disk format mirrors operator recipes in
+`config/datastacks/<ds>.yaml`'s `recipes:` section exactly — same
+schema, same parser, exportable to operator config without
+transformation.
 
 The store is the single writer to its prefix, so we don't validate body
-shape against a schema. `yaml.safe_load` is the only line that matters
-for code-execution safety. Bounds checks (size, count, field length)
-defend against DoS / quota abuse, not malformed input.
+shape against a Pydantic schema in this layer (the YAML uploader and
+the operator-recipe loader do that — see datastack_config.py's Recipe
+union). Bounds checks here (size, count, field length) defend against
+DoS / quota abuse, not against malformed input.
+
+Sizing: explorer recipes can be large because the Selection bag may
+hold ~10^5 cell_ids — see MAX_PUT_BYTES below. The defensive ceiling is
+generous (multi-MB) so the YAML upload + GCS storage layer is the
+backstop, and the per-(user, ds) count cap is the primary quota.
 
 Object layout: `<CDV_GCS_CACHE_PREFIX>userdata/<user_id>/<ds>/<id>.yaml`.
 One file per recipe so two-tab saves don't race and DELETE is a single
@@ -34,12 +56,11 @@ newer client can write a newer schema through an older endpoint as long
 as the server understands it. PUTs that omit `version` default to
 `CURRENT_SCHEMA_VERSION` for back-compat with hand-pasted YAML.
 
-Migration model is **lazy on read**: when v2 lands, server reads v1 →
-in-memory upgrade → returns; rewrites to v2 only on next PUT. No bucket
-crawl, no batch migration, costs scale with active use. The trade-off is
-that long-dormant recipes stay in their original schema forever — for our
-volume (kilobytes per user, dozens of users) that's fine; revisit if we
-ever need a schema deprecation deadline.
+As of the kind-discriminator change, `kind` is required on every read
+and write of a v1 body. Recipes that pre-date the change (no `kind`)
+are not silently upgraded; they're treated as invalid per the rule
+above. This is an additive change within v1's reserved `kind` slot
+(no schema-version bump).
 
 Forward-compat hatch: `_KNOWN_FIELDS` is the allowlist of fields that
 survive a PUT. Adding a field name here BEFORE we use it ("reserve") lets
@@ -81,25 +102,64 @@ CURRENT_SCHEMA_VERSION = 1
 # deprecation window).
 SUPPORTED_SCHEMA_VERSIONS: frozenset[int] = frozenset({1})
 
+# Top-level recognized kinds. Kept here (not imported from
+# datastack_config) so the storage layer has no Pydantic-model dep — the
+# allowlist is intentionally small and changes only when a new kind is
+# introduced.
+ALLOWED_KINDS: frozenset[str] = frozenset({"connectivity", "explorer"})
+
 # Field-length sanity caps (defense in depth — not schema validation).
 # These bound the on-disk shape regardless of what the SPA sends.
+#
+# Connectivity-shape limits live at the top level. Explorer-shape limits
+# live under "explorer.*" and are enforced by recursing one level into
+# the nested explorer mapping when present.
 _FIELD_LIMITS: dict[str, int | tuple[int, int]] = {
-    # Scalar string fields: max length.
+    # --- shared top-level ---
     "title": 200,
     "description": 10_000,
+    # --- connectivity top-level ---
     "cells": 1_000,
-    # List fields: (max_entries, max_per_entry_length). per-entry check
-    # only applies when the entry is a string.
     "decoration_tables": (50, 200),
-    "plots": (50, 0),  # 0 = don't check entry shape (plots are dicts)
-    "hide": (200, 200),
-    "show": (200, 200),
-    "coll": (200, 200),
+    "plots": (200, 0),  # 0 = don't check entry shape (plots are dicts)
+    "hide": (500, 200),
+    "show": (500, 200),
+    "coll": (500, 200),
+}
+
+# Bounds applied to the nested `explorer:` mapping. Same shape as
+# _FIELD_LIMITS but addressed by sub-key.
+#
+# `selection` is the cell_id Selection bag — capped large (100_000) so
+# saved sets from /explore can survive without forcing the user out to
+# the YAML upload path. Per-entry length is 32 chars: cell_ids in CAVE
+# are int64 strings (~18-20 chars) plus headroom.
+_EXPLORER_FIELD_LIMITS: dict[str, int | tuple[int, int]] = {
+    "ft": 200,
+    "emb": 200,
+    "cells": 1_000,
+    "scope_mode": 32,
+    "x": 200, "y": 200, "color": 200, "size": 200, "cmap": 64,
+    "growth_space": 64,
+    "growth_reduction": 64,
+    "decoration_tables": (50, 200),
+    "sel_filters": (200, 200),
+    "growth_features": (500, 200),
+    "selection": (100_000, 32),
 }
 
 
 class RecipeValidationError(ValueError):
-    """Raised on bounds violation. Endpoint maps to 400."""
+    """Raised on bounds violation, missing/unknown `kind`, or any other
+    field-level problem. Endpoint maps to 400."""
+
+
+class LegacyRecipeError(Exception):
+    """Raised by get_recipe when the stored document is missing the
+    `kind` field — i.e. it pre-dates the kind discriminator. Endpoints
+    should surface a clear "this recipe is from a previous schema,
+    please re-create" message rather than retrying or silently
+    upgrading."""
 
 
 class TooManyRecipesError(Exception):
@@ -144,19 +204,45 @@ def _ds_prefix(user_id: int, ds: str) -> str:
     return f"{quote(str(user_id), safe='')}/{quote(ds, safe='')}/"
 
 
-def list_recipes(store: GcsObjectStore, user_id: int, ds: str) -> list[dict]:
-    """Return every recipe the user has under `ds`. No filtering — we own
-    the prefix, so anything there is ours. Returns [] on GCS error
-    (matches the store's silent-failure pattern)."""
-    items = store.list_yaml(_ds_prefix(user_id, ds))
-    # Drop anything that didn't parse as a dict (defensive against a
-    # future bug that wrote a non-dict; impossible today via put_recipe).
-    return [r for r in items if isinstance(r, dict)]
+def list_recipes(
+    store: GcsObjectStore, user_id: int, ds: str
+) -> tuple[list[dict], int]:
+    """Return (valid_recipes, invalid_count) for the user under `ds`.
+
+    Items missing a recognized `kind` field are dropped from the valid
+    list and counted in `invalid_count`. The SPA surfaces the count via
+    a banner so the user understands why their previously-saved recipes
+    aren't showing up; the items themselves stay on disk untouched (the
+    user can re-create or download them out-of-band).
+
+    Returns ([], 0) on GCS error (matches the store's silent-failure
+    pattern). Non-dict items are dropped silently (impossible via
+    put_recipe today; defensive against a future bug)."""
+    raw = store.list_yaml(_ds_prefix(user_id, ds))
+    valid: list[dict] = []
+    invalid = 0
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        kind = item.get("kind")
+        if isinstance(kind, str) and kind in ALLOWED_KINDS:
+            valid.append(item)
+        else:
+            invalid += 1
+            logger.warning(
+                "user=%s ds=%s id=%s: skipping recipe with missing/unknown kind=%r",
+                user_id, ds, item.get("id"), kind,
+            )
+    return valid, invalid
 
 
 def get_recipe(
     store: GcsObjectStore, user_id: int, ds: str, recipe_id: str
 ) -> dict | None:
+    """Fetch one recipe. Returns None on absence. Raises
+    LegacyRecipeError if the stored document is missing a recognized
+    `kind` — caller should map to a distinct error so the user can be
+    told to re-create rather than silently retrying."""
     assert_recipe_id(recipe_id)
     parsed = store.get_yaml(_object_path(user_id, ds, recipe_id))
     if parsed is None:
@@ -165,6 +251,12 @@ def get_recipe(
         # Same defensive drop as list_recipes — shouldn't happen under
         # normal writes.
         return None
+    kind = parsed.get("kind")
+    if not (isinstance(kind, str) and kind in ALLOWED_KINDS):
+        raise LegacyRecipeError(
+            f"recipe {recipe_id!r} is from a previous schema (missing/unknown kind); "
+            f"please re-create"
+        )
     return parsed
 
 
@@ -192,6 +284,12 @@ def put_recipe(
     # anything outside SUPPORTED with 400.
     requested_version = _resolve_schema_version(recipe_dict.get("version"))
 
+    # Kind is required on write. Missing → 400 with an actionable
+    # message (clients need to set kind explicitly so the round-trip is
+    # stable; we don't pick a default because connectivity vs explorer
+    # is a real semantic distinction).
+    kind = _require_kind(recipe_dict)
+
     # Strip unknown keys before storage — forward-compat hatch and bounds
     # the on-disk shape so a future field-name change can't accumulate
     # cruft.
@@ -207,6 +305,7 @@ def put_recipe(
     # downgraded by the server.
     stored["version"] = requested_version
     stored["id"] = recipe_id
+    stored["kind"] = kind
     stored["saved_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
     # Reorder so the on-disk YAML leads with version/id/title/description
@@ -230,13 +329,12 @@ def delete_recipe(
 
 # ---------- internals ----------------------------------------------------
 
-# Allowlist of fields that survive a PUT. Mirrors the operator-recipe
-# `TourBase` fields plus the server-stamped metadata. Anything else is
-# silently dropped.
+# Allowlist of fields that survive a PUT. Includes both kinds' top-level
+# fields plus the server-stamped metadata. Anything else is silently
+# dropped.
 #
 # Reserved (not yet used by any code path, but listed here so a future
 # client introducing the field doesn't have it stripped by today's server):
-#   - `kind`: future personal/team/shared distinction
 #   - `tags`: future organization / search labels
 #
 # Reserving a field name is cheap and forward-compatible. Removing a name
@@ -249,17 +347,22 @@ _KNOWN_FIELDS: tuple[str, ...] = (
     "tags",
     "title",
     "description",
+    # connectivity-shape top-level
     "decoration_tables",
     "plots",
     "cells",
     "hide",
     "show",
     "coll",
+    # explorer-shape top-level (single nested block)
+    "explorer",
     "saved_at",
 )
 
 # Order the on-disk YAML uses. set_yaml preserves insertion order
-# (sort_keys=False) so this is what `gsutil cat` shows.
+# (sort_keys=False) so this is what `gsutil cat` shows. `explorer:`
+# trails so connectivity recipes (the older shape) read identically to
+# their pre-discriminator form once `kind:` is present.
 _DISK_ORDER: tuple[str, ...] = (
     "version",
     "id",
@@ -274,7 +377,25 @@ _DISK_ORDER: tuple[str, ...] = (
     "show",
     "coll",
     "plots",
+    "explorer",
 )
+
+
+def _require_kind(d: dict) -> str:
+    """Return the recipe's `kind` if present and recognized. Raise
+    RecipeValidationError otherwise — distinct messages for missing vs
+    unknown so the client UI can render the right hint."""
+    kind = d.get("kind")
+    if kind is None:
+        raise RecipeValidationError(
+            f"kind: required (one of: {sorted(ALLOWED_KINDS)})"
+        )
+    if not isinstance(kind, str) or kind not in ALLOWED_KINDS:
+        raise RecipeValidationError(
+            f"kind: unknown value {kind!r} "
+            f"(server supports {sorted(ALLOWED_KINDS)})"
+        )
+    return kind
 
 
 def _resolve_schema_version(value: object) -> int:
@@ -316,31 +437,51 @@ def _ordered_for_disk(d: dict) -> dict:
 
 
 def _enforce_field_limits(d: dict) -> None:
-    for field, limit in _FIELD_LIMITS.items():
+    """Enforce top-level field caps from `_FIELD_LIMITS`, then recurse
+    one level into `explorer:` (if present) using
+    `_EXPLORER_FIELD_LIMITS`. Other nested mappings (e.g. individual
+    `plots` entries) are not recursed into — the bounding is
+    intentionally shallow, with the per-PUT byte cap in the endpoint
+    as the real defense for adversarial payloads."""
+    _enforce_limits_map(d, _FIELD_LIMITS, prefix="")
+    nested_explorer = d.get("explorer")
+    if isinstance(nested_explorer, dict):
+        _enforce_limits_map(nested_explorer, _EXPLORER_FIELD_LIMITS, prefix="explorer.")
+
+
+def _enforce_limits_map(
+    d: dict, limits: dict[str, int | tuple[int, int]], prefix: str
+) -> None:
+    """Apply `limits` to `d` field-by-field. `prefix` is prepended to
+    field names in error messages so a violation under `explorer.` is
+    reported as `explorer.selection: ...` and the client can point the
+    user at the right control."""
+    for field, limit in limits.items():
         value = d.get(field)
         if value is None:
             continue
+        full = f"{prefix}{field}"
         if isinstance(limit, int):
             # Scalar string field.
             if not isinstance(value, str):
-                raise RecipeValidationError(f"{field}: must be a string")
+                raise RecipeValidationError(f"{full}: must be a string")
             if len(value) > limit:
                 raise RecipeValidationError(
-                    f"{field}: too long ({len(value)} > {limit})"
+                    f"{full}: too long ({len(value)} > {limit})"
                 )
         else:
             max_entries, max_per_entry = limit
             if not isinstance(value, list):
-                raise RecipeValidationError(f"{field}: must be a list")
+                raise RecipeValidationError(f"{full}: must be a list")
             if len(value) > max_entries:
                 raise RecipeValidationError(
-                    f"{field}: too many entries ({len(value)} > {max_entries})"
+                    f"{full}: too many entries ({len(value)} > {max_entries})"
                 )
             if max_per_entry > 0:
                 for entry in value:
                     if isinstance(entry, str) and len(entry) > max_per_entry:
                         raise RecipeValidationError(
-                            f"{field}: entry too long "
+                            f"{full}: entry too long "
                             f"({len(entry)} > {max_per_entry})"
                         )
 
@@ -350,8 +491,14 @@ def _enforce_count_cap(
 ) -> None:
     """If this PUT would create a NEW recipe (id not already present) and
     the user is at the cap, refuse. An overwrite of an existing id never
-    grows the count and is always allowed."""
-    existing = list_recipes(store, user_id, ds)
+    grows the count and is always allowed.
+
+    Cap is computed off the valid-kind list only — invalid (no-kind)
+    recipes don't count against the user's quota, since they're hidden
+    from the SPA and the user can't manage them in-app. Without this,
+    a user could end up unable to save because their cap is filled by
+    invisible legacy items."""
+    existing, _invalid = list_recipes(store, user_id, ds)
     if any(r.get("id") == recipe_id for r in existing):
         return  # overwrite — count doesn't grow
     if len(existing) >= MAX_RECIPES_PER_DS:

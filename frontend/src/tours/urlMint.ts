@@ -22,7 +22,7 @@
  * id and renders the right component).
  */
 
-import type { Example, Recipe, TourPlot, TourPlotBindings } from "../api/types";
+import type { ConnectivityRecipe, Example, TourPlot, TourPlotBindings } from "../api/types";
 import {
   encodePlotsList,
   encodeVizParam,
@@ -171,7 +171,7 @@ export function buildExampleParams(ds: string, example: Example): URLSearchParam
  */
 export function applyRecipeToParams(
   prev: URLSearchParams,
-  recipe: Recipe,
+  recipe: ConnectivityRecipe,
 ): URLSearchParams {
   return applyTourConfigToParams(prev, recipe);
 }
@@ -193,7 +193,7 @@ export function applyRecipeToParams(
  */
 export function buildRecipeOpenParams(
   ds: string,
-  recipe: Recipe,
+  recipe: ConnectivityRecipe,
   mv: string | null,
 ): URLSearchParams {
   const params = new URLSearchParams();
@@ -221,7 +221,7 @@ export interface RecipeDiff {
   hideChanged: boolean;
 }
 
-export function diffRecipe(prev: URLSearchParams, recipe: Recipe): RecipeDiff {
+export function diffRecipe(prev: URLSearchParams, recipe: ConnectivityRecipe): RecipeDiff {
   const prevDec = (prev.get("dec") ?? "").split(",").filter(Boolean);
   const nextDec = recipe.decoration_tables;
   const prevSet = new Set(prevDec);
