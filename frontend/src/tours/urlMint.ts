@@ -22,7 +22,7 @@
  * id and renders the right component).
  */
 
-import type { ConnectivityRecipe, Example, TourPlot, TourPlotBindings } from "../api/types";
+import type { ConnectivityExample, ConnectivityRecipe, TourPlot, TourPlotBindings } from "../api/types";
 import {
   encodePlotsList,
   encodeVizParam,
@@ -149,19 +149,26 @@ export function applyTourConfigToParams(
 }
 
 /**
- * Build URL params for an Example: full workspace state including ds, mv,
- * root. Returns a URLSearchParams ready to stringify into a `/neuron?…`
- * navigation. The caller adds the `ds` param too (Examples are rendered
- * grouped by datastack on the landing page, but the helper accepts it
+ * Build URL params for a ConnectivityExample: full workspace state including
+ * ds, mv, root. Returns a URLSearchParams ready to stringify into a
+ * `/neuron?…` navigation. The caller adds the `ds` param too (Examples are
+ * rendered grouped by datastack on the landing page, but the helper accepts it
  * explicitly so apply-from-sidebar paths can pass the current datastack
  * without re-deriving it).
  */
-export function buildExampleParams(ds: string, example: Example): URLSearchParams {
+export function buildExampleParams(ds: string, example: ConnectivityExample): URLSearchParams {
   const params = new URLSearchParams();
   params.set("ds", ds);
-  params.set("mv", String(example.mat_version));
-  params.set("root", example.root);
-  return applyTourConfigToParams(params, example);
+  params.set("mv", String(example.pinned.mv));
+  if (example.pinned.root) params.set("root", example.pinned.root);
+  return applyTourConfigToParams(params, {
+    decoration_tables: example.decoration_tables ?? [],
+    plots: example.plots ?? [],
+    cells: example.cells,
+    hide: example.hide ?? [],
+    show: example.show ?? [],
+    coll: example.coll ?? [],
+  });
 }
 
 /**

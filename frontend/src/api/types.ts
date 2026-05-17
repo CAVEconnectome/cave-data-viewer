@@ -315,10 +315,75 @@ export interface TourBase {
   saved_at?: string;
 }
 
-export interface Example extends TourBase {
-  mat_version: number;
-  /** Stringified int64 root id. */
-  root: string;
+export interface ExamplePinning {
+  mv: number;
+  root?: string; // required iff kind is "connectivity"
+}
+
+export interface ConnectivityExample {
+  kind: "connectivity";
+  version: number;
+  id: string;
+  title: string;
+  summary: string;
+  full_text?: string;
+  thumbnail?: string;
+  pinned: ExamplePinning;
+  // Connectivity recipe-body fields (same as ConnectivityRecipe minus `kind`):
+  description?: string;
+  decoration_tables?: string[];
+  plots?: TourPlot[];
+  cells?: string;
+  hide?: string[];
+  show?: string[];
+  coll?: string[];
+  scope?: RecipeScope;
+}
+
+export interface ExplorerExample {
+  kind: "explorer";
+  version: number;
+  id: string;
+  title: string;
+  summary: string;
+  full_text?: string;
+  thumbnail?: string;
+  pinned: ExamplePinning;
+  explorer: {
+    ft?: string;
+    emb?: string;
+    decoration_tables?: string[];
+    cells?: string;
+    scope_mode?: "ghost" | "hide" | null;
+    sel_filters?: string[];
+    x?: string;
+    y?: string;
+    color?: string;
+    size?: string;
+    cmap?: string;
+    color_min?: number;
+    color_max?: number;
+    color_center?: number;
+    size_min?: number;
+    size_max?: number;
+    size_data_min?: number;
+    size_data_max?: number;
+    growth_space?: string;
+    growth_variance?: number;
+    growth_reduction?: string;
+    growth_threshold?: number;
+    growth_features?: string[];
+    growth_topn?: number;
+    selection?: string[]; // present on full GET, stripped on list
+  };
+  scope?: RecipeScope;
+}
+
+export type Example = ConnectivityExample | ExplorerExample;
+
+export interface ExamplesListResponse {
+  items: Example[];
+  hidden_count: number;
 }
 
 export type ScopePredicateOp = "in" | "eq" | "ne" | "gt" | "gte" | "lt" | "lte";
