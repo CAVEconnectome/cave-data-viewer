@@ -151,3 +151,48 @@ def test_unknown_datastack_returns_empty(repo_root: Path) -> None:
     reg = RecipeRegistry(repo_root=repo_root)
     assert reg.recipes("ds_unknown") == []
     assert reg.examples("ds_unknown") == []
+
+
+def test_rejects_malformed_yaml(repo_root: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """A YAML file that fails to parse should be logged + skipped, not
+    raise. The exception handler must catch yaml.YAMLError subclasses."""
+    (repo_root / "config" / "recipes" / "ds_x" / "bad-parse.yaml").write_text(": invalid:::yaml{{")
+    reg = RecipeRegistry(repo_root=repo_root)
+    assert reg.recipes("ds_x") == []
+    assert any("parse failed" in r.message for r in caplog.records)
+
+
+def test_rejects_explorer_example_missing_explorer_block(repo_root: Path) -> None:
+    """An explorer example must carry an `explorer:` block — otherwise
+    there's nothing to load."""
+    _write_yaml(
+        repo_root / "config" / "examples" / "ds_x" / "bad.yaml",
+        {
+            "version": 1,
+            "kind": "explorer",
+            "id": "bad",
+            "title": "Bad",
+            "summary": "no explorer block",
+            "pinned": {"mv": 1078},
+            # deliberately no "explorer:" key
+        },
+    )
+    reg = RecipeRegistry(repo_root=repo_root)
+    assert reg.examples("ds_x") == []
+
+
+def test_rejects_example_missing_pinned(repo_root: Path) -> None:
+    """A `pinned:` block is required on every example regardless of kind."""
+    _write_yaml(
+        repo_root / "config" / "examples" / "ds_x" / "bad.yaml",
+        {
+            "version": 1,
+            "kind": "connectivity",
+            "id": "bad",
+            "title": "Bad",
+            "summary": "no pinned",
+            # no "pinned" key
+        },
+    )
+    reg = RecipeRegistry(repo_root=repo_root)
+    assert reg.examples("ds_x") == []

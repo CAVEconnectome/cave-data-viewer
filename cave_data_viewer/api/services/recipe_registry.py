@@ -93,8 +93,13 @@ class RecipeRegistry:
         - `_bundled_config/` is alongside the installed package.
         - `CDV_RECIPES_CONFIG_DIR`, `CDV_EXAMPLES_CONFIG_DIR` for env overrides.
         """
+        # Repo root, resolved relative to this file's location (NOT cwd) to
+        # avoid silent failure when the process working directory differs from
+        # the repo root (e.g. in a container that `cd`s to /app at entrypoint).
+        # Path layout: this file at cave_data_viewer/api/services/recipe_registry.py
+        # → parents[3] is the repo root.
         repo_root: Path | None = None
-        cand = Path.cwd()
+        cand = Path(__file__).resolve().parents[3]
         if (cand / "config" / "recipes").exists() or (cand / "config" / "examples").exists():
             repo_root = cand
 
