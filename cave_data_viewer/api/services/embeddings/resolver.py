@@ -15,10 +15,9 @@ layer adds:
   doesn't break the wire shape.
 
 The resolver is *not* called from within the explorer's data path
-(/points, /column, /knn) — those operate purely in cell_id space. The
-resolver is invoked only at boundaries: ``/resolve_roots`` for SPA
-cross-nav prefetch, and ``/knn`` when the caller supplies a root_id
-instead of a cell_id.
+(/points, /column, /distance_to_set) — those operate purely in cell_id
+space. The resolver is invoked only at boundaries: ``/resolve_roots``
+for SPA cross-nav prefetch.
 """
 
 from __future__ import annotations
@@ -190,11 +189,12 @@ def reverse_resolve_root_id_to_cell_id(
 ) -> int | None:
     """Reverse-resolve a single root_id to its cell_id.
 
-    Used by ``/knn`` when the caller supplies a root_id (typically pasted
-    from a Neuroglancer tab) rather than the stable cell_id. The lookup
-    goes through the datastack's ``root_id_lookup_main_table`` + any
-    ``root_id_lookup_alt_tables`` exactly as the existing
-    ``/cell-ids/lookup`` endpoint does.
+    Kept as a public helper for callers that need single-root reverse
+    resolution (typically a root_id pasted from a Neuroglancer tab being
+    translated into the cell_id namespace before any explorer action).
+    The lookup goes through the datastack's
+    ``root_id_lookup_main_table`` + any ``root_id_lookup_alt_tables``
+    exactly as the existing ``/cell-ids/lookup`` endpoint does.
 
     Returns ``None`` when the root has no nucleus mapping, or maps
     ambiguously to multiple cells (the underlying primitive drops

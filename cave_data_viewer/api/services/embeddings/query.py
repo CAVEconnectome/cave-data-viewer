@@ -34,6 +34,7 @@ from .decoration_join import get_decoration_table_snapshot
 from .loader import SOURCE_DS_COLUMN, load_feature_table_frame
 from .manifest import FeatureTableSpec
 from .resolver import resolve_cell_ids_to_root_ids
+from ..timing import timer
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +95,8 @@ class FeatureTableQuery:
             List of decoration table names to attach. Empty / ``None``
             returns the parquet untouched (no CAVE calls).
         """
-        df = load_feature_table_frame(self.datastack, self.feature_table).copy()
+        with timer("embedding_frame_load"):
+            df = load_feature_table_frame(self.datastack, self.feature_table).copy()
         # Normalize the id column so downstream code (resolve_plot,
         # _apply_cell_filters, universe-color lookup) can read a single
         # canonical name regardless of how the manifest declared it.

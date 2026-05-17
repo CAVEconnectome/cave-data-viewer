@@ -12,6 +12,7 @@ import { OrthographicView, OrthographicViewport } from "@deck.gl/core";
 import { ScatterplotLayer } from "@deck.gl/layers";
 import { useEmbeddingScatter } from "../../api/embeddings";
 import type { EmbeddingScatterResponse } from "../../api/types";
+import { columnDisplayName } from "../tableColumns";
 import { ColorLegend } from "./ColorLegend";
 import {
   type Colormap,
@@ -92,14 +93,31 @@ interface Props {
   /** Called with the lasso-selected cell_ids — guaranteed in-scope
    *  because the partition omits or ghosts out-of-scope cells (and
    *  hit-test filters them out either way). Suppressed on empty
-   *  selections so a phantom drag doesn't clear a real selection. */
-  onLassoSelect?: (cellIds: string[]) => void;
+   *  selections so a phantom drag doesn't clear a real selection.
+   *
+   *  `mode` reflects modifier keys held when the lasso ended:
+   *  `add` (Shift), `subtract` (Alt/Option), or `replace` (no modifier).
+   *  Matches Photoshop/Figma/Finder semantics so a user can build up
+   *  and pare down a selection without leaving the canvas. */
+  onLassoSelect?: (
+    cellIds: string[],
+    mode: "replace" | "add" | "subtract",
+  ) => void;
   /** Called when the user clicks a single point. */
   onPointClick?: (cellId: string) => void;
   /** Optional fixed height. When unset, the component fills its
    *  parent (use this in flex layouts where the parent owns sizing).
    *  Required when the parent has no intrinsic height. */
   height?: number;
+  /** Synthetic distance-to-seeds values keyed by cell_id. Provided
+   *  when the user has bound the ``__distance`` channel to color (or
+   *  size); the scatter aligns these to the fetched ``cell_ids``
+   *  order and feeds the resulting block into the partition as if
+   *  it came from /scatter. The backend has no idea what
+   *  ``__distance`` is, so the SPA strips the binding before
+   *  fetching and substitutes the synthesized block here. */
+  distanceColorMap?: Map<string, number> | null;
+  distanceSizeMap?: Map<string, number> | null;
 }
 
 /** Imperative handle exposed via `forwardRef`. Lets parents trigger the
@@ -224,6 +242,8 @@ export const UniverseScatter = forwardRef<UniverseScatterHandle, Props>(function
     onLassoSelect,
     onPointClick,
     height,
+    distanceColorMap,
+    distanceSizeMap,
   },
   ref,
 ) {
@@ -233,10 +253,20 @@ export const UniverseScatter = forwardRef<UniverseScatterHandle, Props>(function
   // top-right corner of the scatter; sticks until the user toggles
   // back so repeated lassos don't require re-clicking.
   const [tool, setTool] = useState<"pan" | "lasso">("pan");
+  // Space-as-temporary-pan: while held, the lasso overlay defers
+  // pointer events to deck.gl so the user can nudge the view without
+  // toggling the tool. Tracked in state (not just a ref) so the
+  // overlay's `pointer-events` / `cursor` rerender on press/release.
+  const [spaceHeld, setSpaceHeld] = useState(false);
   // Active lasso polygon in canvas-pixel coordinates. `null` when not
   // currently dragging. Points are accumulated as the user moves the
   // pointer; on release we convert to data space and emit cell_ids.
   const [lassoPx, setLassoPx] = useState<Array<[number, number]> | null>(null);
+  // Tracks whether a lasso drag is in flight. When idle, the overlay
+  // sets `pointer-events: none` so wheel/right-click/hover reach
+  // deck.gl naturally; we only steal pointer events for the duration
+  // of an active drag.
+  const draggingRef = useRef(false);
   // Hover state — picked cell_id + the bound channel values at that
   // point. Lazily computed once on hover so it doesn't recompute every
   // mousemove.
@@ -247,6 +277,7 @@ export const UniverseScatter = forwardRef<UniverseScatterHandle, Props>(function
   } | null>(null);
 
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const overlayRef = useRef<HTMLDivElement | null>(null);
   const query = useEmbeddingScatter({
     ds,
     featureTableId,
@@ -268,6 +299,57 @@ export const UniverseScatter = forwardRef<UniverseScatterHandle, Props>(function
     [query.data],
   );
 
+  // Synthetic ``__distance`` channel. The backend strips this binding
+  // before /scatter is called (it has no idea what it is), so the
+  // fetched response has no color/size block for it. Reconstitute one
+  // here by aligning ``distanceColorMap`` (and the size counterpart)
+  // to the fetched ``cell_ids`` order. The merged block looks
+  // indistinguishable from a server-provided numeric channel from the
+  // partition's point of view, so the colormap / legend / hover
+  // tooltip all light up without further special-casing.
+  const dataWithSynthetic = useMemo(() => {
+    if (!query.data) return query.data;
+    let data = query.data;
+    if (distanceColorMap && data.color == null) {
+      const values: Array<number | null> = new Array(data.cell_ids.length);
+      for (let i = 0; i < data.cell_ids.length; i++) {
+        const v = distanceColorMap.get(data.cell_ids[i]);
+        values[i] = v == null ? null : v;
+      }
+      data = {
+        ...data,
+        color: { column: "__distance", kind: "numeric", values },
+      };
+    }
+    if (distanceSizeMap && data.size == null) {
+      const values: Array<number | null> = new Array(data.cell_ids.length);
+      let lo = Infinity;
+      let hi = -Infinity;
+      for (let i = 0; i < data.cell_ids.length; i++) {
+        const v = distanceSizeMap.get(data.cell_ids[i]);
+        if (v == null) {
+          values[i] = null;
+        } else {
+          values[i] = v;
+          if (v < lo) lo = v;
+          if (v > hi) hi = v;
+        }
+      }
+      data = {
+        ...data,
+        size: {
+          column: "__distance",
+          values,
+          raw_range: [
+            Number.isFinite(lo) ? lo : 0,
+            Number.isFinite(hi) ? hi : 0,
+          ],
+        },
+      };
+    }
+    return data;
+  }, [query.data, distanceColorMap, distanceSizeMap]);
+
   // Per-point resolved color/size arrays + three-way partition
   // (out-of-scope / in-scope-not-selected / in-scope-selected).
   // Positions are pre-normalized to a unit square so the
@@ -277,7 +359,7 @@ export const UniverseScatter = forwardRef<UniverseScatterHandle, Props>(function
   // add them) inverse-transform tick positions through `extent`.
   const partition = useMemo(
     () =>
-      buildPartition(query.data, inScopeCellIds, selectedCellIds, extent, {
+      buildPartition(dataWithSynthetic, inScopeCellIds, selectedCellIds, extent, {
         sizeMinPx: sizeMinPx ?? 2,
         sizeMaxPx: sizeMaxPx ?? 18,
         sizeDataMin: sizeDataMin ?? null,
@@ -289,7 +371,7 @@ export const UniverseScatter = forwardRef<UniverseScatterHandle, Props>(function
         scopeMode,
       }),
     [
-      query.data,
+      dataWithSynthetic,
       inScopeCellIds,
       selectedCellIds,
       extent,
@@ -321,6 +403,50 @@ export const UniverseScatter = forwardRef<UniverseScatterHandle, Props>(function
     });
     ro.observe(el);
     return () => ro.disconnect();
+  }, []);
+
+  // Hold-Space → temporary pan/zoom. While the key is held, the lasso
+  // overlay falls back to `pointer-events: none` and deck.gl's
+  // controller is enabled (see the layers/overlay JSX below), so a
+  // user mid-lasso can nudge the view without round-tripping through
+  // the tool toggle. Ignored when the user is typing into an input,
+  // textarea, or contenteditable so Space doesn't get hijacked mid-
+  // typing in the Cell ID Search box. Reset on `blur` (e.g., user
+  // alt-tabs while holding Space) to avoid a "stuck pan" state.
+  useEffect(() => {
+    const isTypingTarget = (t: EventTarget | null) => {
+      const el = t as HTMLElement | null;
+      if (!el || !(el instanceof HTMLElement)) return false;
+      if (el.isContentEditable) return true;
+      const tag = el.tagName;
+      return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+    };
+    const onKeyDown = (ev: KeyboardEvent) => {
+      if (ev.code !== "Space" || ev.repeat) return;
+      if (isTypingTarget(document.activeElement)) return;
+      ev.preventDefault(); // suppress page scroll on body-focused Space
+      setSpaceHeld(true);
+      // Discard any in-flight lasso polygon — switching modes mid-
+      // drag would be ambiguous, and the user's clear intent is "let
+      // me pan."
+      if (draggingRef.current) {
+        draggingRef.current = false;
+        setLassoPx(null);
+      }
+    };
+    const onKeyUp = (ev: KeyboardEvent) => {
+      if (ev.code !== "Space") return;
+      setSpaceHeld(false);
+    };
+    const onBlur = () => setSpaceHeld(false);
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    window.addEventListener("blur", onBlur);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+      window.removeEventListener("blur", onBlur);
+    };
   }, []);
 
   // Initial view state — fit the unit square into the canvas with a
@@ -543,14 +669,15 @@ export const UniverseScatter = forwardRef<UniverseScatterHandle, Props>(function
   // space and run point-in-polygon over the rendered partition to
   // emit cell_ids.
   const pointerStart = useCallback((ev: React.PointerEvent) => {
-    if (tool !== "lasso") return;
+    if (tool !== "lasso" || spaceHeld) return;
     const rect = containerRef.current?.getBoundingClientRect();
     if (!rect) return;
     const px = ev.clientX - rect.left;
     const py = ev.clientY - rect.top;
+    draggingRef.current = true;
     setLassoPx([[px, py]]);
     (ev.target as Element).setPointerCapture(ev.pointerId);
-  }, [tool]);
+  }, [tool, spaceHeld]);
 
   const pointerMove = useCallback((ev: React.PointerEvent) => {
     if (tool !== "lasso") return;
@@ -571,8 +698,11 @@ export const UniverseScatter = forwardRef<UniverseScatterHandle, Props>(function
   const pointerEnd = useCallback((ev: React.PointerEvent) => {
     if (tool !== "lasso") return;
     const polygon = lassoPx;
+    const wasDragging = draggingRef.current;
+    draggingRef.current = false;
     setLassoPx(null);
     (ev.target as Element).releasePointerCapture(ev.pointerId);
+    if (!wasDragging) return; // drag was discarded (e.g. Space pressed mid-gesture)
     if (!polygon || polygon.length < 3 || !partition || !viewState) return;
     const rect = containerRef.current?.getBoundingClientRect();
     if (!rect) return;
@@ -599,8 +729,59 @@ export const UniverseScatter = forwardRef<UniverseScatterHandle, Props>(function
       if (pointInPolygon(row.position, polyData)) selected.push(row.id);
     }
     if (selected.length === 0) return; // suppress empty-lasso noise
-    onLassoSelect?.(selected);
+    // Modifier keys at lasso-end decide the mode. Conventions match
+    // Photoshop / Figma / Finder: Shift = add (extend selection),
+    // Alt = subtract. Shift wins if both are held — extending is
+    // the safer guess when the user is ambiguous.
+    const mode: "replace" | "add" | "subtract" = ev.shiftKey
+      ? "add"
+      : ev.altKey
+        ? "subtract"
+        : "replace";
+    onLassoSelect?.(selected, mode);
   }, [tool, lassoPx, partition, viewState, onLassoSelect]);
+
+  // Wheel passthrough: the lasso overlay sits on top of deck.gl's
+  // canvas with `pointer-events: auto` so it can capture left-drag
+  // gestures for polygon drawing. That same hit-test prevents wheel
+  // events from reaching deck.gl underneath, which would silently
+  // kill scroll-zoom in lasso mode. We forward the wheel event by
+  // dispatching a synthetic WheelEvent onto the canvas — deck.gl's
+  // mjolnir.js listeners pick it up like any native wheel.
+  //
+  // The listener is attached with `{ passive: false }` so we can call
+  // `preventDefault()` on the *original* event — React 17+ adds wheel
+  // handlers as passive by default, so `onWheel={...}` with a
+  // SyntheticEvent.preventDefault() is silently ignored and the page
+  // scrolls while we zoom. The native listener is the only way to
+  // block the page-scroll bleed.
+  useEffect(() => {
+    const el = overlayRef.current;
+    if (!el) return;
+    const onWheelNative = (ev: WheelEvent) => {
+      const canvas = containerRef.current?.querySelector("canvas");
+      if (!canvas) return;
+      ev.preventDefault();
+      canvas.dispatchEvent(
+        new WheelEvent("wheel", {
+          deltaX: ev.deltaX,
+          deltaY: ev.deltaY,
+          deltaZ: ev.deltaZ,
+          deltaMode: ev.deltaMode,
+          clientX: ev.clientX,
+          clientY: ev.clientY,
+          ctrlKey: ev.ctrlKey,
+          shiftKey: ev.shiftKey,
+          altKey: ev.altKey,
+          metaKey: ev.metaKey,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    };
+    el.addEventListener("wheel", onWheelNative, { passive: false });
+    return () => el.removeEventListener("wheel", onWheelNative);
+  }, []);
 
   // Build SVG polygon path from current lasso points (while dragging).
   const lassoPath = useMemo(() => {
@@ -609,28 +790,30 @@ export const UniverseScatter = forwardRef<UniverseScatterHandle, Props>(function
   }, [lassoPx]);
 
   // Hover tooltip content. Looks up the bound channel values for the
-  // hovered cell_id by index into the response arrays.
+  // hovered cell_id by index into the response arrays. Reads from the
+  // synthetic-merged data so the __distance channel shows up here too
+  // when bound (the fetched response has no block for it).
   const tooltip = useMemo(() => {
-    if (!hovered || !query.data) return null;
-    const idx = query.data.cell_ids.indexOf(hovered.id);
+    if (!hovered || !dataWithSynthetic) return null;
+    const idx = dataWithSynthetic.cell_ids.indexOf(hovered.id);
     if (idx < 0) return null;
     const lines: string[] = [`cell_id: ${hovered.id}`];
-    const c = query.data.color;
+    const c = dataWithSynthetic.color;
     if (c) {
       const v = c.values[idx];
-      lines.push(`${c.column}: ${v === null || v === undefined ? "(null)" : v}`);
+      lines.push(`${columnDisplayName(c.column)}: ${v === null || v === undefined ? "(null)" : v}`);
     }
-    const s = query.data.size;
+    const s = dataWithSynthetic.size;
     if (s) {
       const v = s.values[idx];
       lines.push(
-        `${s.column}: ${
+        `${columnDisplayName(s.column)}: ${
           v === null || v === undefined ? "(null)" : v
         } (range ${s.raw_range[0].toFixed(2)}–${s.raw_range[1].toFixed(2)})`,
       );
     }
     return { lines, px: hovered.px, py: hovered.py };
-  }, [hovered, query.data]);
+  }, [hovered, dataWithSynthetic]);
 
   // Single outer container so the ResizeObserver-bearing ref is
   // always attached — earlier conditional-return paths rendered
@@ -675,7 +858,19 @@ export const UniverseScatter = forwardRef<UniverseScatterHandle, Props>(function
       <DeckGL
         views={new OrthographicView({ id: "ortho" })}
         viewState={viewState ?? undefined}
-        controller={tool === "pan"}
+        // In lasso mode (without Space) we keep the controller *alive*
+        // — just with drag-pan/rotate/double-click-zoom turned off — so
+        // mouse-wheel zoom still works while a user is drawing
+        // polygons. Pan mode and Space-held give the full controller.
+        controller={
+          tool === "pan" || spaceHeld
+            ? true
+            : {
+                dragPan: false,
+                dragRotate: false,
+                doubleClickZoom: false,
+              }
+        }
         onViewStateChange={({ viewState: next, interactionState }) => {
           // Only the active gesture flags count as user interaction;
           // deck.gl will set `inTransition: false` and similar on
@@ -705,19 +900,28 @@ export const UniverseScatter = forwardRef<UniverseScatterHandle, Props>(function
         onHover={handleHover}
         style={{ position: "absolute", left: "0", top: "0", right: "0", bottom: "0" }}
       />
-      {/* Lasso overlay. `pointer-events: auto` only when in lasso mode
-          so the deck.gl controller is responsible for pointer events
-          during pan/zoom. */}
+      {/* Lasso overlay. Steals pointer events only while in lasso mode
+          AND either a drag is in flight or no modifier is held —
+          otherwise it stays `pointer-events: none` so wheel zoom,
+          right-click, hover, and hold-Space pan all reach deck.gl
+          naturally without a tool-toggle round-trip. */}
       <div
         className="universe-lasso-overlay"
+        ref={overlayRef}
         style={{
           position: "absolute",
           left: 0,
           top: 0,
           right: 0,
           bottom: 0,
-          pointerEvents: tool === "lasso" ? "auto" : "none",
-          cursor: tool === "lasso" ? "crosshair" : "default",
+          pointerEvents:
+            tool === "lasso" && !spaceHeld ? "auto" : "none",
+          cursor:
+            tool === "lasso" && !spaceHeld
+              ? "crosshair"
+              : spaceHeld
+                ? "grab"
+                : "default",
         }}
         onPointerDown={pointerStart}
         onPointerMove={pointerMove}
@@ -741,11 +945,13 @@ export const UniverseScatter = forwardRef<UniverseScatterHandle, Props>(function
         )}
       </div>
       {/* Color legend — top-left overlay, mirrors the toolbar. Only
-          renders when a color channel is bound. */}
-      {query.data?.color && (
+          renders when a color channel is bound. Reads from the
+          synthetic-merged data so the legend lights up when the user
+          binds the __distance channel too. */}
+      {dataWithSynthetic?.color && (
         <div className="universe-legend">
           <ColorLegend
-            color={query.data.color}
+            color={dataWithSynthetic.color}
             colormapId={colormap.id}
             colorMin={colorMin ?? null}
             colorMax={colorMax ?? null}
@@ -763,14 +969,27 @@ export const UniverseScatter = forwardRef<UniverseScatterHandle, Props>(function
         >
           ✥ pan
         </button>
-        <button
-          type="button"
-          className={tool === "lasso" ? "active" : ""}
-          onClick={() => setTool("lasso")}
-          title="Lasso to select"
-        >
-          ⌒ lasso
-        </button>
+        {/* Lasso button is wrapped so the modifier-key cheat-sheet can
+            anchor underneath as a CSS-hover tooltip. The wrapper has
+            `position: relative`; the tooltip is `display: none` until
+            the wrapper is hovered. */}
+        <span className="universe-lasso-btn-wrap">
+          <button
+            type="button"
+            className={tool === "lasso" ? "active" : ""}
+            onClick={() => setTool("lasso")}
+            aria-label="Lasso to select. Shift to add, Alt to subtract, Space to pan, Esc to clear."
+          >
+            ⌒ lasso
+          </button>
+          <div className="universe-lasso-tooltip" role="tooltip">
+            <div><kbd>⇧</kbd> drag — add to selection</div>
+            <div><kbd>⌥</kbd> drag — subtract from selection</div>
+            <div><kbd>space</kbd> — pan while lassoing</div>
+            <div><kbd>wheel</kbd> — zoom</div>
+            <div><kbd>esc</kbd> — clear selection</div>
+          </div>
+        </span>
         <button
           type="button"
           onClick={fitView}

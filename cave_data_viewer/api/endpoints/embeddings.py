@@ -6,13 +6,13 @@ Mounted at ``/api/v1/datastacks/<ds>/feature_tables/...``:
                                                         nested embeddings
                                                         + kNN defaults
                                                         + cell_id_source_table.
-- ``POST /feature_tables/<ft>/knn``                     kNN by cell_id (or by
-                                                        root_id with server-
-                                                        side reverse-resolve).
-                                                        Data-level concern —
-                                                        independent of which
-                                                        embedding the SPA is
-                                                        currently rendering.
+- ``POST /feature_tables/<ft>/distance_to_set``         universe-aligned
+                                                        distances from a seed
+                                                        cell-id set. Backs the
+                                                        Explorer's similarity-
+                                                        based selection growth.
+                                                        Spaces: raw / pca /
+                                                        mahalanobis (whitened).
 - ``POST /feature_tables/<ft>/resolve_roots``           batched cell_id →
                                                         root_id at mat_version.
 
@@ -23,13 +23,23 @@ through the existing ``/plots/<spec>`` machinery), and a sibling
 
 The auth decorator gates everything at the same boundary as the rest of
 the API; ``CDV_DEV_AUTH_BYPASS=1`` covers local dev.
+
+**GET vs POST convention.** Endpoints that may carry a variable-length
+``cell_ids`` list (``/cells``, ``/distance_to_set``, ``/resolve_roots``)
+are POST so the payload lives in the request body and isn't bounded by
+Node's ~8 KB header limit. Endpoints with fixed-size parameter sets
+(``/scatter``, ``/column``, ``/column_histogram``) are GET so they
+stay CDN-cacheable and benefit from the query-key-based response cache
+on the SPA.
 """
 
 from __future__ import annotations
 
 import math
+import time
 from typing import Any
 
+import numpy as np
 import pandas as pd
 from flask import Blueprint, current_app, jsonify, request
 
@@ -43,12 +53,18 @@ from ..services.embeddings import (
     FeatureTableQuery,
     FeatureTableSpec,
     effective_datastacks,
-    get_index,
     load_feature_table_frame,
     resolve_cell_ids_to_root_ids,
-    reverse_resolve_root_id_to_cell_id,
     source_for,
 )
+from ..services.embeddings.column_histogram import (
+    compute_categorical_histogram,
+    compute_numeric_histogram,
+    histogram_to_json,
+)
+from ..services.embeddings.distance import compute_distance_to_set
+from ..services.embeddings.feature_matrix import get_matrix
+from ..services.embeddings.pca import get_pca_svd, resolve_k_for_variance
 from ..services.embeddings.loader import SOURCE_DS_COLUMN
 from ..services.categorical import (
     get_unique_values as _categorical_get_unique_values,
@@ -56,6 +72,83 @@ from ..services.categorical import (
 )
 from ..services.neuron import suggest_current_roots
 from ..services.plots import _apply_cell_filters, _parse_cells_param
+from ..services.timing import record_stage, timer
+
+
+# Distance-to-set seed cap. The nearest/mean reductions allocate a
+# pairwise (chunk, S, D) intermediate per chunk, so keeping S small
+# bounds per-request transient memory predictably regardless of
+# universe size. Distinct from the per-chunk universe slice cap in
+# services/embeddings/distance.py; this is the user-facing API limit.
+_MAX_SEED_CELL_IDS = 20
+
+# Top-K truncation on /distance_to_set responses. The default is set
+# high enough to ship the entire universe for every public connectome
+# we know about (minnie65 ~94k, FlyWire ~140k); the SPA's elbow plot,
+# Select/Add actions, and synthetic ``__distance`` column all want the
+# full distribution, and a 100k-float payload is ~600 KB gzipped — not
+# worth the bookkeeping of a partial response. The ceiling stays in
+# place as a sanity guard against a future dataset blowing up wire
+# costs unexpectedly, and against buggy clients explicitly requesting
+# a billion rows.
+_DEFAULT_DISTANCE_LIMIT = 200000
+_MAX_DISTANCE_LIMIT = 1000000
+
+
+def _stringify_cell_ids(frame: pd.DataFrame) -> list[str]:
+    """Wire-shape cell_id rendering: int64 column → list[str].
+
+    Cell ids exceed JS Number precision (2**53), so the SPA expects them
+    as strings end-to-end. Every endpoint that emits a parallel arrays
+    payload routes through here for consistency.
+    """
+    return [str(int(c)) for c in frame["cell_id"].tolist()]
+
+
+def _make_client_factory(ds: str, mat_version: int | str | None):
+    """Build the lazy CAVE-client closure every embeddings endpoint uses.
+
+    The closure isn't invoked until something downstream actually needs
+    a CAVE call (decoration join, nucleus position enrichment, etc.).
+    Parquet-only request paths never construct a client.
+    """
+    def _client_factory():
+        return request_client(
+            datastack_name=ds,
+            server_address=current_app.config["GLOBAL_SERVER_ADDRESS"],
+            auth_token=current_token(),
+            dev_bypass=is_dev_bypass(),
+            materialize_version=mat_version,
+        )
+    return _client_factory
+
+
+def _load_universe_frame(
+    *,
+    ds: str,
+    cfg,
+    ft: FeatureTableSpec,
+    mat_version: int | str | None,
+    decoration_tables: list[str],
+    client_factory,
+) -> pd.DataFrame:
+    """Universe frame for one feature table at one mat_version.
+
+    Builds a :class:`FeatureTableQuery` and returns ``ft_query.frame()``
+    with the requested decoration tables joined. Every endpoint that
+    operates on the per-feature-table frame (``/scatter``, ``/column``,
+    ``/cells``, ``/column_histogram``) routes through here so the
+    request_client wiring and decoration-tables coercion live in one
+    place.
+    """
+    ft_query = FeatureTableQuery(
+        datastack=ds,
+        mat_version=mat_version,
+        feature_table=ft,
+        cfg=cfg,
+        client_factory=client_factory,
+    )
+    return ft_query.frame(decoration_tables=decoration_tables or None)
 
 
 def _scale_size_rank(
@@ -270,27 +363,15 @@ def scatter(ds: str, feature_table_id: str, embedding_id: str):
         except ValueError as exc:
             raise ApiError(422, "live_mode_disallowed", str(exc)) from exc
 
-    def _client_factory():
-        return request_client(
-            datastack_name=ds,
-            server_address=current_app.config["GLOBAL_SERVER_ADDRESS"],
-            auth_token=current_token(),
-            dev_bypass=is_dev_bypass(),
-            materialize_version=mat_version,
-        )
-
-    ft_query = FeatureTableQuery(
-        datastack=ds,
-        mat_version=mat_version,
-        feature_table=ft,
+    client_factory = _make_client_factory(ds, mat_version)
+    frame = _load_universe_frame(
+        ds=ds,
         cfg=cfg,
-        # Always pass client_factory — lazy; only triggers a CAVE call
-        # when frame() actually needs the resolver (decoration join
-        # OR nucleus position enrichment). Parquet-only paths still
-        # pay nothing.
-        client_factory=_client_factory,
+        ft=ft,
+        mat_version=mat_version,
+        decoration_tables=decoration_tables,
+        client_factory=client_factory,
     )
-    frame = ft_query.frame(decoration_tables=decoration_tables or None)
 
     missing = [c for c in (x_col, y_col) if c not in frame.columns]
     for ch in (color_col, size_col):
@@ -332,7 +413,7 @@ def scatter(ds: str, feature_table_id: str, embedding_id: str):
                 )
             elif table_name:
                 universe = _categorical_get_unique_values(
-                    client_factory=_client_factory,
+                    client_factory=client_factory,
                     ds=ds,
                     mat_version=mat_version,
                     table=table_name,
@@ -386,7 +467,7 @@ def scatter(ds: str, feature_table_id: str, embedding_id: str):
 
     return jsonify(
         {
-            "cell_ids": [str(int(c)) for c in frame["cell_id"].tolist()],
+            "cell_ids": _stringify_cell_ids(frame),
             # Parallel per-row datastack tag. Uniform on single-ds
             # manifests (every value equals ``ds``); diverges per row
             # on multi-ds manifests. Read by the SPA to route cross-nav
@@ -519,23 +600,15 @@ def column(ds: str, feature_table_id: str, column: str):
         except ValueError as exc:
             raise ApiError(422, "live_mode_disallowed", str(exc)) from exc
 
-    def _client_factory():
-        return request_client(
-            datastack_name=ds,
-            server_address=current_app.config["GLOBAL_SERVER_ADDRESS"],
-            auth_token=current_token(),
-            dev_bypass=is_dev_bypass(),
-            materialize_version=mat_version,
-        )
-
-    ft_query = FeatureTableQuery(
-        datastack=ds,
-        mat_version=mat_version,
-        feature_table=ft,
+    client_factory = _make_client_factory(ds, mat_version)
+    frame = _load_universe_frame(
+        ds=ds,
         cfg=cfg,
-        client_factory=_client_factory,
+        ft=ft,
+        mat_version=mat_version,
+        decoration_tables=decoration_tables,
+        client_factory=client_factory,
     )
-    frame = ft_query.frame(decoration_tables=decoration_tables or None)
 
     if column not in frame.columns:
         raise ApiError(
@@ -563,7 +636,7 @@ def column(ds: str, feature_table_id: str, column: str):
                     None if pd.isna(v) else float(v) for v in coerced.tolist()
                 ],
                 "raw_range": raw_range,
-                "cell_ids": [str(int(c)) for c in frame["cell_id"].tolist()],
+                "cell_ids": _stringify_cell_ids(frame),
                 "source_ds": source_ds_values,
                 "n_cells": int(len(frame)),
             }
@@ -584,7 +657,7 @@ def column(ds: str, feature_table_id: str, column: str):
         universe = series.dropna().astype(str).unique().tolist()
     else:
         universe = _categorical_get_unique_values(
-            client_factory=_client_factory,
+            client_factory=client_factory,
             ds=ds,
             mat_version=mat_version,
             table=table_name,
@@ -602,7 +675,7 @@ def column(ds: str, feature_table_id: str, column: str):
             "kind": "categorical",
             "values": [None if pd.isna(v) else str(v) for v in series.tolist()],
             "color_map": {str(k): v for k, v in color_map.items() if k is not None},
-            "cell_ids": [str(int(c)) for c in frame["cell_id"].tolist()],
+            "cell_ids": _stringify_cell_ids(frame),
             "source_ds": source_ds_values,
             "n_cells": int(len(frame)),
         }
@@ -621,10 +694,10 @@ def cells(ds: str, feature_table_id: str):
     ``PartnersTable`` consumes, so the same component renders both
     ``/neuron``'s partners and ``/explore``'s cells.
 
-    **POST** rather than GET — the optional ``sel_cell_ids`` field
-    can be a list of tens of thousands of ints (large lasso). Carrying
-    that in a query string overflows Node's default 8KB request-header
-    limit. Body is JSON.
+    **POST** rather than GET — the optional ``cell_ids`` field can be a
+    list of tens of thousands of ints (large lasso). Carrying that in a
+    query string overflows Node's default 8KB request-header limit. Body
+    is JSON.
 
     Body fields (all optional):
 
@@ -633,9 +706,9 @@ def cells(ds: str, feature_table_id: str):
     - ``dec`` — list of decoration table names to join onto the frame.
     - ``cells`` — filter expression, same syntax as the partners
       endpoints (``<table>.<col>:<op>:<val>[,...]``).
-    - ``sel_cell_ids`` — explicit cell_id subset (universe-scatter
-      lasso). ANDed with the filter expression after the frame is
-      built. Empty / absent = no constraint.
+    - ``cell_ids`` — explicit cell_id subset (universe-scatter lasso).
+      List of ints or numeric strings. ANDed with the filter expression
+      after the frame is built. Empty / absent = no constraint.
     - ``limit`` — server-side cap on returned rows.
 
     Response shape unchanged from the previous GET version.
@@ -695,27 +768,24 @@ def cells(ds: str, feature_table_id: str):
         if f.table not in decoration_tables:
             decoration_tables.append(f.table)
 
-    # Lasso selection — accepted as either a JSON list of ints/strings
-    # (preferred for big lassos) or a comma-separated string (legacy
-    # query-shape compat). ANDed with the filter expression after the
-    # frame is built. Empty / absent = no constraint.
-    sel_raw = body.get("sel_cell_ids")
+    # Lasso selection — a JSON list of ints / numeric strings. ANDed with
+    # the filter expression after the frame is built. Empty / absent =
+    # no constraint. Naming matches /distance_to_set and /resolve_roots
+    # for cross-endpoint consistency.
+    sel_raw = body.get("cell_ids")
     sel_cell_ids: set[int] | None = None
-    if isinstance(sel_raw, list):
+    if sel_raw is not None:
+        if not isinstance(sel_raw, list):
+            raise ApiError(
+                422, "invalid_cell_ids",
+                "cell_ids must be a JSON list of integer-compatible values",
+            )
         try:
             sel_cell_ids = {int(c) for c in sel_raw if c is not None and c != ""}
         except (TypeError, ValueError) as exc:
             raise ApiError(
-                422, "invalid_sel_cell_ids",
-                f"sel_cell_ids must be a list of integer-compatible values: {exc}",
-            ) from exc
-    elif isinstance(sel_raw, str) and sel_raw:
-        try:
-            sel_cell_ids = {int(c) for c in sel_raw.split(",") if c}
-        except ValueError as exc:
-            raise ApiError(
-                422, "invalid_sel_cell_ids",
-                f"sel_cell_ids string must be a comma-separated integer list: {exc}",
+                422, "invalid_cell_ids",
+                f"cell_ids must be a list of integer-compatible values: {exc}",
             ) from exc
 
     # check_live_allowed + mat_version are only meaningful when we'll
@@ -740,28 +810,15 @@ def cells(ds: str, feature_table_id: str):
             422, "invalid_limit", f"limit must be an integer: {exc}"
         ) from exc
 
-    def _client_factory():
-        return request_client(
-            datastack_name=ds,
-            server_address=current_app.config["GLOBAL_SERVER_ADDRESS"],
-            auth_token=current_token(),
-            dev_bypass=is_dev_bypass(),
-            materialize_version=mat_version,
-        )
-
-    # Always pass client_factory — it's lazy and only invokes the CAVE
-    # client when something actually needs it. Two paths inside frame()
-    # use it: decoration joins (only when decoration_tables is non-
-    # empty) and nucleus position enrichment (only when mat_version is
-    # materialized). Cells endpoints without either still pay nothing.
-    ft_query = FeatureTableQuery(
-        datastack=ds,
-        mat_version=mat_version,
-        feature_table=ft,
+    client_factory = _make_client_factory(ds, mat_version)
+    frame = _load_universe_frame(
+        ds=ds,
         cfg=cfg,
-        client_factory=_client_factory,
+        ft=ft,
+        mat_version=mat_version,
+        decoration_tables=decoration_tables,
+        client_factory=client_factory,
     )
-    frame = ft_query.frame(decoration_tables=decoration_tables or None)
     total_count = int(len(frame))
 
     if cell_filters:
@@ -859,20 +916,189 @@ def cells(ds: str, feature_table_id: str):
     )
 
 
-@bp.route("/<ds>/feature_tables/<feature_table_id>/knn", methods=["POST"])
+@bp.route(
+    "/<ds>/feature_tables/<feature_table_id>/column/<path:column>/histogram",
+    methods=["GET"],
+)
 @auth_required
-def knn(ds: str, feature_table_id: str):
-    """k-nearest-neighbor query in feature space.
+def column_histogram(ds: str, feature_table_id: str, column: str):
+    """Tiny histogram summary of one column.
 
-    Keyed on **feature table**, not embedding — the kNN index is built
-    from the table's feature columns (or an explicit subset), so the
-    same index serves every embedding declared on that table. Switching
-    a UMAP for a t-SNE on the SPA doesn't refetch this.
+    Companion to ``/column``. Where ``/column`` ships the full
+    universe-aligned values (~750KB for a 94k-row column), this returns
+    a few-hundred-byte digest: bin counts + min/max for numeric, per-
+    value counts for categorical. Drives first-paint of the Selection
+    Builder's predicate widgets without forcing every user to download
+    the full column on column-add.
 
-    Body: ``{cell_id | root_id+mat_version, k?, feature_columns?}``.
-    ``feature_columns`` defaults to the table's manifest declaration;
-    when omitted the call may also pass through an embedding's
-    ``knn_features`` override at the SPA layer.
+    Cache shape: ``LayeredSwrCache(immutable=True)`` against GCS L2,
+    keyed on ``(cache_ds, ft_id, column, dec_tuple, mat_version,
+    n_bins)``. Immutable per the parquet URI + mat_version contract,
+    so the cache effectively never expires. Wire round-trip on warm
+    hit is dominated by the GCS read (~30ms).
+
+    Query params:
+    - ``bins`` — numeric bin count. Default 60. Ignored for categorical.
+    - ``dec`` — comma-separated decoration tables (same as ``/column``).
+    - ``mat_version`` — required for decoration / nucleus columns.
+    """
+    cfg = load_datastack_config(ds)
+    src = source_for(ds, cfg)
+    if src is None:
+        raise ApiError(
+            404,
+            "feature_explorer_disabled",
+            f"datastack {ds!r} does not enable the feature explorer",
+        )
+    try:
+        ft = src.resolve_feature_table(feature_table_id)
+    except KeyError as exc:
+        raise ApiError(404, "feature_table_not_found", str(exc)) from exc
+
+    mv_raw = request.args.get("mat_version")
+    mat_version: int | str | None
+    if mv_raw is None or mv_raw == "":
+        mat_version = None
+    elif mv_raw == "live":
+        mat_version = "live"
+    else:
+        try:
+            mat_version = int(mv_raw)
+        except ValueError as exc:
+            raise ApiError(
+                422, "invalid_mat_version",
+                f"mat_version must be an integer or 'live', got {mv_raw!r}",
+            ) from exc
+
+    decoration_tables: list[str] = []
+    dec_raw = request.args.get("dec") or ""
+    if dec_raw:
+        decoration_tables = [t.strip() for t in dec_raw.split(",") if t.strip()]
+    if "." in column:
+        table = column.split(".", 1)[0]
+        if table not in (ft.id, "nucleus") and table not in decoration_tables:
+            decoration_tables.append(table)
+    if decoration_tables and mat_version is None:
+        raise ApiError(
+            422,
+            "missing_mat_version",
+            "mat_version is required when the column lives in a "
+            "decoration table or synthetic nucleus space",
+        )
+    if decoration_tables:
+        try:
+            check_live_allowed(ds, mat_version)
+        except ValueError as exc:
+            raise ApiError(422, "live_mode_disallowed", str(exc)) from exc
+
+    n_bins_raw = request.args.get("bins", "60")
+    try:
+        n_bins = int(n_bins_raw)
+    except ValueError as exc:
+        raise ApiError(
+            422, "invalid_bins", f"bins must be an integer, got {n_bins_raw!r}"
+        ) from exc
+    if n_bins < 1 or n_bins > 500:
+        raise ApiError(
+            422, "invalid_bins", "bins must be in [1, 500]"
+        )
+
+    binning_raw = request.args.get("binning", "linear")
+    if binning_raw not in ("linear", "log"):
+        raise ApiError(
+            422,
+            "invalid_binning",
+            f"binning must be 'linear' or 'log', got {binning_raw!r}",
+        )
+
+    cache_ds = cfg.cache_alias or ds
+    dec_tuple = tuple(sorted(decoration_tables))
+    # Binning participates in the cache key so the linear and log
+    # variants of the same column cache as distinct entries — switching
+    # the toggle pays at most one cold-fetch per (column, mode), then
+    # the cache serves either instantly.
+    key = (cache_ds, ft.id, column, dec_tuple, mat_version, n_bins, binning_raw)
+
+    cache = current_app.extensions.get("dcv_column_histogram_cache")
+    if cache is not None:
+        t0 = time.perf_counter()
+        hit = cache.get(key)
+        cache_elapsed_ms = (time.perf_counter() - t0) * 1000.0
+        if hit is not None:
+            value, _ = hit
+            record_stage("column_histogram_l1_hit", cache_elapsed_ms)
+            return jsonify(value)
+
+    client_factory = _make_client_factory(ds, mat_version)
+    frame = _load_universe_frame(
+        ds=ds,
+        cfg=cfg,
+        ft=ft,
+        mat_version=mat_version,
+        decoration_tables=decoration_tables,
+        client_factory=client_factory,
+    )
+
+    if column not in frame.columns:
+        raise ApiError(
+            422,
+            "column_not_found",
+            f"column {column!r} not present in feature_table frame "
+            f"(have {list(frame.columns)[:20]}…)",
+        )
+
+    series = frame[column]
+    if pd.api.types.is_numeric_dtype(series):
+        h = compute_numeric_histogram(
+            series, n_bins=n_bins, binning=binning_raw  # type: ignore[arg-type]
+        )
+    else:
+        h = compute_categorical_histogram(series)
+
+    payload = histogram_to_json(h)
+    if cache is not None:
+        cache.set(key, payload)
+    return jsonify(payload)
+
+
+@bp.route(
+    "/<ds>/feature_tables/<feature_table_id>/distance_to_set", methods=["POST"]
+)
+@auth_required
+def distance_to_set(ds: str, feature_table_id: str):
+    """Distance from a seed cell-id set to every universe cell.
+
+    Backs the "grow my selection by similarity" workflow. One endpoint
+    serves every variant — single-seed is just a bag of one; discrete
+    top-K is a client-side ``argpartition`` slice on the returned
+    arrays. Three spaces:
+
+    - ``raw``         — Euclidean on z-scored features.
+    - ``pca``         — Euclidean on top-``k_pca`` PCA components.
+    - ``mahalanobis`` — Euclidean on whitened (all components, scaled by
+      1/singular_value) features. Equivalent to Mahalanobis distance on
+      the z-scored input; corrects for correlated feature dimensions.
+
+    Body shape::
+
+        {
+          "cell_ids":   [str|int, ...],
+          "space":      "raw" | "pca" | "mahalanobis",
+          "variance":   float (0..1, default 0.9; ignored unless pca).
+                        Fraction of total variance the top-K PCA
+                        components must explain; the server resolves
+                        K from the variance request and echoes it in
+                        the response. A user-facing "explain 90% of
+                        the variance" knob is meaningful regardless of
+                        the table's feature count, where "10 components"
+                        is not.
+          "reduction":  "centroid" | "nearest" | "mean",
+          "feature_columns": [str, ...]   (optional override)
+        }
+
+    Response is universe-aligned: ``cell_ids[i]`` matches ``distances[i]``
+    in feature-matrix row order, so the SPA joins by index when building
+    its in-memory distance map.
     """
     cfg = load_datastack_config(ds)
     src = source_for(ds, cfg)
@@ -889,55 +1115,197 @@ def knn(ds: str, feature_table_id: str):
         raise ApiError(404, "feature_table_not_found", str(exc)) from exc
 
     body = request.get_json(silent=True) or {}
-    cell_id = _resolve_query_cell_id(ds, cfg, body)
 
-    manifest = src.list()
-    requested_k = body.get("k", manifest.knn.default_k)
-    try:
-        requested_k = int(requested_k)
-    except (TypeError, ValueError) as exc:
-        raise ApiError(
-            422, "invalid_k", f"k must be an integer, got {requested_k!r}"
-        ) from exc
-    k = max(1, min(requested_k, manifest.knn.max_k))
-
-    feature_columns = body.get("feature_columns")
-    if feature_columns is not None and not isinstance(feature_columns, list):
+    raw_ids = body.get("cell_ids")
+    if not isinstance(raw_ids, list) or not raw_ids:
         raise ApiError(
             422,
-            "invalid_feature_columns",
-            "feature_columns must be a list of column names",
+            "missing_cell_ids",
+            "request body must include a non-empty `cell_ids` list",
+        )
+    # Hard cap on the seed set. The nearest/mean reductions materialize
+    # an O(chunk × S × D) intermediate per chunk — keeping S small keeps
+    # the constant factor predictable, and 20 covers the meaningful
+    # growth use cases (a hand-picked kernel, a tight lasso). Larger
+    # bags should be summarized (centroid, a few representative cells)
+    # before being used as seeds.
+    if len(raw_ids) > _MAX_SEED_CELL_IDS:
+        raise ApiError(
+            422,
+            "too_many_seeds",
+            f"distance_to_set accepts at most {_MAX_SEED_CELL_IDS} seed "
+            f"cell_ids; got {len(raw_ids)}. Narrow the selection (e.g. "
+            "lasso a tighter kernel) before computing.",
+        )
+    seed_cell_ids: list[int] = []
+    for sid in raw_ids:
+        try:
+            seed_cell_ids.append(int(sid))
+        except (TypeError, ValueError) as exc:
+            raise ApiError(
+                422,
+                "invalid_cell_id",
+                f"cell_ids must be ints or numeric strings; got {sid!r}",
+            ) from exc
+
+    space = body.get("space", "pca")
+    if space not in ("raw", "pca", "mahalanobis"):
+        raise ApiError(
+            422,
+            "invalid_space",
+            f"space must be one of raw | pca | mahalanobis; got {space!r}",
         )
 
+    reduction = body.get("reduction", "centroid")
+    if reduction not in ("centroid", "nearest", "mean"):
+        raise ApiError(
+            422,
+            "invalid_reduction",
+            f"reduction must be one of centroid | nearest | mean; "
+            f"got {reduction!r}",
+        )
+
+    limit_raw = body.get("limit", _DEFAULT_DISTANCE_LIMIT)
     try:
-        index = get_index(
+        limit = int(limit_raw)
+    except (TypeError, ValueError) as exc:
+        raise ApiError(
+            422, "invalid_limit", f"limit must be an integer, got {limit_raw!r}"
+        ) from exc
+    if limit < 1:
+        raise ApiError(422, "invalid_limit", "limit must be >= 1")
+    if limit > _MAX_DISTANCE_LIMIT:
+        raise ApiError(
+            422,
+            "invalid_limit",
+            f"limit may not exceed {_MAX_DISTANCE_LIMIT}; got {limit}",
+        )
+
+    variance_raw = body.get("variance", 0.9)
+    try:
+        variance = float(variance_raw)
+    except (TypeError, ValueError) as exc:
+        raise ApiError(
+            422,
+            "invalid_variance",
+            f"variance must be a number in (0, 1], got {variance_raw!r}",
+        ) from exc
+    if not (0.0 < variance <= 1.0):
+        raise ApiError(
+            422,
+            "invalid_variance",
+            f"variance must be in (0, 1], got {variance}",
+        )
+
+    feature_columns = body.get("feature_columns")
+    if feature_columns is not None:
+        if not isinstance(feature_columns, list) or not all(
+            isinstance(c, str) for c in feature_columns
+        ):
+            raise ApiError(
+                422,
+                "invalid_feature_columns",
+                "feature_columns must be a list of column names",
+            )
+        if len(feature_columns) < 2:
+            raise ApiError(
+                422,
+                "invalid_feature_columns",
+                "feature_columns must include at least 2 columns "
+                "(distance in 1D collapses to absolute difference and "
+                "PCA / Mahalanobis are undefined)",
+            )
+
+    manifest = src.list()
+    # Pydantic deserializes ``[lo, hi]`` from YAML as a list; normalize
+    # to a 2-tuple at the boundary so the matrix layer's type hint is
+    # honored and the digest formatter doesn't have to branch.
+    clip_setting = manifest.knn.clip_percentiles
+    clip_percentiles: tuple[float, float] | None = (
+        (float(clip_setting[0]), float(clip_setting[1]))
+        if clip_setting is not None
+        else None
+    )
+    # Scaling source-of-truth is the new ``scaling`` field. The legacy
+    # ``standardize: bool`` overrides only when an old manifest
+    # explicitly opts out of standardization (sets it to false) and
+    # hasn't set ``scaling``. Old manifests that left ``standardize``
+    # at its default land at ``zscore`` either way — no silent behavior
+    # change.
+    scaling = manifest.knn.scaling
+    if not manifest.knn.standardize and scaling == "zscore":
+        scaling = "raw"
+    try:
+        matrix = get_matrix(
             ds,
             ft,
             feature_columns=feature_columns,
-            standardize=manifest.knn.standardize,
+            scaling=scaling,
+            clip_percentiles=clip_percentiles,
             cache_ds=cfg.cache_alias or ds,
         )
     except ValueError as exc:
-        raise ApiError(500, "index_build_failed", str(exc)) from exc
+        raise ApiError(422, "matrix_build_failed", str(exc)) from exc
+
+    svd = None
+    resolved_k = None
+    variance_explained = None
+    if space != "raw":
+        # PCA + Mahalanobis both ride on the same cached SVD; one fit,
+        # two projections. Cache key is independent of variance/k so a
+        # slider drag on the SPA never refits.
+        svd = get_pca_svd(cfg.cache_alias or ds, ft, matrix)
+        if space == "pca":
+            # Resolve variance → K once per request. The SVD slice is
+            # cheap; the slider response stays interactive.
+            resolved_k, variance_explained = resolve_k_for_variance(svd, variance)
 
     try:
-        neighbors = index.query(cell_id, k)
-    except KeyError as exc:
-        raise ApiError(404, "cell_id_not_in_index", str(exc)) from exc
+        result = compute_distance_to_set(
+            matrix,
+            seed_cell_ids,
+            space=space,
+            reduction=reduction,
+            k_pca=resolved_k or 1,  # ignored when space != "pca"
+            svd=svd,
+        )
+    except ValueError as exc:
+        raise ApiError(422, "no_seeds_in_index", str(exc)) from exc
 
-    # ``source_ds`` per neighbor — phase 1 single-ds parquets have a
-    # uniform tag equal to the request's ``ds``. Phase 2 will need the
-    # kNN index to carry a per-row source_ds when multi-ds parquets are
-    # supported; for now the shape is in place so the SPA can decode it
-    # the same way for every manifest.
+    # Sort + (optionally) truncate before serializing. The default
+    # ``limit`` is large enough to ship the entire universe for every
+    # known dataset; the argpartition branch only runs when a caller
+    # explicitly requests a slice smaller than the universe. Either
+    # way the response arrives pre-sorted ascending.
+    n_universe = len(result.distances)
+    effective_limit = min(limit, n_universe)
+    with timer("distance_truncate_topk"):
+        # argpartition gets the indices of the K smallest in O(N); we then
+        # sort just those K so the response arrives pre-sorted ascending.
+        if effective_limit < n_universe:
+            unsorted_top = np.argpartition(
+                result.distances, effective_limit - 1
+            )[:effective_limit]
+            order = unsorted_top[np.argsort(result.distances[unsorted_top])]
+        else:
+            order = np.argsort(result.distances)
+        top_cell_ids = result.cell_ids[order]
+        top_distances = result.distances[order]
+
     return jsonify(
         {
-            "query_cell_id": str(cell_id),
-            "query_source_ds": ds,
-            "neighbors": [
-                {"cell_id": str(cid), "source_ds": ds, "distance": d}
-                for cid, d in neighbors
-            ],
+            "cell_ids": [str(cid) for cid in top_cell_ids.tolist()],
+            "distances": top_distances.tolist(),
+            "space": space,
+            "variance": variance if space == "pca" else None,
+            "k_pca": resolved_k,
+            "variance_explained": variance_explained,
+            "reduction": reduction,
+            "n_seed_in_index": result.n_seed_in_index,
+            "n_seed_missing": result.n_seed_missing,
+            "n_returned": int(effective_limit),
+            "n_universe": int(n_universe),
+            "feature_columns": list(matrix.feature_columns),
         }
     )
 
@@ -1336,76 +1704,6 @@ class _LazyClient:
 # -- internals ----------------------------------------------------------------
 
 
-def _resolve_query_cell_id(ds: str, cfg, body: dict[str, Any]) -> int:
-    """Translate the /knn body's ``cell_id`` or ``root_id`` into a cell_id."""
-    if "cell_id" in body:
-        try:
-            return int(body["cell_id"])
-        except (TypeError, ValueError) as exc:
-            raise ApiError(
-                422,
-                "invalid_cell_id",
-                f"cell_id must be an integer or numeric string, got {body['cell_id']!r}",
-            ) from exc
-
-    if "root_id" not in body:
-        raise ApiError(
-            422,
-            "missing_id",
-            "request body must include either `cell_id` or `root_id`+`mat_version`",
-        )
-
-    try:
-        root_id = int(body["root_id"])
-    except (TypeError, ValueError) as exc:
-        raise ApiError(
-            422,
-            "invalid_root_id",
-            f"root_id must be an integer or numeric string, got {body['root_id']!r}",
-        ) from exc
-
-    if "mat_version" not in body:
-        raise ApiError(
-            422,
-            "missing_mat_version",
-            "root_id input requires `mat_version` (int or \"live\") so the "
-            "reverse resolution knows which version to look up",
-        )
-    mat_version = body["mat_version"]
-
-    try:
-        check_live_allowed(ds, mat_version)
-    except ValueError as exc:
-        raise ApiError(422, "live_mode_disallowed", str(exc)) from exc
-
-    client = _cave_client(ds, mat_version)
-
-    try:
-        cell_id = reverse_resolve_root_id_to_cell_id(
-            client=client,
-            cfg=cfg,
-            mat_version=mat_version,
-            datastack=ds,
-            root_id=root_id,
-        )
-    except ValueError as exc:
-        raise ApiError(422, "lookup_unavailable", str(exc)) from exc
-    except Exception as exc:
-        raise ApiError(
-            502, "cave_upstream", f"{type(exc).__name__}: {exc}"
-        ) from exc
-
-    if cell_id is None:
-        raise ApiError(
-            404,
-            "root_id_unresolved",
-            f"root_id {root_id!r} could not be reverse-resolved to a "
-            f"cell_id at mat_version={mat_version!r} (no matching row in "
-            "root_id_lookup_main_table or its alt tables)",
-        )
-    return cell_id
-
-
 def _cave_client(ds: str, mat_version: int | str | None):
     """Build a CAVE client with the request's auth context."""
     try:
@@ -1477,6 +1775,5 @@ def _embedding_summary(emb: EmbeddingSpec) -> dict[str, Any]:
         "description": emb.description,
         "axes": emb.axes,
         "default_color_by": emb.default_color_by,
-        "knn_features": emb.knn_features,
         "depth_axis": emb.depth_axis,
     }

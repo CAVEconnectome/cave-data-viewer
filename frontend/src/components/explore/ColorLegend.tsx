@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import type { EmbeddingColorBlock } from "../../api/types";
+import { columnDisplayName } from "../tableColumns";
 import {
   type Colormap,
   colormapCss,
@@ -75,7 +76,7 @@ function CategoricalLegend({ color }: { color: EmbeddingColorBlock }) {
   const overflow = entries.length - shown.length;
   return (
     <div className="color-legend">
-      <div className="color-legend-title" title={color.column}>
+      <div className="color-legend-title" title={bareCol(color.column)}>
         {bareCol(color.column)}
       </div>
       {shown.map(([label, hex]) => (
@@ -149,7 +150,7 @@ function NumericLegend({
     : colormapCss(colormap);
   return (
     <div className="color-legend">
-      <div className="color-legend-title" title={color.column}>
+      <div className="color-legend-title" title={bareCol(color.column)}>
         {bareCol(color.column)}
       </div>
       <div className="color-legend-gradient-wrap">
@@ -184,7 +185,8 @@ function NumericLegend({
 
 function bareCol(col: string): string {
   const dot = col.indexOf(".");
-  return dot >= 0 ? col.slice(dot + 1) : col;
+  const stripped = dot >= 0 ? col.slice(dot + 1) : col;
+  return columnDisplayName(stripped);
 }
 
 function formatNum(n: number): string {

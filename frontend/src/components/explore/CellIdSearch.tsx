@@ -6,7 +6,6 @@ import {
   type FormEvent,
   type KeyboardEvent,
 } from "react";
-import { createPortal } from "react-dom";
 import { useFindCellsMutation } from "../../api/embeddings";
 import type { FindCellResult, FindCellStatus } from "../../api/types";
 
@@ -103,11 +102,12 @@ interface Props {
   onFitToSelection: () => void;
 }
 
-/** Cell-id search trigger + modal for the Feature Explorer.
+/** Cell-id search trigger + anchored popover for the Feature Explorer.
  *
  * The on-rail surface is a single compact button that says "Find
- * cells…"; clicking it opens a centered modal containing the actual
- * search UI. The modal hosts:
+ * cells…"; clicking it opens an anchored popover (no layout shift on
+ * the section header) containing the actual search UI. The popover
+ * hosts:
  *
  * - **Mode toggle** — explicit `by root_id` / `by cell_id` (no
  *   heuristic auto-detect; see the [[explicit-ui-modes-over-input-heuristics]]
@@ -125,17 +125,20 @@ interface Props {
  *   (translated, unaligned, unresolved, not-in-universe).
  *
  * Submit drops the resolved cell_ids onto the unified selection set
- * (replace by default; Shift unions). On the next animation frame the
- * scatter re-fits to the new highlight. The modal stays open after
- * submit so the user can read the status; it closes via the × button,
- * the backdrop, or Escape.
+ * (Select replaces; Add unions). On the next animation frame the
+ * scatter re-fits to the new highlight. The popover stays open after
+ * submit so the user can read the status; full success auto-closes
+ * after a short delay. Otherwise it dismisses via outside-click,
+ * Escape, or the × button.
  *
- * Why a modal rather than an inline rail panel: the search is an
- * occasional action, not a constantly-bound surface like the channel
- * picker or color legend. A persistent inline panel competes for rail
- * real estate with affordances the user touches on every interaction;
- * a button-triggered modal keeps the surface visible (button is
- * obvious) but only consumes space when actively used.
+ * Why an anchored popover rather than a modal or inline rail panel:
+ * the search is an occasional "summon, do, dismiss" action that
+ * doesn't warrant a backdrop, but a persistent inline panel would
+ * compete for rail real estate with affordances the user touches on
+ * every interaction. The popover is the lightest pattern that fits
+ * the multi-line textarea + mode toggle + status detail. Mirrors the
+ * SavedSetsMenu / Save selection idiom so every "summon" affordance
+ * in the explorer behaves identically.
  */
 export function CellIdSearch({
   ds,
@@ -153,6 +156,7 @@ export function CellIdSearch({
   const [summary, setSummary] = useState<Summary | null>(null);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
   const findCells = useFindCellsMutation();
 
   // Disable conditions surfaced as a single string so the title attr
@@ -267,15 +271,16 @@ export function CellIdSearch({
     }
   };
 
-  // Enter submits; Shift+Enter on the textarea historically inserts a
-  // newline, but for this form Shift submits in additive mode. Both
-  // are useful; we route based on whether the user wants paste-many
-  // newlines (rare — paste already handles them) vs additive submit.
-  // Disambiguate via the explicit Shift+click on the submit button as
-  // the "always additive" path; Enter alone always replaces.
+  // Keyboard mirrors the two action buttons:
+  //   - Enter         → Select (replace the bag)
+  //   - Shift+Enter   → Add (union into the bag)
+  // The textarea's default Shift+Enter (insert newline) is preempted
+  // here because in practice multi-line input arrives via paste, not
+  // typed newlines — the additive submit is the more useful binding.
   const onTextareaKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === "Enter" && !e.shiftKey) {
-      onSubmit(e as unknown as FormEvent, false);
+    if (e.key === "Enter") {
+      e.preventDefault();
+      onSubmit(e as unknown as FormEvent, e.shiftKey);
     }
   };
 
@@ -287,227 +292,221 @@ export function CellIdSearch({
         : 0;
   const showStatus = summary !== null || findCells.isPending || findCells.isError;
 
-  // Focus the textarea on open + Esc-to-close.
+  // Focus the textarea on open + outside-click / Esc-to-close.
   //
   // Auto-focus matters here because the typical session is "click the
   // trigger, paste a clipboard, press Enter" — three actions. Without
   // the autofocus the user has to click into the textarea between
-  // opening the modal and pasting, which is wasted motion.
+  // opening the popover and pasting, which is wasted motion.
   //
-  // Esc-to-close runs at the document level so it works whether or not
-  // the textarea has focus (e.g. user clicked into the status detail
-  // list and now wants to close).
+  // Outside-click + Esc dismissal mirror SavedSetsMenu's idiom so every
+  // "summon" affordance in the explorer behaves identically. Both
+  // listeners run at the document level so they work regardless of
+  // which inner element holds focus.
   useEffect(() => {
     if (!open) return;
-    // requestAnimationFrame so the portal has mounted by the time we
-    // try to focus — synchronous .focus() inside the same tick the
-    // modal opens often runs before the ref is attached.
     const id = requestAnimationFrame(() => {
       textareaRef.current?.focus();
       textareaRef.current?.select();
     });
+    const onMouseDown = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
     const onKey = (e: globalThis.KeyboardEvent) => {
       if (e.key === "Escape") setOpen(false);
     };
+    document.addEventListener("mousedown", onMouseDown);
     document.addEventListener("keydown", onKey);
     return () => {
       cancelAnimationFrame(id);
+      document.removeEventListener("mousedown", onMouseDown);
       document.removeEventListener("keydown", onKey);
     };
   }, [open]);
 
   return (
-    <>
+    <div ref={menuRef} className="cell-id-search-menu">
       <button
         type="button"
         className="cell-id-search-trigger"
-        onClick={() => setOpen(true)}
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
         title="Find cells by root_id or cell_id (one or many, pasted from Neuroglancer / a notebook)"
       >
         <span aria-hidden>⌕</span>
         <span>Find cells…</span>
       </button>
-      {open &&
-        createPortal(
-          <div
-            className="cell-id-search-modal-backdrop"
-            role="presentation"
-            onClick={() => setOpen(false)}
+      {open && (
+        <div
+          className="cell-id-search-popover"
+          role="dialog"
+          aria-label="Find cells"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <form
+            onSubmit={(e) => onSubmit(e, false)}
+            className="cell-id-search-form"
           >
             <div
-              className="cell-id-search-modal"
-              role="dialog"
-              aria-modal="true"
-              aria-label="Find cells"
-              onClick={(e) => e.stopPropagation()}
+              className="cell-id-search-mode"
+              role="radiogroup"
+              aria-label="Search by"
             >
-              <div className="cell-id-search-modal-header">
-                <h2 className="cell-id-search-modal-title">Find cells</h2>
-                <button
-                  type="button"
-                  className="cell-id-search-modal-close"
-                  onClick={() => setOpen(false)}
-                  title="Close (Esc)"
-                  aria-label="Close"
-                >
-                  ✕
-                </button>
-              </div>
-              <form
-                onSubmit={(e) => onSubmit(e, false)}
-                className="cell-id-search-form"
+              <button
+                type="button"
+                role="radio"
+                aria-checked={mode === "root_id"}
+                className={`cell-id-search-mode-btn${mode === "root_id" ? " active" : ""}`}
+                onClick={() => setMode("root_id")}
+                title="Resolve root_ids at the current materialization version"
               >
-                <div
-                  className="cell-id-search-mode"
-                  role="radiogroup"
-                  aria-label="Search by"
-                >
-                  <button
-                    type="button"
-                    role="radio"
-                    aria-checked={mode === "root_id"}
-                    className={`cell-id-search-mode-btn${mode === "root_id" ? " active" : ""}`}
-                    onClick={() => setMode("root_id")}
-                    title="Resolve root_ids at the current materialization version"
-                  >
-                    by root_id
-                  </button>
-                  <button
-                    type="button"
-                    role="radio"
-                    aria-checked={mode === "cell_id"}
-                    className={`cell-id-search-mode-btn${mode === "cell_id" ? " active" : ""}`}
-                    onClick={() => setMode("cell_id")}
-                    title="Match cell_ids directly against the loaded universe"
-                  >
-                    by cell_id
-                  </button>
+                by root_id
+              </button>
+              <button
+                type="button"
+                role="radio"
+                aria-checked={mode === "cell_id"}
+                className={`cell-id-search-mode-btn${mode === "cell_id" ? " active" : ""}`}
+                onClick={() => setMode("cell_id")}
+                title="Match cell_ids directly against the loaded universe"
+              >
+                by cell_id
+              </button>
+            </div>
+            <textarea
+              ref={textareaRef}
+              className="cell-id-search-input"
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              onKeyDown={onTextareaKeyDown}
+              placeholder={
+                mode === "root_id"
+                  ? "Paste root_ids — space, comma, or newline separated"
+                  : "Paste cell_ids — space, comma, or newline separated"
+              }
+              rows={4}
+              spellCheck={false}
+              autoComplete="off"
+            />
+            <div className="cell-id-search-actions">
+              {/* Two explicit actions mirroring the SelectionBuilder
+                  verbs: Select replaces the selection bag, Add unions
+                  into it. Keyboard maps to the same split — Enter
+                  triggers Select, Shift+Enter triggers Add (handled in
+                  the textarea onKeyDown). */}
+              <button
+                type="submit"
+                className="cell-id-search-submit primary"
+                disabled={!!disabledReason || findCells.isPending}
+                title={
+                  disabledReason ??
+                  "Replace the selection bag with the resolved cells (Enter)"
+                }
+              >
+                {findCells.isPending ? "…" : "Select"}
+              </button>
+              <button
+                type="button"
+                className="cell-id-search-submit"
+                disabled={!!disabledReason || findCells.isPending}
+                title={
+                  disabledReason ??
+                  "Add the resolved cells to the existing selection bag (Shift+Enter)"
+                }
+                onClick={(e) => {
+                  e.preventDefault();
+                  onSubmit(e as unknown as FormEvent, true);
+                }}
+              >
+                {findCells.isPending ? "…" : "Add"}
+              </button>
+            </div>
+          </form>
+          {parseError && (
+            <div className="cell-id-search-error" role="alert">
+              {parseError}
+            </div>
+          )}
+          {findCells.isError && (
+            <div className="cell-id-search-error" role="alert">
+              Lookup failed: {findCells.error?.message ?? "unknown error"}
+            </div>
+          )}
+          {showStatus && summary && (
+            <div className="cell-id-search-status">
+              {/* At-a-glance summary line. Full success auto-closes the
+                  popover (no count needed); partial outcomes surface
+                  counts in the detail-list summaries below. */}
+              {summary.mode === "root_id" && summary.alignedCount > 0 && (
+                <div className="cell-id-search-aligned-note">
+                  {summary.alignedCount} translated to current root via
+                  chunkedgraph at mv={String(matVersion)}
                 </div>
-                <textarea
-                  ref={textareaRef}
-                  className="cell-id-search-input"
-                  value={text}
-                  onChange={(e) => setText(e.target.value)}
-                  onKeyDown={onTextareaKeyDown}
-                  placeholder={
-                    mode === "root_id"
-                      ? "Paste root_ids — space, comma, or newline separated"
-                      : "Paste cell_ids — space, comma, or newline separated"
+              )}
+              {totalMisses > 0 && (
+                <div className="cell-id-search-misses-note">
+                  {summary.mode === "cell_id"
+                    ? `${summary.misses.length} not in universe`
+                    : [
+                        summary.byStatus.unaligned.length > 0
+                          ? `${summary.byStatus.unaligned.length} unaligned`
+                          : null,
+                        summary.byStatus.unresolved.length > 0
+                          ? `${summary.byStatus.unresolved.length} unresolved`
+                          : null,
+                      ]
+                        .filter(Boolean)
+                        .join(", ")}
+                </div>
+              )}
+              {summary.mode === "cell_id" && summary.misses.length > 0 && (
+                <CellIdMissList
+                  ids={summary.misses}
+                  label="Not in universe"
+                  expanded={!!expanded.miss}
+                  onToggle={() =>
+                    setExpanded((p) => ({ ...p, miss: !p.miss }))
                   }
-                  rows={3}
-                  spellCheck={false}
-                  autoComplete="off"
                 />
-                <div className="cell-id-search-actions">
-                  <button
-                    type="submit"
-                    className="cell-id-search-submit"
-                    disabled={!!disabledReason || findCells.isPending}
-                    title={
-                      disabledReason ??
-                      "Submit (Shift-click or Shift+Enter to add to current selection)"
+              )}
+              {summary.mode === "root_id" &&
+                summary.byStatus.unaligned.length > 0 && (
+                  <RootIdMissList
+                    results={summary.byStatus.unaligned}
+                    label="Unaligned (chunkedgraph couldn't walk lineage)"
+                    expanded={!!expanded.unaligned}
+                    onToggle={() =>
+                      setExpanded((p) => ({ ...p, unaligned: !p.unaligned }))
                     }
-                    onClick={(e) => {
-                      if (e.shiftKey) {
-                        e.preventDefault();
-                        onSubmit(e as unknown as FormEvent, true);
-                      }
-                    }}
-                  >
-                    {findCells.isPending ? "…" : "→"}
-                  </button>
-                </div>
-              </form>
-              {parseError && (
-                <div className="cell-id-search-error" role="alert">
-                  {parseError}
-                </div>
-              )}
-              {findCells.isError && (
-                <div className="cell-id-search-error" role="alert">
-                  Lookup failed: {findCells.error?.message ?? "unknown error"}
-                </div>
-              )}
-              {showStatus && summary && (
-                <div className="cell-id-search-status">
-                  {/* The at-a-glance summary line. Skip the redundant
-                      "Found N of M" count — full success auto-closes the
-                      modal (the user doesn't need the count when nothing
-                      went wrong), and partial outcomes already surface
-                      their counts in the detail-list summaries below.
-                      Render the aligned and misses notes only when they
-                      have something to say; the parent div hides
-                      naturally if neither applies. */}
-                  {summary.mode === "root_id" && summary.alignedCount > 0 && (
-                    <div className="cell-id-search-aligned-note">
-                      {summary.alignedCount} translated to current root via
-                      chunkedgraph at mv={String(matVersion)}
-                    </div>
-                  )}
-                  {totalMisses > 0 && (
-                    <div className="cell-id-search-misses-note">
-                      {summary.mode === "cell_id"
-                        ? `${summary.misses.length} not in universe`
-                        : [
-                            summary.byStatus.unaligned.length > 0
-                              ? `${summary.byStatus.unaligned.length} unaligned`
-                              : null,
-                            summary.byStatus.unresolved.length > 0
-                              ? `${summary.byStatus.unresolved.length} unresolved`
-                              : null,
-                          ]
-                            .filter(Boolean)
-                            .join(", ")}
-                    </div>
-                  )}
-                  {summary.mode === "cell_id" && summary.misses.length > 0 && (
-                    <CellIdMissList
-                      ids={summary.misses}
-                      label="Not in universe"
-                      expanded={!!expanded.miss}
-                      onToggle={() =>
-                        setExpanded((p) => ({ ...p, miss: !p.miss }))
-                      }
-                    />
-                  )}
-                  {summary.mode === "root_id" &&
-                    summary.byStatus.unaligned.length > 0 && (
-                      <RootIdMissList
-                        results={summary.byStatus.unaligned}
-                        label="Unaligned (chunkedgraph couldn't walk lineage)"
-                        expanded={!!expanded.unaligned}
-                        onToggle={() =>
-                          setExpanded((p) => ({ ...p, unaligned: !p.unaligned }))
-                        }
-                      />
-                    )}
-                  {summary.mode === "root_id" &&
-                    summary.byStatus.unresolved.length > 0 && (
-                      <RootIdMissList
-                        results={summary.byStatus.unresolved}
-                        label="Unresolved (no nucleus at this mat_version)"
-                        expanded={!!expanded.unresolved}
-                        onToggle={() =>
-                          setExpanded((p) => ({ ...p, unresolved: !p.unresolved }))
-                        }
-                      />
-                    )}
-                  {summary.mode === "root_id" && summary.alignedCount > 0 && (
-                    <RootIdAlignedList
-                      results={summary.byStatus.ok.filter((r) => r.aligned)}
-                      expanded={!!expanded.aligned}
-                      onToggle={() =>
-                        setExpanded((p) => ({ ...p, aligned: !p.aligned }))
-                      }
-                    />
-                  )}
-                </div>
+                  />
+                )}
+              {summary.mode === "root_id" &&
+                summary.byStatus.unresolved.length > 0 && (
+                  <RootIdMissList
+                    results={summary.byStatus.unresolved}
+                    label="Unresolved (no nucleus at this mat_version)"
+                    expanded={!!expanded.unresolved}
+                    onToggle={() =>
+                      setExpanded((p) => ({ ...p, unresolved: !p.unresolved }))
+                    }
+                  />
+                )}
+              {summary.mode === "root_id" && summary.alignedCount > 0 && (
+                <RootIdAlignedList
+                  results={summary.byStatus.ok.filter((r) => r.aligned)}
+                  expanded={!!expanded.aligned}
+                  onToggle={() =>
+                    setExpanded((p) => ({ ...p, aligned: !p.aligned }))
+                  }
+                />
               )}
             </div>
-          </div>,
-          document.body,
-        )}
-    </>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 

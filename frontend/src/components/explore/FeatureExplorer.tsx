@@ -42,7 +42,7 @@ function ClearPill({ label, active, onClear, variant }: ClearPillProps) {
         active ? "" : " disabled"
       }`}
       aria-disabled={!active}
-      title={active ? `Clear the active ${label}` : `No active ${label} to clear`}
+      title={active ? `Clear the active ${label} (Esc)` : `No active ${label} to clear`}
       onClick={(e) => {
         e.stopPropagation();
         if (!active) return;
@@ -95,7 +95,7 @@ function NglActionPill({
     ? "Switch to a materialized version to open in Neuroglancer"
     : count === 0
       ? hasOutOfScope
-        ? `Your selection has ${bagTotal!.toLocaleString()} cells but none are in scope — widen the Filter Scope to open them`
+        ? `Your selection has ${bagTotal!.toLocaleString()} cells but none are in scope — widen the Scope to open them`
         : `No ${label} cells to open`
       : willSample
         ? `Open a random sample of ${NGL_LINK_CAP} cells from the ${count.toLocaleString()} in-scope ${label}${
@@ -132,10 +132,16 @@ import { CellFilterMenu } from "../CellFilterMenu";
 import { PartnersTable } from "../PartnersTable";
 import { CellIdSearch } from "./CellIdSearch";
 import { ChannelPicker } from "./ChannelPicker";
+import { CollapsibleSection } from "./CollapsibleSection";
 import { DecorationPicker } from "./DecorationPicker";
 import { EmbeddingPicker } from "./EmbeddingPicker";
 import { FeatureTablePicker } from "./FeatureTablePicker";
+import {
+  GrowSelectionPanel,
+  type DistanceProbe,
+} from "./GrowSelectionPanel";
 import { SavedSetsMenu } from "./SavedSetsPanel";
+import { SelectionBuilderPanel } from "./SelectionBuilderPanel";
 import { SummaryPanel } from "./SummaryPanel";
 import {
   UniverseScatter,
@@ -223,6 +229,45 @@ export function FeatureExplorer() {
       return prev.filter((c) => !drop.has(c));
     });
   }, []);
+
+  // Selection-growth probe state. Local (not URL) — the universe-aligned
+  // distance arrays for ~94k cells overflow the URL-as-request-line limit
+  // and are inherently transient anyway. The probe's *settings* live in
+  // `?growth_*` URL params via GrowSelectionPanel.
+  const [distanceProbe, setDistanceProbe] = useState<DistanceProbe | null>(
+    null,
+  );
+  // Probe is sticky — it survives bag mutations (deselect, lasso
+  // replace, Esc clear). The seed list captured on the probe is the
+  // user's frozen reference; "Reset to seeds" in the panel restores
+  // the bag back to it. The probe goes away only on explicit "Clear
+  // probe" or when a new Compute lands. (Earlier versions auto-cleared
+  // the probe whenever a seed left the bag; that made the chart, the
+  // synthetic __distance channel, and the threshold actions vanish the
+  // moment the user lassoed onto a sub-population to inspect it —
+  // which is the most useful moment to keep them.)
+
+  // Esc clears the selection bag. Window-level so the user doesn't
+  // have to chase a focus target on the canvas, but skipped whenever
+  // a typing surface (input/textarea/contenteditable) is focused so
+  // it doesn't fight with form-cancel behavior. No-op when the bag is
+  // already empty so we don't suppress an Esc the user meant for a
+  // popover.
+  useEffect(() => {
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key !== "Escape") return;
+      if (selectionBag.length === 0) return;
+      const el = document.activeElement as HTMLElement | null;
+      if (el && (el.isContentEditable
+        || el.tagName === "INPUT"
+        || el.tagName === "TEXTAREA"
+        || el.tagName === "SELECT")) return;
+      setSelectionBag([]);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selectionBag.length]);
+
   // Seaborn-style channel bindings. Each is the dotted column name
   // (parquet columns are prefixed with the feature_table id; decoration
   // columns are `<dec_table>.<col>`) or null to fall back to the
@@ -313,12 +358,13 @@ export function FeatureExplorer() {
   // catalog defaults kick in) so the panel just renders the empty
   // state during that brief window.
   const namedSelections = useNamedSelections(ds, ft);
-  // Inline "Save selection" affordance: the drawer header pill opens
-  // an input pre-filled with the auto-suggested name. Local state
-  // holds the draft + open flag so the rename input doesn't fight
-  // with the pill's click toggle.
+  // "Save selection" affordance: the drawer header pill opens an
+  // anchored popover containing the name input. Local state holds the
+  // draft + open flag so the input doesn't fight with the pill's
+  // click toggle.
   const [savePromptOpen, setSavePromptOpen] = useState(false);
   const [saveDraftName, setSaveDraftName] = useState("");
+  const saveMenuRef = useRef<HTMLSpanElement>(null);
   const openSavePrompt = () => {
     setSaveDraftName(namedSelections.suggestName());
     setSavePromptOpen(true);
@@ -334,11 +380,36 @@ export function FeatureExplorer() {
     namedSelections.save(saveDraftName, selectionBag);
     setSavePromptOpen(false);
   };
+  // Outside-click + Escape dismissal — same idiom as SavedSetsMenu so
+  // both sibling pills behave identically.
+  useEffect(() => {
+    if (!savePromptOpen) return;
+    const onMouseDown = (e: MouseEvent) => {
+      if (
+        saveMenuRef.current &&
+        !saveMenuRef.current.contains(e.target as Node)
+      ) {
+        setSavePromptOpen(false);
+      }
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setSavePromptOpen(false);
+    };
+    document.addEventListener("mousedown", onMouseDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onMouseDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [savePromptOpen]);
 
   // Catalog — drives both pickers + tells us if the explorer is even
   // configured for this datastack.
   const catalog = useEmbeddingList(ds);
   const featureTables = catalog.data?.feature_tables ?? [];
+  const currentFt = featureTables.find((t) => t.id === ft) ?? null;
+  const currentEmbeddings = currentFt?.embeddings ?? [];
+  const currentEmb = currentEmbeddings.find((e) => e.id === emb) ?? null;
 
   // Default the picks to the first available feature_table + its first
   // embedding when the URL is silent. Replaces the URL so the back
@@ -362,6 +433,18 @@ export function FeatureExplorer() {
     }
   }, [catalog.data, featureTables, ft, emb, setUrl]);
 
+  // Resolve the channel bindings that actually go to /scatter. The
+  // synthetic ``__distance`` channel is computed client-side from the
+  // active distance probe, so it never reaches the server — strip it
+  // and let UniverseScatter inject its own color/size block. No other
+  // resolution happens here: a missing color binding means "no color"
+  // (every dot in the base hue), not "fall back to some manifest
+  // default."
+  const effectiveColorBinding =
+    colorBinding === "__distance" ? null : colorBinding;
+  const effectiveSizeBinding =
+    sizeBinding === "__distance" ? null : sizeBinding;
+
   // Scatter response — fetched by UniverseScatter too, but TanStack
   // Query dedupes by queryKey so there's only one network call. We
   // read it here to feed the SummaryPanel's universe counts + the
@@ -375,18 +458,40 @@ export function FeatureExplorer() {
           embeddingId: emb,
           x: xBinding,
           y: yBinding,
-          colorBy: colorBinding,
-          sizeBy: sizeBinding,
+          colorBy: effectiveColorBinding,
+          sizeBy: effectiveSizeBinding,
           decorationTables,
           matVersion,
         }
       : null,
   );
 
+  // Data extent of all distances in the active probe — used to feed
+  // the color/size range slider when the user binds the synthetic
+  // ``__distance`` channel. Distinct from the fetched-column bound
+  // below because the fetched response has no block for ``__distance``
+  // (the binding is stripped before /scatter is called).
+  const distanceBound = useMemo(() => {
+    if (!distanceProbe) return null;
+    let lo = Number.POSITIVE_INFINITY;
+    let hi = Number.NEGATIVE_INFINITY;
+    for (const v of distanceProbe.byCellId.values()) {
+      if (typeof v !== "number" || !Number.isFinite(v)) continue;
+      if (v < lo) lo = v;
+      if (v > hi) hi = v;
+    }
+    if (!Number.isFinite(lo)) return null;
+    return { lo, hi };
+  }, [distanceProbe]);
+
   // Color slider bounds: data extent of the bound numeric column.
   // Recomputed on each response so the slider always reflects the
   // current column's range, not a stale one from a previous binding.
+  // The ``__distance`` branch uses the synthetic probe-derived bound
+  // so the same range/colormap affordances appear for it as for any
+  // other numeric column.
   const colorBound = useMemo(() => {
+    if (colorBinding === "__distance") return distanceBound;
     const c = scatter.data?.color;
     if (!c || c.kind !== "numeric") return null;
     let lo = Number.POSITIVE_INFINITY;
@@ -398,11 +503,13 @@ export function FeatureExplorer() {
     }
     if (!Number.isFinite(lo)) return null;
     return { lo, hi };
-  }, [scatter.data?.color]);
+  }, [colorBinding, distanceBound, scatter.data?.color]);
   // Size slider bounds: data extent of the bound size column. Mirrors
   // colorBound — used to seed the data-range slider and to provide
-  // the slider's full-range endpoints.
+  // the slider's full-range endpoints. The ``__distance`` branch uses
+  // the synthetic probe-derived bound (same data as the color path).
   const sizeBound = useMemo(() => {
+    if (sizeBinding === "__distance") return distanceBound;
     const s = scatter.data?.size;
     if (!s) return null;
     let lo = Number.POSITIVE_INFINITY;
@@ -414,7 +521,7 @@ export function FeatureExplorer() {
     }
     if (!Number.isFinite(lo)) return null;
     return { lo, hi };
-  }, [scatter.data?.size]);
+  }, [sizeBinding, distanceBound, scatter.data?.size]);
 
   // Universe Set for the Cell ID Search's `cell_id` mode. The scatter
   // already loaded the cell_id array; wrap it in a Set so membership
@@ -432,7 +539,7 @@ export function FeatureExplorer() {
   //   - `cells` (predicate): ?cells= URL param edited via the
   //     CellFilterPanel inside the Filter Scope popover.
   //   - `directScopeBag`: in-memory snapshot from "Filter to selection."
-  // The backend ANDs both server-side via `sel_cell_ids` so we don't
+  // The backend ANDs both server-side via `cell_ids` so we don't
   // need a separate code path for the snapshot.
   // matched_count reflects "everything in the active scope."
   const cellList = useCellList(
@@ -443,7 +550,7 @@ export function FeatureExplorer() {
           matVersion,
           decorationTables,
           cells,
-          selCellIds: directScopeBag.length > 0 ? directScopeBag : null,
+          cellIds: directScopeBag.length > 0 ? directScopeBag : null,
         }
       : null,
   );
@@ -552,7 +659,10 @@ export function FeatureExplorer() {
   // Enrich cellList rows with the resolved root_id so PartnersTable's
   // existing rendering machinery picks it up like any other column.
   // The augmented column_groups carries a "current root" group so the
-  // user can see the resolution alongside cell_id.
+  // user can see the resolution alongside cell_id. When a selection-
+  // growth probe is active, every row also gets a `__distance` field
+  // pulling from the probe's per-cell-id map so the table is sortable
+  // / filterable by distance immediately.
   const enrichedCells = useMemo(() => {
     if (!cellList.data) return null;
     // PartnerRecord.root_id is typed as string (non-null) for the
@@ -562,17 +672,46 @@ export function FeatureExplorer() {
     // CopyableId path which handles null; nothing else in the
     // explorer reads this field as a non-null string.
     const rows = cellList.data.rows.map((row) => {
-      const cid = String(row.cell_id);
-      return {
+      // row.cell_id can be null on partner-table rows that didn't join into
+      // the feature table. Skip enrichment so we never key the lookup map
+      // on the literal string "null" (multiple null-cell_id rows would
+      // collide on the same key and look spuriously enriched).
+      const cid = row.cell_id == null ? null : String(row.cell_id);
+      const enriched: Record<string, unknown> = {
         ...row,
-        root_id: rootByCellId.get(cid) ?? null,
+        root_id: cid == null ? null : rootByCellId.get(cid) ?? null,
       };
+      if (distanceProbe && cid != null) {
+        const d = distanceProbe.byCellId.get(cid);
+        // Cells outside the top-K returned by /distance_to_set (or
+        // null-dropped on matrix build) have no distance value. Surface
+        // as `undefined` (not `null`) so TanStack's column-level
+        // `sortUndefined: "last"` sends them to the end regardless of
+        // sort direction. With `null`, TanStack's "basic" sort treats
+        // them as < every number ("null > x" is false for any x), so
+        // ascending-by-distance puts every distance-less row at the
+        // top — burying the actually-closest cells.
+        enriched.__distance = d == null ? undefined : d;
+      }
+      return enriched;
     }) as unknown as PartnerRecord[];
-    const groups = cellList.data.column_groups.map((g) =>
+    let groups = cellList.data.column_groups.map((g) =>
       g.name === "id" ? { ...g, columns: [...g.columns, "root_id"] } : g,
     );
+    if (distanceProbe) {
+      // Prepend a synthetic group so the distance column reads as
+      // explicitly growth-driven, not part of any other namespace.
+      groups = [
+        {
+          name: "growth",
+          kind: "synthetic" as const,
+          columns: ["__distance"],
+        },
+        ...groups,
+      ];
+    }
     return { rows, column_groups: groups };
-  }, [cellList.data, rootByCellId]);
+  }, [cellList.data, rootByCellId, distanceProbe]);
 
   if (!ds) {
     return (
@@ -618,46 +757,106 @@ export function FeatureExplorer() {
     );
   }
 
-  const currentFt = featureTables.find((t) => t.id === ft) ?? null;
-  const currentEmbeddings = currentFt?.embeddings ?? [];
-  const currentEmb = currentEmbeddings.find((e) => e.id === emb) ?? null;
-
   return (
     <div
       className="explore"
       style={{ gridTemplateColumns: `${railWidth}px 6px 1fr` }}
     >
       <aside className="explore-rail">
-        <FeatureTablePicker
-          featureTables={featureTables}
-          value={ft}
-          onChange={(next) => {
-            // Switching feature tables clears the embedding pick — the
-            // next table has a different list. The effect above will
-            // re-default emb on the following tick.
-            setUrl({ ft: next, emb: null, sel_universe: null });
-          }}
-        />
-        <EmbeddingPicker
-          embeddings={currentEmbeddings}
-          value={emb}
-          onChange={(next) =>
-            setUrl({ emb: next, sel_universe: null })
+        <CollapsibleSection
+          title="Configuration"
+          enabled
+          defaultOpen
+          badge={ds ?? undefined}
+          summary={
+            <>
+              <code>{currentFt?.title ?? ft ?? "(no feature table)"}</code>
+              {" · "}
+              <code>{currentEmb?.title ?? emb ?? "(no embedding)"}</code>
+              {decorationTables.length > 0 && (
+                <>
+                  {" · "}
+                  {decorationTables.length} decoration
+                  {decorationTables.length === 1 ? "" : "s"}
+                </>
+              )}
+            </>
           }
-        />
-        {matVersion !== "live" && (
-          <DecorationPicker
-            ds={ds}
-            matVersion={matVersion}
-            attached={decorationTables}
+        >
+          <FeatureTablePicker
+            featureTables={featureTables}
+            value={ft}
+            onChange={(next) => {
+              // Switching feature tables clears the embedding pick — the
+              // next table has a different list. The effect above will
+              // re-default emb on the following tick.
+              setUrl({ ft: next, emb: null, sel_universe: null });
+            }}
+          />
+          <EmbeddingPicker
+            embeddings={currentEmbeddings}
+            value={emb}
             onChange={(next) =>
-              setUrl({ dec: next.length > 0 ? next.join(",") : null })
+              setUrl({ emb: next, sel_universe: null })
             }
           />
-        )}
+          {matVersion !== "live" && (
+            <DecorationPicker
+              ds={ds}
+              matVersion={matVersion}
+              attached={decorationTables}
+              onChange={(next) =>
+                setUrl({ dec: next.length > 0 ? next.join(",") : null })
+              }
+            />
+          )}
+        </CollapsibleSection>
+        <CollapsibleSection
+          title="Channels"
+          enabled={!!currentFt}
+          disabledHint="Pick a feature table first"
+          defaultOpen
+          summary={(() => {
+            // Effective bindings: x/y fall back to the embedding's
+            // axes when the URL hasn't overridden them; color/size are
+            // pure overrides. `__distance` is a synthetic channel auto-
+            // bound when the distance probe is active — it's a Grow-
+            // selection side-effect rather than a user-chosen channel,
+            // so don't surface it in the summary (matches the strip
+            // in effectiveColorBinding).
+            const effectiveX = xBinding ?? currentEmb?.axes?.[0] ?? null;
+            const effectiveY = yBinding ?? currentEmb?.axes?.[1] ?? null;
+            const summaryColor =
+              colorBinding && colorBinding !== "__distance"
+                ? colorBinding
+                : null;
+            const summarySize =
+              sizeBinding && sizeBinding !== "__distance" ? sizeBinding : null;
+            const parts: Array<[string, string]> = [];
+            if (effectiveX) parts.push(["x", effectiveX]);
+            if (effectiveY) parts.push(["y", effectiveY]);
+            if (summaryColor) parts.push(["color", summaryColor]);
+            if (summarySize) parts.push(["size", summarySize]);
+            if (parts.length === 0) {
+              return <span style={{ fontStyle: "italic" }}>none</span>;
+            }
+            return (
+              <>
+                {parts.map(([label, value]) => (
+                  <div key={label}>
+                    <code>
+                      {label}: {value}
+                    </code>
+                  </div>
+                ))}
+              </>
+            );
+          })()}
+        >
         <ChannelPicker
           featureTable={currentFt}
           cellsColumnGroups={cellList.data?.column_groups}
+          hasDistanceProbe={distanceProbe != null}
           x={xBinding}
           y={yBinding}
           colorBy={colorBinding}
@@ -670,12 +869,16 @@ export function FeatureExplorer() {
           colorBound={colorBound}
           colorMin={colorMin}
           colorMax={colorMax}
-          colorIsNumeric={scatter.data?.color?.kind === "numeric"}
+          colorIsNumeric={
+            colorBinding === "__distance"
+              ? distanceProbe != null
+              : scatter.data?.color?.kind === "numeric"
+          }
           colormapId={colormapId}
           colorCenter={colorCenter}
           defaultXLabel={currentEmb?.axes?.[0]}
           defaultYLabel={currentEmb?.axes?.[1]}
-          defaultColorLabel={currentEmb?.default_color_by ?? null}
+          defaultColorLabel={null}
           onChange={(next) =>
             setUrl({
               ...(next.x !== undefined ? { x: next.x } : {}),
@@ -710,16 +913,90 @@ export function FeatureExplorer() {
             })
           }
         />
-        <SummaryPanel
-          scatter={scatter.data}
-          inScopeCellIds={inScopeCellIds}
-          selectedCellIds={effectiveSelection}
-          ds={ds}
-          featureTable={currentFt}
-          cellsColumnGroups={cellList.data?.column_groups}
-          matVersion={matVersion}
-          decorationTables={decorationTables}
-        />
+        </CollapsibleSection>
+        <CollapsibleSection
+          title="Summary"
+          enabled={!!scatter.data}
+          disabledHint="Waiting for scatter data to load"
+          badge={
+            scatter.data
+              ? `${scatter.data.n_cells.toLocaleString()} cells`
+              : undefined
+          }
+          defaultOpen
+        >
+          <SummaryPanel
+            scatter={scatter.data}
+            inScopeCellIds={inScopeCellIds}
+            selectedCellIds={effectiveSelection}
+            ds={ds}
+            featureTable={currentFt}
+            cellsColumnGroups={cellList.data?.column_groups}
+            matVersion={matVersion}
+            decorationTables={decorationTables}
+          />
+        </CollapsibleSection>
+        {ds && ft && (
+          <CollapsibleSection
+            title="Build selection"
+            enabled
+            headerAction={
+              // Find cells lives in this header because it's
+              // structurally another way to build a selection — paste
+              // ids in, get cells resolved into the bag. Same destination
+              // as the predicate builder below, different input path.
+              <CellIdSearch
+                ds={ds}
+                featureTableId={ft}
+                matVersion={matVersion}
+                universeCellIds={universeCellIds}
+                onReplaceSelection={replaceSelection}
+                onUnionIntoSelection={unionIntoSelection}
+                onFitToSelection={fitToSelection}
+              />
+            }
+          >
+            <SelectionBuilderPanel
+              ds={ds}
+              featureTableId={ft}
+              featureTable={currentFt}
+              cellsColumnGroups={cellList.data?.column_groups}
+              matVersion={matVersion}
+              decorationTables={decorationTables}
+              onReplaceSelection={replaceSelection}
+              onUnionIntoSelection={unionIntoSelection}
+              onApplyFilterScope={(s) => setCells(s.length > 0 ? s : null)}
+            />
+          </CollapsibleSection>
+        )}
+        {ds && ft && (
+          <CollapsibleSection
+            title="Grow selection"
+            // Enabled when there's an active bag or a sticky probe.
+            // Only Compute needs a populated bag; inspecting the
+            // result of a prior round works either way.
+            enabled={selectionBag.length > 0 || distanceProbe != null}
+            disabledHint="Select cells first (lasso, row checkboxes, or Cell ID Search)"
+            badge={
+              selectionBag.length > 0
+                ? `${selectionBag.length.toLocaleString()} seed${
+                    selectionBag.length === 1 ? "" : "s"
+                  }`
+                : undefined
+            }
+          >
+            <GrowSelectionPanel
+              ds={ds}
+              featureTableId={ft}
+              featureTable={currentFt}
+              selectionBag={selectionBag}
+              distanceProbe={distanceProbe}
+              onDistanceProbe={setDistanceProbe}
+              onUnionIntoSelection={unionIntoSelection}
+              onReplaceSelection={replaceSelection}
+            />
+          </CollapsibleSection>
+        )}
       </aside>
       {/* Vertical drag handle between rail and scatter. Hover state in
           CSS; the active class comes from the hook's isDragging flag
@@ -742,8 +1019,18 @@ export function FeatureExplorer() {
             embeddingId={emb}
             x={xBinding}
             y={yBinding}
-            colorBy={colorBinding}
-            sizeBy={sizeBinding}
+            colorBy={effectiveColorBinding}
+            sizeBy={effectiveSizeBinding}
+            distanceColorMap={
+              colorBinding === "__distance" && distanceProbe
+                ? distanceProbe.byCellId
+                : null
+            }
+            distanceSizeMap={
+              sizeBinding === "__distance" && distanceProbe
+                ? distanceProbe.byCellId
+                : null
+            }
             sizeMinPx={sizeMinPx}
             sizeMaxPx={sizeMaxPx}
             sizeDataMin={sizeDataMin}
@@ -757,20 +1044,29 @@ export function FeatureExplorer() {
             inScopeCellIds={inScopeCellIds}
             selectedCellIds={effectiveSelection}
             scopeMode={scopeMode}
-            onLassoSelect={(polygonIds) => {
-              // Lasso writes into the selection bag. The scatter's
-              // hit-test already excludes out-of-scope cells, so the
-              // incoming polygonIds are guaranteed in-scope. Replace
-              // only the in-scope portion of the bag — out-of-scope
-              // selections (e.g. a Cell ID Search that landed outside
-              // the active scope) are preserved across the lasso.
-              setSelectionBag((prev) => {
-                if (!inScopeCellIds) return polygonIds;
-                const preserved = prev.filter(
-                  (id) => !inScopeCellIds.has(id),
-                );
-                return [...preserved, ...polygonIds];
-              });
+            onLassoSelect={(polygonIds, mode) => {
+              // Modifier semantics, Photoshop/Figma/Finder-style:
+              //   replace (no modifier) — drop the in-scope portion of
+              //     the bag and replace it with the lasso (out-of-scope
+              //     members from e.g. Cell ID Search are preserved).
+              //   add (Shift)          — union the lasso into the bag.
+              //   subtract (Alt/Option) — remove the lassoed cells.
+              // polygonIds are guaranteed in-scope (hit-test filters
+              // out-of-scope), so add/subtract can ignore the in-scope
+              // partition.
+              if (mode === "add") {
+                unionIntoSelection(polygonIds);
+              } else if (mode === "subtract") {
+                subtractFromSelection(polygonIds);
+              } else {
+                setSelectionBag((prev) => {
+                  if (!inScopeCellIds) return polygonIds;
+                  const preserved = prev.filter(
+                    (id) => !inScopeCellIds.has(id),
+                  );
+                  return [...preserved, ...polygonIds];
+                });
+              }
             }}
           />
         </div>
@@ -920,9 +1216,12 @@ export function FeatureExplorer() {
                 onClear={() => setSelectionBag([])}
                 variant="rowsel"
               />
-              {/* Save the current selection as a named cell set. */}
+              {/* Save the current selection as a named cell set. The
+                  prompt renders as an anchored popover (no layout shift
+                  on the sibling pills); mirrors SavedSetsMenu's idiom. */}
               <span
-                className="explore-pill-wrap"
+                ref={saveMenuRef}
+                className="save-selection-menu"
                 onClick={(e) => e.stopPropagation()}
                 role="presentation"
               >
@@ -932,6 +1231,7 @@ export function FeatureExplorer() {
                     selectionBag.length === 0 ? " disabled" : ""
                   }`}
                   aria-disabled={selectionBag.length === 0}
+                  aria-expanded={savePromptOpen}
                   title={
                     selectionBag.length === 0
                       ? "Make a selection first"
@@ -949,7 +1249,7 @@ export function FeatureExplorer() {
                   ★ Save<span className="explore-pill-suffix"> selection</span>
                 </span>
                 {savePromptOpen && selectionBag.length > 0 && (
-                  <span className="explore-save-prompt">
+                  <div className="save-selection-popover cell-filter-menu-popover-up">
                     <input
                       type="text"
                       className="explore-save-prompt-input"
@@ -977,7 +1277,7 @@ export function FeatureExplorer() {
                     >
                       ×
                     </button>
-                  </span>
+                  </div>
                 )}
               </span>
               {/* Saved sets popover — sibling to Save selection. */}
@@ -1008,26 +1308,6 @@ export function FeatureExplorer() {
                 </div>
               )}
               <PartnersTable
-                extraActions={
-                  // Find Cells lives in the table toolbar because it's
-                  // a table-scoped action (writes resolved cells into
-                  // the selection bag, which is what the table reads
-                  // as its row-checked state). Limit-visible / reset-
-                  // visible used to live here; Filter Scope's
-                  // "Filter to selection" subsumed them — that's a
-                  // scope-level narrowing (also affects scatter,
-                  // summary panels, NGL pills) rather than a
-                  // table-only one, so it wins on every dimension.
-                  <CellIdSearch
-                    ds={ds}
-                    featureTableId={ft}
-                    matVersion={matVersion}
-                    universeCellIds={universeCellIds}
-                    onReplaceSelection={replaceSelection}
-                    onUnionIntoSelection={unionIntoSelection}
-                    onFitToSelection={fitToSelection}
-                  />
-                }
                 ds={ds}
                 rootId={ft}
                 matVersion={matVersion}

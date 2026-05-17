@@ -69,6 +69,23 @@ export function displayName(
   return bare;
 }
 
+/** Renames for synthetic column ids that should never reach the UI in
+ *  their raw form. The id stays unchanged in URL state and the API
+ *  contract — only the rendered label is rewritten. Today this covers
+ *  `__distance` (produced by Grow-Selection), but the table is easy
+ *  to grow as new synthetics are added. Falls through to
+ *  {@link displayName} for everything else. */
+const SYNTHETIC_COLUMN_LABELS: Record<string, string> = {
+  __distance: "distance to selection",
+};
+export function columnDisplayName(
+  col: string,
+  providerOverrides?: Record<string, string>,
+): string {
+  if (col in SYNTHETIC_COLUMN_LABELS) return SYNTHETIC_COLUMN_LABELS[col];
+  return displayName(col, providerOverrides);
+}
+
 export function formatCell(v: unknown): string {
   if (v === null || v === undefined) return "";
   if (typeof v === "number") return Number.isInteger(v) ? String(v) : v.toFixed(2);

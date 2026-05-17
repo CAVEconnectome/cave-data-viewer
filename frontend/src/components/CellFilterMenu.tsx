@@ -118,10 +118,10 @@ export function CellFilterMenu({
 
   const triggerTitle =
     scopeSource === "snapshot"
-      ? `Filter Scope — ${directScopeCount.toLocaleString()} cells from selection snapshot`
+      ? `Scope — ${directScopeCount.toLocaleString()} cells from selection snapshot`
       : scopeSource === "predicate"
-        ? `Filter Scope — ${predicateCount} active predicate${predicateCount === 1 ? "" : "s"}`
-        : "Filter Scope — define which cells are active";
+        ? `Scope — ${predicateCount} active predicate${predicateCount === 1 ? "" : "s"}`
+        : "Scope — which cells are active (build with the Selection Builder)";
 
   // Close on outside click + Escape. Same pattern as the colormap picker
   // so behavior is consistent across the app's popovers.
@@ -171,7 +171,7 @@ export function CellFilterMenu({
         aria-expanded={open}
         title={triggerTitle}
       >
-        ⏚ Filter<span className="explore-pill-suffix"> Scope</span>{triggerBadge}
+        ⏚ Scope{triggerBadge}
       </button>
       {open && (
         <div
@@ -242,7 +242,7 @@ function ScopeHeader({
         : "No scope — full universe";
   return (
     <div className="cell-filter-menu-header">
-      <div className="cell-filter-menu-header-title">Filter Scope</div>
+      <div className="cell-filter-menu-header-title">Scope</div>
       <div className="cell-filter-menu-header-source">{sourceLabel}</div>
       {onScopeModeChange && (
         <div className="cell-filter-menu-mode-toggle" role="group" aria-label="Out-of-scope cells">

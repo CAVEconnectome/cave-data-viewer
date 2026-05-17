@@ -143,7 +143,11 @@ export interface ConnectivitySummary {
  */
 export interface ColumnGroup {
   name: string;
-  kind: "intrinsic" | "synapse" | "soma" | "table";
+  /** ``synthetic`` is client-synthesized (e.g. the Feature Explorer's
+   *  ``__distance`` column injected after a selection-growth probe);
+   *  the backend never emits it. The other kinds come from the
+   *  connectivity / cells endpoints. */
+  kind: "intrinsic" | "synapse" | "soma" | "table" | "synthetic";
   columns: string[];
 }
 
@@ -367,9 +371,6 @@ export interface EmbeddingListItem {
   description: string | null;
   axes: [string, string];
   default_color_by: string | null;
-  /** Optional override of the table's feature_columns for kNN over this
-   *  embedding. ``null`` means "inherit from the parent table". */
-  knn_features: string[] | null;
   /** Which axis (if any) is depth-shaped; lets the rendering pipeline
    *  flip the axis + overlay layer markers. */
   depth_axis: "x" | "y" | null;
@@ -409,10 +410,17 @@ export interface FeatureTableListItem {
   embeddings: EmbeddingListItem[];
 }
 
-export interface EmbeddingKnnDefaults {
-  default_k: number;
-  max_k: number;
+/** Manifest-level similarity defaults. ``scaling`` selects the
+ *  standardization mode (z-score, robust, percentile, raw); ``standardize``
+ *  is a legacy boolean kept so older manifests that toggle it off still
+ *  translate to ``scaling: raw``; ``clip_percentiles`` is the
+ *  outlier-winsorize bounds applied before standardization. The SPA does
+ *  not read this block — it's surfaced for inspection only; all
+ *  similarity computation happens server-side. */
+export interface SimilarityDefaults {
+  scaling: "zscore" | "robust" | "percentile" | "raw";
   standardize: boolean;
+  clip_percentiles: [number, number] | null;
 }
 
 /** One participant in a manifest's datastack set. Single-ds manifests have
@@ -437,7 +445,7 @@ export interface FeatureTableListResponse {
    *  `enabled` is true; single-ds (or pre-phase-1) manifests collapse to a
    *  one-element list naming the request's `ds`. */
   datastacks?: ManifestDatastackEntry[];
-  knn?: EmbeddingKnnDefaults;
+  knn?: SimilarityDefaults;
   feature_tables?: FeatureTableListItem[];
 }
 
@@ -446,24 +454,105 @@ export interface FeatureTableListResponse {
  *  inner shape is now feature_tables. */
 export type EmbeddingListResponse = FeatureTableListResponse;
 
-export interface EmbeddingKnnNeighbor {
-  cell_id: string;
-  distance: number;
-  /** Datastack tag for the neighbor. Single-ds parquets emit a uniform
-   *  value (every neighbor inherits the query's ds); phase-2 multi-ds
-   *  parquets carry the actual per-row source. Always present on
-   *  responses from phase-1+ servers. */
-  source_ds?: string;
+/** Tiny histogram summary of one column. ~hundred-bytes wire payload;
+ *  L2-cached server-side. Numeric → bin counts + edges. Categorical →
+ *  per-value counts. Used as a first-paint accelerant — the full
+ *  ``/column`` response is still fetched when the SPA needs per-cell
+ *  data for matching.
+ *
+ *  ``bin_edges`` length is ``bin_counts.length + 1``. The renderer
+ *  reads edges directly (not assuming equal-width) so log-binned and
+ *  linear histograms share one rendering path. */
+export type ColumnHistogramResponse =
+  | {
+      kind: "numeric";
+      bin_min: number;
+      bin_max: number;
+      bin_edges: number[];
+      bin_counts: number[];
+      binning: "linear" | "log";
+      n_finite: number;
+      n_null: number;
+      /** True when the request asked for log binning but the column
+       *  contained non-positive values, forcing a fallback to linear.
+       *  The SPA surfaces this so the toggle reads honestly. */
+      log_fallback: boolean;
+    }
+  | {
+      kind: "categorical";
+      value_counts: Array<{ value: string; count: number }>;
+      n_null: number;
+      truncated: boolean;
+    };
+
+/** Number of seed cell_ids actually sent to /distance_to_set. Mirrors
+ *  ``_MAX_SEED_CELL_IDS`` in cave_data_viewer/api/endpoints/embeddings.py.
+ *  When the bag exceeds this, the panel samples down deterministically
+ *  to this many ids before computing. */
+export const DISTANCE_TO_SET_COMPUTE_SIZE = 20;
+
+/** Soft ceiling on the selection bag for the Grow-Selection panel. The
+ *  panel still computes (sampling down to COMPUTE_SIZE), but shows a
+ *  warning above this so a runaway lasso doesn't quietly turn into a
+ *  20-of-50k compute. */
+export const DISTANCE_TO_SET_MAX_SELECTION = 200;
+
+export interface DistanceToSetArgs {
+  ds: string;
+  featureTableId: string;
+  cellIds: string[];
+  space: "raw" | "pca" | "mahalanobis";
+  /** PCA only: fraction of total variance the kept components must
+   *  explain (0..1). The server resolves the smallest K that hits the
+   *  threshold and returns both numbers in the response. Default 0.9
+   *  if absent. */
+  variance?: number;
+  reduction: "centroid" | "nearest" | "mean";
+  /** Optional feature-column override; absent = manifest default. */
+  featureColumns?: string[];
+  /** Top-K truncation. Server returns only the closest ``limit`` cells
+   *  (default 2000, max 50000). Even the closest 10% of the universe
+   *  is more than the growth workflows need; the truncated payload
+   *  keeps the wire transfer + downstream client maps lean. */
+  limit?: number;
 }
 
-export interface EmbeddingKnnResponse {
-  query_cell_id: string;
-  /** Datastack the query cell_id resolves under. Used by the SPA when
-   *  the kNN result feeds cross-nav, so the destination /neuron URL
-   *  picks the query's home ds even if the SPA's active datastack
-   *  scope is broader. */
-  query_source_ds?: string;
-  neighbors: EmbeddingKnnNeighbor[];
+export interface DistanceToSetResponse {
+  /** Top-K closest cells, pre-sorted ascending by distance. Length
+   *  equals ``n_returned``; full universe size is ``n_universe``. The
+   *  truncation cuts the heavy long tail — the SPA's CDF zoom,
+   *  union-top-N, and synthetic distance channel all operate within
+   *  the returned slice. */
+  cell_ids: string[];
+  distances: number[];
+  space: "raw" | "pca" | "mahalanobis";
+  /** Requested variance fraction (echoed); null when ``space !== "pca"``. */
+  variance: number | null;
+  /** Resolved component count after variance threshold; null when
+   *  ``space !== "pca"``. The SPA shows this alongside the variance
+   *  slider so the user can see how many components their threshold
+   *  actually picked. */
+  k_pca: number | null;
+  /** Actual fraction of variance the resolved K captures. Usually
+   *  slightly above the requested variance (PCA is discrete in
+   *  components). Null when ``space !== "pca"``. */
+  variance_explained: number | null;
+  reduction: "centroid" | "nearest" | "mean";
+  /** How many of the requested seeds actually appeared in the feature
+   *  matrix. The SPA surfaces "computed from N of M seeds" when
+   *  ``n_seed_missing > 0``. */
+  n_seed_in_index: number;
+  n_seed_missing: number;
+  /** Length of the returned arrays (= min(requested limit, n_universe)). */
+  n_returned: number;
+  /** Full universe size before truncation. Lets the SPA show "K of N"
+   *  so the user knows the response is the top slice, not the full
+   *  universe. */
+  n_universe: number;
+  /** Resolved feature columns used for the distance computation. Echoes
+   *  the manifest default or the request override; the SPA reflects
+   *  this back into the Advanced picker on probe load. */
+  feature_columns: string[];
 }
 
 export type ResolutionStatus = "ok" | "missing" | "ambiguous";

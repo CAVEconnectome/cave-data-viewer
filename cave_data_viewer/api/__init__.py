@@ -239,14 +239,42 @@ def _init_l2_immutable_caches(app: Flask) -> None:
         maxsize=64,
     )
 
-    # kNN index cache. L1-only, immutable: a (ds, embedding_id,
-    # feature_subset) triple uniquely determines a KDTree (the parquet at
-    # a given URI is fixed, the feature subset is the digest). KDTree
-    # plus the scaling vectors aren't worth serializing to L2 — the
-    # parquet itself is L2-backed via dcv_embedding_frame_cache, and
-    # rebuilding from a cached frame is fast (~10-50ms for 100k cells).
-    app.extensions["dcv_embedding_index_cache"] = SwrCache(
+    # Standardized feature-matrix cache. L1-only, immutable: a
+    # (cache_ds, ft_id, feature_subset_digest) triple uniquely determines
+    # the z-scored matrix + row→cell_id map (the parquet at a given URI is
+    # fixed, the feature subset is the digest). The matrix isn't worth
+    # serializing to L2 — the parquet itself is L2-backed via
+    # dcv_embedding_frame_cache, and standardizing a cached frame is
+    # fast (~10-50ms for 100k cells).
+    app.extensions["dcv_embedding_matrix_cache"] = SwrCache(
         soft_ttl=0, hard_ttl=0, maxsize=32, immutable=True,
+    )
+
+    # SVD cache for PCA + Mahalanobis projections. Keyed on the same
+    # (cache_ds, ft_id, feature_subset_digest) triple as the matrix cache
+    # — one SVD per (table, subset), reused for any k_pca slice and for
+    # full-whitening Mahalanobis. L1-only: the components matrix is
+    # n_features^2 floats, negligible to refit from the cached matrix
+    # (~5-50ms), and the matrix itself is the larger cache entry.
+    app.extensions["dcv_embedding_pca_cache"] = SwrCache(
+        soft_ttl=0, hard_ttl=0, maxsize=32, immutable=True,
+    )
+
+    # Per-column histogram summaries (numeric bin counts or categorical
+    # per-value counts). Keyed on (cache_ds, ft_id, column, dec_tuple,
+    # mat_version, n_bins). Tiny payload — hundreds of bytes per entry —
+    # and immutable by construction, so this is the highest-value L2
+    # cache in the feature explorer: every user opening the Selection
+    # Builder on a popular column pays one ~30ms GCS read instead of
+    # re-binning 94k values.
+    app.extensions["dcv_column_histogram_cache"] = LayeredSwrCache(
+        soft_ttl=soft_unique,
+        hard_ttl=soft_unique,
+        maxsize=512,
+        l2=_l2_for_kind("column_histograms"),
+        executor=writer,
+        retention_resolver=_resolve_retention,
+        immutable=True,
     )
 
 

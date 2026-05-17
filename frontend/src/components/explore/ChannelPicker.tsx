@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import type { ColumnGroup, FeatureTableListItem } from "../../api/types";
+import { columnDisplayName } from "../tableColumns";
 import { getColormap } from "./colormaps";
 import { ColormapPicker } from "./ColormapPicker";
 import { RangeSlider } from "./RangeSlider";
@@ -26,6 +27,10 @@ interface Props {
    *  Pass undefined if /cells hasn't loaded yet; the picker degrades
    *  to parquet-only options. */
   cellsColumnGroups?: ColumnGroup[];
+  /** When true, the synthetic ``__distance`` channel is offered in the
+   *  color + size pickers. Set by FeatureExplorer when a
+   *  selection-growth probe has populated the in-memory distance map. */
+  hasDistanceProbe?: boolean;
   x: string | null;
   y: string | null;
   colorBy: string | null;
@@ -99,6 +104,7 @@ interface Props {
 export function ChannelPicker({
   featureTable,
   cellsColumnGroups,
+  hasDistanceProbe,
   x,
   y,
   colorBy,
@@ -199,17 +205,32 @@ export function ChannelPicker({
         });
       }
     }
+    // Synthetic ``__distance`` channel — surfaced only when a growth
+    // probe is active. The sentinel value is plain ``__distance`` (no
+    // table prefix) so the backend's bound-column resolver can detect
+    // it and refuse to forward it as a real column. Numeric by
+    // construction so the size picker accepts it.
+    const distanceOption: ChannelOption | null = hasDistanceProbe
+      ? {
+          value: "__distance",
+          label: columnDisplayName("__distance"),
+          source: "growth",
+          isNumeric: true,
+        }
+      : null;
     const all = [...parquetOptions, ...decorationOptions];
+    const allWithDistance = distanceOption ? [distanceOption, ...all] : all;
     return {
-      axisOptions: all, // any column can be on an axis
-      colorOptions: all,
-      sizeOptions: all.filter((o) => o.isNumeric !== false), // numerics + decoration (unknown)
+      axisOptions: all, // any real column can be on an axis; distance excluded
+      colorOptions: allWithDistance,
+      sizeOptions: allWithDistance.filter((o) => o.isNumeric !== false),
     };
-  }, [featureTable, cellsColumnGroups]);
+  }, [featureTable, cellsColumnGroups, hasDistanceProbe]);
 
   return (
     <div className="explore-channels">
-      <div className="explore-picker-label">Channels</div>
+      {/* Section title comes from the enclosing CollapsibleSection's
+          header — no need to repeat it inside the panel. */}
       <ChannelSelect
         label="x"
         value={x}

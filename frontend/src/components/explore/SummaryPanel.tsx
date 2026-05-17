@@ -8,6 +8,9 @@ import type {
   FeatureTableListItem,
 } from "../../api/types";
 import { ColumnPicker } from "./ColumnPicker";
+import { columnDisplayName } from "../tableColumns";
+import { buildHistogram, formatTick } from "./histogram";
+import { LinLogToggle } from "./LinLogToggle";
 
 /** Display mode for the panel's histograms.
  *
@@ -133,17 +136,22 @@ export function SummaryPanel({
   };
 
   // Resolved bg/fg sets given the active mode + the panel inputs. The
-  // toggle is meaningful only when a scope is active; without scope,
-  // bg=universe and fg=scope-or-selection collapse to the same view
-  // (bg=universe, fg=null or universe — boring either way).
+  // Both modes overlay the **selection** on the background. The bg
+  // mode toggle controls only what the background is (universe in
+  // "all" mode, scope in "scope" mode); the foreground is always
+  // whatever the user has marked.
+  //
+  // Historical note: the prior model used the Filter Scope as the fg
+  // in "all" mode and the selection only in "scope" mode. That
+  // matched the era when Filter Scope was the central editing
+  // surface, but with the SelectionBuilder owning predicate building
+  // the selection bag is now the user-driven subset that deserves
+  // overlay in either mode.
   const hasScope = !!inScopeCellIds;
   const effectiveBgMode: BgMode = hasScope ? bgMode : "all";
   const bgCellIds: Set<string> | null =
     effectiveBgMode === "scope" ? inScopeCellIds ?? null : null;
-  const fgCellIds: Set<string> | null =
-    effectiveBgMode === "scope"
-      ? selectedCellIds ?? null
-      : inScopeCellIds ?? null;
+  const fgCellIds: Set<string> | null = selectedCellIds ?? null;
 
   // Channel-driven categorical breakdown (same rows as before — colored
   // bars per category, bg + fg overlaid).
@@ -189,9 +197,8 @@ export function SummaryPanel({
 
   return (
     <div className="summary-panel">
-      <div className="summary-panel-head">
-        <div className="explore-picker-label">Summary</div>
-        {hasScope && (
+      {hasScope && (
+        <div className="summary-panel-head">
           <BgModeToggle
             value={bgMode}
             onChange={(next) =>
@@ -201,31 +208,34 @@ export function SummaryPanel({
               setBgModeRaw(next === "scope" ? "scope" : null)
             }
           />
-        )}
-      </div>
+        </div>
+      )}
       <div className="summary-panel-count">
-        {hasScope ? (
-          effectiveBgMode === "scope" ? (
-            // "vs Scope" mode — the active comparison is selection
-            // against scope. Lead with the selection count to match
-            // what the histograms now overlay.
+        {(() => {
+          // Denominator = whatever the bg bars represent. "vs Scope"
+          // backgrounds are the scope cells; everything else is the
+          // universe. The selection numerator is shown unconditionally
+          // when non-empty so the overlay's count is always readable
+          // (it's the same number the orange bars represent).
+          const bgIsScope =
+            hasScope && effectiveBgMode === "scope";
+          const denom = bgIsScope ? scopeSize : totalCells;
+          const denomLabel = bgIsScope ? "in scope" : "cells";
+          if (selectionSize > 0) {
+            return (
+              <>
+                <strong>{selectionSize.toLocaleString()}</strong>
+                {" selected of "}
+                <strong>{denom.toLocaleString()}</strong>{" "}{denomLabel}
+              </>
+            );
+          }
+          return (
             <>
-              <strong>{selectionSize.toLocaleString()}</strong>
-              {" selected of "}
-              <strong>{scopeSize.toLocaleString()}</strong>
-              {" in scope"}
+              <strong>{denom.toLocaleString()}</strong>{" "}{denomLabel}
             </>
-          ) : (
-            <>
-              <strong>{scopeSize.toLocaleString()}</strong> of{" "}
-              <strong>{totalCells.toLocaleString()}</strong> cells in scope
-            </>
-          )
-        ) : (
-          <>
-            <strong>{totalCells.toLocaleString()}</strong> cells total
-          </>
-        )}
+          );
+        })()}
       </div>
       {channelCategories && channelCategories.length > 0 && (
         <CategoricalBreakdown
@@ -391,19 +401,19 @@ function ManualPlot({
         ×
       </button>
       {liveBlocked ? (
-        <div className="summary-manual-plot-placeholder" title={column}>
+        <div className="summary-manual-plot-placeholder" title={bareCol(column)}>
           <div className="summary-panel-cat-title">{bareCol(column)}</div>
           <div className="summary-manual-plot-msg">
             requires a materialized version
           </div>
         </div>
       ) : q.isLoading ? (
-        <div className="summary-manual-plot-placeholder" title={column}>
+        <div className="summary-manual-plot-placeholder" title={bareCol(column)}>
           <div className="summary-panel-cat-title">{bareCol(column)}</div>
           <div className="summary-manual-plot-msg">loading…</div>
         </div>
       ) : q.isError ? (
-        <div className="summary-manual-plot-placeholder" title={column}>
+        <div className="summary-manual-plot-placeholder" title={bareCol(column)}>
           <div className="summary-panel-cat-title">{bareCol(column)}</div>
           <div className="summary-manual-plot-msg error">
             failed: {String(q.error)}
@@ -456,7 +466,7 @@ function ManualPlotBody({
   );
   if (!rows || rows.length === 0) {
     return (
-      <div className="summary-manual-plot-placeholder" title={response.column}>
+      <div className="summary-manual-plot-placeholder" title={bareCol(response.column)}>
         <div className="summary-panel-cat-title">{bareCol(response.column)}</div>
         <div className="summary-manual-plot-msg">no values</div>
       </div>
@@ -476,7 +486,7 @@ function CategoricalBreakdown({
 }) {
   const maxBg = Math.max(...rows.map((c) => c.bgCount), 1);
   return (
-    <div className="summary-panel-categories" title={column}>
+    <div className="summary-panel-categories" title={bareCol(column)}>
       <div className="summary-panel-cat-title">{bareCol(column)}</div>
       {rows.map((cat) => (
         <SummaryRow key={cat.label} cat={cat} maxBg={maxBg} />
@@ -552,38 +562,54 @@ function NumericHistogram({
   fgCellIds,
   color = "#f59e0b",
 }: NumericHistogramProps) {
+  // Local binning state per histogram instance. Re-binning is a single
+  // pass over the values (fast even at 94k cells) so the flip is
+  // instant — no need for URL persistence.
+  const [binning, setBinning] = useState<"linear" | "log">("linear");
   const bins = useMemo(
-    () => buildHistogram(values, cellIds, bgCellIds, fgCellIds, 24),
-    [values, cellIds, bgCellIds, fgCellIds],
+    () => buildHistogram(values, cellIds, bgCellIds, fgCellIds, 60, binning),
+    [values, cellIds, bgCellIds, fgCellIds, binning],
   );
 
   if (!bins || bins.bgDensity.length === 0) return null;
 
   const width = 240;
-  // Reduced from the previous 60→46 — the axis-tick row is now rendered
-  // in HTML below the SVG (preserveAspectRatio="none" stretched the
-  // SVG <text> glyphs horizontally at wider rail widths). The visual
-  // height the user sees is still ~60px after the HTML row underneath.
   const height = 46;
-  const padLeft = 0;
-  const innerW = width - padLeft;
   const innerH = height;
-  // Both distributions are area-normalized to sum 1; the y-axis is
-  // shared and scales to the larger of the two distributions' max
-  // bin. Result: foreground bars and background bars are visually
-  // comparable as *shapes* — the user can see a distribution shift
-  // even when the foreground is 444 cells out of 94k. Absolute counts
-  // are shown above the histogram in the count line.
-  const maxDensity = Math.max(
-    1e-9,
-    ...bins.bgDensity,
-    ...bins.fgDensity,
-  );
-  const barW = innerW / bins.bgDensity.length;
+  // Both distributions are area-normalized to sum 1 so a small
+  // foreground subset is visually comparable to the full background's
+  // distribution shape. Absolute counts live in the count line above.
+  const maxDensity = Math.max(1e-9, ...bins.bgDensity, ...bins.fgDensity);
+  const heightFor = (d: number): number => (d / maxDensity) * innerH;
   const hasFg = bins.fgDensity.some((d) => d > 0);
 
+  // Bin edges drive bar X positions — log-binned bars come out narrow
+  // at the small end and wider at the large end automatically. Edge
+  // → fraction-of-width via the same log-aware projection the
+  // SelectionBuilder uses (kept inline rather than shared because the
+  // Summary histogram has no click/drag surface).
+  const mn = bins.binMin;
+  const mx = bins.binMax;
+  const valueToFrac = (v: number): number => {
+    if (bins.binning === "log" && mn > 0) {
+      const logMn = Math.log(mn);
+      const logMx = Math.log(mx);
+      const logSpan = logMx - logMn || 1;
+      return (Math.log(Math.max(v, mn)) - logMn) / logSpan;
+    }
+    const span = mx - mn || 1;
+    return (v - mn) / span;
+  };
+
+  const logUnavailable = mn <= 0;
+  const toggleTitle = logUnavailable
+    ? "Log binning needs all positive values; this column has values ≤ 0"
+    : bins.binning === "log"
+      ? "X-axis bins are log-spaced — click for linear"
+      : "X-axis bins are linear — click for log";
+
   return (
-    <div className="summary-histogram" title={column}>
+    <div className="summary-histogram" title={bareCol(column)}>
       <div className="summary-panel-cat-title">{bareCol(column)}</div>
       <svg
         viewBox={`0 0 ${width} ${height}`}
@@ -591,26 +617,24 @@ function NumericHistogram({
         preserveAspectRatio="none"
       >
         {bins.bgDensity.map((bg, i) => {
-          const h = (bg / maxDensity) * innerH;
+          const xLeft = valueToFrac(bins.binEdges[i]) * width;
+          const xRight = valueToFrac(bins.binEdges[i + 1]) * width;
+          const barW = Math.max(0, xRight - xLeft);
+          const h = heightFor(bg);
           const fg = bins.fgDensity[i];
-          const fgH = (fg / maxDensity) * innerH;
-          const x = padLeft + i * barW;
+          const fgH = heightFor(fg);
           return (
             <g key={i}>
-              {/* Background bar (gray). */}
               <rect
-                x={x + 0.5}
+                x={xLeft + 0.5}
                 y={innerH - h}
                 width={Math.max(0, barW - 1)}
                 height={h}
                 fill="rgba(0, 0, 0, 0.18)"
               />
-              {/* Foreground overlay (in the channel color). Density-
-                  normalized so a small subset is still visible at
-                  comparable scale to the background distribution. */}
               {hasFg && fg > 0 && (
                 <rect
-                  x={x + 0.5}
+                  x={xLeft + 0.5}
                   y={innerH - fgH}
                   width={Math.max(0, barW - 1)}
                   height={fgH}
@@ -623,108 +647,26 @@ function NumericHistogram({
         })}
       </svg>
       {/* Tick row in HTML so the rail's resize handle doesn't stretch
-          the text glyphs horizontally (which is what the SVG-internal
-          tick text suffered from with preserveAspectRatio="none"). */}
+          the text glyphs horizontally. */}
       <div className="summary-histogram-ticks">
         <span>{formatTick(bins.binMin)}</span>
-        <span>{formatTick(bins.binMax)}</span>
+        <span className="summary-histogram-ticks-right">
+          <span>{formatTick(bins.binMax)}</span>
+          <LinLogToggle
+            value={binning === "log" ? "log" : "lin"}
+            onChange={(v) => setBinning(v === "log" ? "log" : "linear")}
+            disabled={logUnavailable}
+            title={toggleTitle}
+          />
+        </span>
       </div>
     </div>
   );
 }
 
-interface HistogramData {
-  /** Background distribution density (each value = bin count /
-   *  background total; sums to 1). */
-  bgDensity: number[];
-  /** Foreground distribution density (each value = bin count /
-   *  foreground total; sums to 1 when the foreground is non-empty,
-   *  else all zeros). */
-  fgDensity: number[];
-  binMin: number;
-  binMax: number;
-}
-
-function buildHistogram(
-  values: Array<number | null>,
-  cellIds: string[],
-  bgCellIds: Set<string> | null,
-  fgCellIds: Set<string> | null,
-  nBins: number,
-): HistogramData | null {
-  // Pass 1: extent over finite values in the background set. Using
-  // the background subset (rather than all values) keeps bins
-  // meaningful when "vs Scope" mode has narrowed the comparison to
-  // a small population — a long-tail outlier in the universe
-  // shouldn't squash the scope's distribution into a single bin.
-  let mn = Number.POSITIVE_INFINITY;
-  let mx = Number.NEGATIVE_INFINITY;
-  for (let i = 0; i < values.length; i++) {
-    const v = values[i];
-    if (v === null || v === undefined || !Number.isFinite(v)) continue;
-    if (bgCellIds && !bgCellIds.has(cellIds[i])) continue;
-    if (v < mn) mn = v;
-    if (v > mx) mx = v;
-  }
-  if (!Number.isFinite(mn)) return null;
-
-  const binsLen = mx === mn ? 1 : nBins;
-  const binCounts = new Array<number>(binsLen).fill(0);
-  const fgCounts = new Array<number>(binsLen).fill(0);
-  let bgTotal = 0;
-  let fgTotal = 0;
-
-  if (mx === mn) {
-    // Constant column — single bin so the panel renders without a
-    // divide-by-zero downstream.
-    for (let i = 0; i < values.length; i++) {
-      const v = values[i];
-      if (v === null || v === undefined || !Number.isFinite(v)) continue;
-      const id = cellIds[i];
-      if (bgCellIds && !bgCellIds.has(id)) continue;
-      binCounts[0] += 1;
-      bgTotal += 1;
-      if (fgCellIds && fgCellIds.has(id)) {
-        fgCounts[0] += 1;
-        fgTotal += 1;
-      }
-    }
-  } else {
-    const span = mx - mn;
-    for (let i = 0; i < values.length; i++) {
-      const v = values[i];
-      if (v === null || v === undefined || !Number.isFinite(v)) continue;
-      const id = cellIds[i];
-      if (bgCellIds && !bgCellIds.has(id)) continue;
-      let bin = Math.floor(((v - mn) / span) * nBins);
-      if (bin >= nBins) bin = nBins - 1; // clamp the max-value point
-      binCounts[bin] += 1;
-      bgTotal += 1;
-      if (fgCellIds && fgCellIds.has(id)) {
-        fgCounts[bin] += 1;
-        fgTotal += 1;
-      }
-    }
-  }
-
-  // Normalize to densities (each distribution sums to 1) so a small
-  // foreground's shape is visually comparable to the full background's.
-  const bgDensity = binCounts.map((c) =>
-    bgTotal > 0 ? c / bgTotal : 0,
-  );
-  const fgDensity = fgCounts.map((c) =>
-    fgTotal > 0 ? c / fgTotal : 0,
-  );
-  return { bgDensity, fgDensity, binMin: mn, binMax: mx };
-}
-
-function formatTick(n: number): string {
-  if (!Number.isFinite(n)) return "—";
-  if (Math.abs(n) >= 1000 || (Math.abs(n) < 0.01 && n !== 0))
-    return n.toExponential(1);
-  if (Math.abs(n) >= 100) return n.toFixed(0);
-  return n.toFixed(2);
-}
+// `buildHistogram`, `HistogramData`, and `formatTick` live in
+// ./histogram.ts — shared with the Selection Builder's numeric
+// predicate widget so the two surfaces bin and label identically.
 
 function SummaryRow({
   cat,
@@ -776,5 +718,6 @@ function SummaryRow({
 
 function bareCol(col: string): string {
   const dot = col.indexOf(".");
-  return dot >= 0 ? col.slice(dot + 1) : col;
+  const stripped = dot >= 0 ? col.slice(dot + 1) : col;
+  return columnDisplayName(stripped);
 }

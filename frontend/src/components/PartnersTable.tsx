@@ -17,7 +17,7 @@ import {
 } from "@tanstack/react-table";
 import { useNglLink } from "../hooks/useNglLink";
 import type { ColumnGroup, PartnerRecord } from "../api/types";
-import { CopyableId, FilterInput, displayName, formatCell, inferKind, type ColumnKind } from "./tableColumns";
+import { CopyableId, FilterInput, columnDisplayName, displayName, formatCell, inferKind, type ColumnKind } from "./tableColumns";
 
 interface Props {
   ds: string;
@@ -85,7 +85,8 @@ interface Props {
 // segment after the first dot, or the whole key if there is no dot.
 function bareColumnName(key: string): string {
   const i = key.indexOf(".");
-  return i >= 0 ? key.slice(i + 1) : key;
+  const stripped = i >= 0 ? key.slice(i + 1) : key;
+  return columnDisplayName(stripped);
 }
 
 // Column visibility persistence — URL-state-first.
@@ -396,6 +397,42 @@ export function PartnersTable({ ds, rootId, matVersion, direction, rows, columnG
     return options;
   }, [columnNames, columnKinds, rows]);
 
+  // Row-select column. Sits in its own synthetic group at the front
+  // so it's the leftmost cell in every row. Promoted from a hard-
+  // coded `<th>` / `<td>` into a real TanStack column so the user
+  // can sort by selection state — descending lifts every selected
+  // row to the top, which is the natural way to verify a lasso
+  // against the bottom data table when the result spans multiple
+  // pages. ``sortingFn`` compares `row.getIsSelected()` directly
+  // (TanStack already keeps that in sync with our controlled
+  // `rowSelection`). ``meta.rowSelectColumn`` is the discriminant
+  // the header / filter / body renderers use to special-case this
+  // column (empty filter, header is the select-all checkbox).
+  const selectColumnDef = useMemo<ColumnDef<PartnerRecord>>(
+    () => ({
+      id: "__select__",
+      // Header is rendered by the leaf-row mapper directly off the
+      // meta flag, so this is just a fallback for any flexRender call
+      // we don't intercept.
+      header: "",
+      cell: ({ row }) => (
+        <input
+          type="checkbox"
+          checked={row.getIsSelected()}
+          onChange={row.getToggleSelectedHandler()}
+          aria-label="Toggle row selection"
+        />
+      ),
+      accessorFn: () => null,
+      enableSorting: true,
+      enableColumnFilter: false,
+      sortingFn: (a, b) =>
+        Number(b.getIsSelected()) - Number(a.getIsSelected()),
+      meta: { rowSelectColumn: true },
+    }),
+    [],
+  );
+
   // Build per-leaf column definitions, one per key.
   const leafColumnDefs = useMemo(() => {
     const map: Record<string, ColumnDef<PartnerRecord>> = {};
@@ -413,6 +450,16 @@ export function PartnersTable({ ds, rootId, matVersion, direction, rows, columnG
               ? (ctx) => <CopyableId value={ctx.getValue()} />
               : (ctx) => formatCell(ctx.getValue()),
         sortingFn: kind === "number" ? "basic" : "alphanumeric",
+        // Sparse numeric columns — e.g. the synthetic `__distance`
+        // populated only for cells the Grow-Selection probe returned
+        // — would otherwise sort their many missing entries to the
+        // top in ascending order (TanStack's "basic" treats null as
+        // less than every number), burying the populated cells. With
+        // missing values coerced to `undefined` in the row
+        // enrichment, this option sends them to the end regardless
+        // of direction so "sort by distance ascending" actually puts
+        // the closest cells at the top.
+        sortUndefined: "last",
       };
       if (kind === "category") {
         def.filterFn = (row, _id, filterValue) => {
@@ -510,7 +557,17 @@ export function PartnersTable({ ds, rootId, matVersion, direction, rows, columnG
   // the rotated label so a 30-character table name doesn't blow the header
   // row up to 400px tall — the full name still appears in the tooltip.
   const columns = useMemo<ColumnDef<PartnerRecord>[]>(() => {
-    return columnGroups.map((g) => {
+    // Synthetic group that wraps the row-select column. Empty header
+    // (like `intrinsic`) and `meta.kind === "intrinsic"` so the group
+    // row treats it as non-collapsible — there's nothing to collapse
+    // anyway.
+    const selectGroup: ColumnDef<PartnerRecord> = {
+      id: "group:__select__",
+      header: "",
+      meta: { kind: "intrinsic", groupName: "__select__", collapsed: false },
+      columns: [selectColumnDef],
+    };
+    const groups = columnGroups.map((g) => {
       const collapsed = collapsedGroups.has(g.name);
       let leafs: ColumnDef<PartnerRecord>[] = collapsed
         ? [{
@@ -610,7 +667,8 @@ export function PartnersTable({ ds, rootId, matVersion, direction, rows, columnG
         columns: leafs,
       };
     });
-  }, [columnGroups, leafColumnDefs, collapsedGroups, hrefFor, open, linkTemplate, enableNglAction, onRowNglClick]);
+    return [selectGroup, ...groups];
+  }, [columnGroups, leafColumnDefs, selectColumnDef, collapsedGroups, hrefFor, open, linkTemplate, enableNglAction, onRowNglClick]);
 
   // External selection (from a plot brush) ANDs with column filters via
   // TanStack's globalFilter. Empty / null disables; otherwise rows whose
@@ -831,9 +889,10 @@ export function PartnersTable({ ds, rootId, matVersion, direction, rows, columnG
       <table>
         <thead>
           {/* Top row: group headers, spanning their leaf columns. Click toggles
-              collapse for that group (intrinsic ignored — single empty header). */}
+              collapse for that group (intrinsic ignored — single empty header).
+              The leading row-select column lives in its own empty-header
+              group so it gets a natural `<th colSpan=1>` slot here. */}
           <tr className="group-row">
-            <th />
             {table.getHeaderGroups()[0].headers.map((header) => {
               const meta = header.column.columnDef.meta as
                 | { kind?: string; groupName?: string; collapsed?: boolean }
@@ -858,30 +917,61 @@ export function PartnersTable({ ds, rootId, matVersion, direction, rows, columnG
               );
             })}
           </tr>
-          {/* Second row: leaf columns (sortable). */}
+          {/* Second row: leaf columns (sortable). The row-select column
+              renders the select-all checkbox in this row (paired with a
+              sort indicator — clicking the column header sorts by
+              selection state, descending lifts selected rows to the
+              top). Selects all *filtered* rows across pages, not just
+              the current page. */}
           <tr>
-            <th>
-              {/* Selects all *filtered* rows across pages, not just the
-                  current page. The pagination viewport doesn't visually
-                  bound the selection scope — "select all" reads as
-                  "everything the table is showing me", which is the
-                  full filtered set. */}
-              <input
-                type="checkbox"
-                checked={table.getIsAllRowsSelected()}
-                ref={(el) => {
-                  if (el) el.indeterminate = table.getIsSomeRowsSelected() && !table.getIsAllRowsSelected();
-                }}
-                onChange={table.getToggleAllRowsSelectedHandler()}
-              />
-            </th>
             {table.getHeaderGroups()[1].headers.map((header) => {
-              const meta = header.column.columnDef.meta as { collapsedPlaceholder?: boolean; actionPlaceholder?: boolean } | undefined;
+              const meta = header.column.columnDef.meta as { collapsedPlaceholder?: boolean; actionPlaceholder?: boolean; rowSelectColumn?: boolean } | undefined;
               if (meta?.collapsedPlaceholder) {
                 return <th key={header.id} className="collapsed-placeholder" />;
               }
               if (meta?.actionPlaceholder) {
                 return <th key={header.id} className="row-action-col" />;
+              }
+              if (meta?.rowSelectColumn) {
+                const sort = header.column.getIsSorted();
+                // Always render a sort affordance so the user knows the
+                // column is sortable even before they click — `↕` when
+                // unsorted, `▲` / `▼` once a direction is active. The
+                // checkbox-only header alone read as "not clickable" in
+                // testing.
+                const indicator =
+                  sort === "asc" ? "▲" : sort === "desc" ? "▼" : "↕";
+                const indicatorClass =
+                  sort === false
+                    ? "row-select-indicator inactive"
+                    : "row-select-indicator";
+                return (
+                  <th key={header.id} className="row-select-col">
+                    <button
+                      type="button"
+                      className="sortable row-select-sort"
+                      onClick={header.column.getToggleSortingHandler()}
+                      title="Click to sort by selection — descending lifts selected rows to the top, ascending puts them at the bottom"
+                      aria-label="Sort by selection"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={table.getIsAllRowsSelected()}
+                        ref={(el) => {
+                          if (el) el.indeterminate = table.getIsSomeRowsSelected() && !table.getIsAllRowsSelected();
+                        }}
+                        onChange={table.getToggleAllRowsSelectedHandler()}
+                        // Stop click from also triggering the sort
+                        // toggle — the checkbox and the sort handle
+                        // share the same `<th>` cell so the user can
+                        // hit either independently.
+                        onClick={(e) => e.stopPropagation()}
+                        aria-label="Select all rows"
+                      />
+                      <span className={indicatorClass}>{indicator}</span>
+                    </button>
+                  </th>
+                );
               }
               const sort = header.column.getIsSorted();
               const indicator = sort === "asc" ? " ▲" : sort === "desc" ? " ▼" : "";
@@ -900,13 +990,12 @@ export function PartnersTable({ ds, rootId, matVersion, direction, rows, columnG
             })}
           </tr>
           <tr className="filters-row">
-            <th></th>
             {table.getHeaderGroups()[1].headers.map((header) => {
-              const meta = header.column.columnDef.meta as { collapsedPlaceholder?: boolean; actionPlaceholder?: boolean } | undefined;
+              const meta = header.column.columnDef.meta as { collapsedPlaceholder?: boolean; actionPlaceholder?: boolean; rowSelectColumn?: boolean } | undefined;
               if (meta?.collapsedPlaceholder) {
                 return <th key={`f-${header.id}`} className="collapsed-placeholder" />;
               }
-              if (meta?.actionPlaceholder) {
+              if (meta?.actionPlaceholder || meta?.rowSelectColumn) {
                 return <th key={`f-${header.id}`} className="row-action-col" />;
               }
               return (
@@ -925,17 +1014,15 @@ export function PartnersTable({ ds, rootId, matVersion, direction, rows, columnG
         <tbody>
           {table.getRowModel().rows.map((row) => (
             <tr key={row.id} className={row.getIsSelected() ? "selected" : ""}>
-              <td>
-                <input
-                  type="checkbox"
-                  checked={row.getIsSelected()}
-                  onChange={row.getToggleSelectedHandler()}
-                />
-              </td>
               {row.getVisibleCells().map((cell) => {
-                const meta = cell.column.columnDef.meta as { actionPlaceholder?: boolean } | undefined;
+                const meta = cell.column.columnDef.meta as { actionPlaceholder?: boolean; rowSelectColumn?: boolean } | undefined;
+                const className = meta?.rowSelectColumn
+                  ? "row-select-col"
+                  : meta?.actionPlaceholder
+                    ? "row-action-col"
+                    : undefined;
                 return (
-                  <td key={cell.id} className={meta?.actionPlaceholder ? "row-action-col" : undefined}>
+                  <td key={cell.id} className={className}>
                     {flexRender(cell.column.columnDef.cell, cell.getContext())}
                   </td>
                 );

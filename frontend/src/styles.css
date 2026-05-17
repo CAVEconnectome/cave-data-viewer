@@ -3,10 +3,13 @@
      restrained chrome, typography first. Palette is intentionally low-
      saturation so categorical encodings don't fight the data. */
 
-  /* Surfaces */
-  --bg: #fff;
-  --surface: #fafafa;        /* sidebar bg, filters row */
-  --surface-2: #f6f6f6;      /* form bg, action-bar bg */
+  /* Surfaces — paper-cream rather than screen-white. Warms the page
+     so the iron-gall --accent reads as ink-on-paper (the historical
+     reference the accent's comment names) instead of office-form
+     neutral. Three steps in warm value space: page, sidebar, form. */
+  --bg: #fdfcf7;
+  --surface: #f8f5ed;        /* sidebar bg, filters row */
+  --surface-2: #f3eee2;      /* form bg, action-bar bg */
 
   /* Text + accent */
   --fg: #1a1a1a;
@@ -22,6 +25,11 @@
   /* Lines */
   --line: #d8d8d8;
   --line-soft: #ececec;      /* lighter row separators inside dense tables */
+
+  /* Scope-action accent — slate/teal-tinted, distinct from the warm
+     --accent so buttons that write to ?cells= (Filter Scope) read as a
+     different category from buttons that mutate the selection bag. */
+  --accent-scope: #4a5d7a;
 
   /* Semantic colors */
   --error: #c62828;
@@ -2063,6 +2071,39 @@ h1, h2, h3, h4, h5, h6 {
   padding: 2px;
   text-align: center;
 }
+/* Row-select column (the leading sortable checkbox). Wider than the
+   row-action columns so the header can fit both the select-all
+   checkbox and a sort-direction glyph without crowding. The header
+   pairs the two in a single button: the checkbox stops click
+   propagation so toggle and sort can be hit independently. */
+.partners .row-select-col {
+  width: 40px;
+  min-width: 40px;
+  max-width: 40px;
+  padding: 2px;
+  text-align: center;
+}
+.partners .row-select-sort {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  background: transparent;
+  border: none;
+  padding: 2px 4px;
+  cursor: pointer;
+  color: inherit;
+  border-radius: 3px;
+}
+.partners .row-select-sort:hover {
+  background: rgba(0, 0, 0, 0.05);
+}
+.partners .row-select-indicator {
+  font-size: 10px;
+  line-height: 1;
+}
+.partners .row-select-indicator.inactive {
+  opacity: 0.35;
+}
 /* `.row-action` matches both `<button>` (open in NGL) and `<a>` (cross-nav
    link to the partner). The Link variant inherits these styles so a row
    has a consistent visual language whether the action is imperative or
@@ -3150,7 +3191,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
  *   - empty / loading / error placeholders (FeatureExplorer stub)
  *   - shared picker primitives (EmbeddingPicker, ColorByPicker successors)
  *   - DecorationPicker chips
- *   - KnnControls inputs + buttons
+ *   - GrowSelectionPanel (selection-growth controls + CDF widget)
  * The rest of the explorer CSS was removed alongside the parallel UI
  * components; new layout styles will land with the AnalyticsRail-based
  * rebuild. */
@@ -3162,7 +3203,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   color: var(--muted);
   font-size: 14px;
 }
-.explore-error { color: #b00020; }
+.explore-error { color: var(--error); }
 
 /* Shared picker primitives */
 .explore-picker {
@@ -3171,10 +3212,16 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   gap: 4px;
 }
 .explore-picker-label {
-  font-size: 11px;
-  color: var(--muted);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
+  /* Picker section titles — Channels, Embedding, Feature table,
+     Decoration tables. Smaller serif sibling of .rail-section-header
+     so they read as titled sub-sections under Configuration rather
+     than form labels. Same family + weight as the section header,
+     one step down in size to preserve hierarchy. */
+  font-family: var(--font-serif);
+  font-size: 12px;
+  font-weight: var(--fw-title);
+  letter-spacing: -0.005em;
+  color: var(--fg);
 }
 .explore-picker-static {
   font-size: 13px;
@@ -3200,16 +3247,108 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   font-style: italic;
 }
 
-/* KnnControls */
-.explore-knn {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 8px 0;
+/* Rail section primitive — disabled / collapsed / open tri-state.
+   Used to keep the rail's action surface stable as data state changes:
+   sections never vanish, they just gray out or collapse. See
+   CollapsibleSection.tsx for the behavior contract. */
+.rail-section {
   border-top: 1px solid var(--line);
 }
-.explore-knn-mode { display: flex; gap: 4px; }
-.explore-knn-mode button {
+.rail-section-header-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.rail-section-header-wrap .rail-section-header {
+  flex: 1 1 auto;
+}
+.rail-section-header-action {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  padding-right: 4px;
+}
+.rail-section-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 4px;
+  /* Plex Serif — picks up the same family the global h1-h6 rule
+     applies, but `.rail-section-header` is a <button> so it has to
+     declare the family explicitly. Drops uppercase + letter-spacing
+     in favor of the serif's own typographic weight; section titles
+     now read as scientific-notebook chrome rather than SaaS-form
+     labels. */
+  font-family: var(--font-serif);
+  font-size: 13px;
+  font-weight: var(--fw-title);
+  letter-spacing: -0.005em;
+  color: var(--fg);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+}
+.rail-section-header:hover:not(:disabled) {
+  color: var(--accent);
+}
+.rail-section-header:disabled {
+  cursor: not-allowed;
+  color: var(--muted);
+  opacity: 0.55;
+}
+.rail-section-chevron {
+  font-size: 10px;
+  width: 10px;
+  display: inline-block;
+  color: var(--muted);
+}
+.rail-section.open .rail-section-chevron,
+.rail-section-header:hover:not(:disabled) .rail-section-chevron {
+  color: var(--accent);
+}
+.rail-section-title {
+  flex: 1;
+}
+.rail-section-badge {
+  font-size: 11px;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--muted);
+  font-weight: 400;
+}
+.rail-section-summary {
+  padding: 0 4px 10px 22px;
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.5;
+  overflow-wrap: break-word;
+}
+.rail-section-summary code {
+  font-size: 11px;
+  color: var(--fg);
+  background: none;
+  padding: 0;
+}
+.rail-section-body {
+  padding: 4px 0 10px 0;
+}
+
+/* GrowSelectionPanel — body content for the "Grow selection" rail
+   section. Controls drive the /distance_to_set request; results land
+   as a CDF widget + threshold-driven actions that union into the
+   selection bag. */
+.explore-grow {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.explore-grow-segmented {
+  display: flex;
+  gap: 4px;
+}
+.explore-grow-segmented button {
   flex: 1;
   padding: 4px 0;
   font-size: 12px;
@@ -3219,25 +3358,21 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   border-radius: var(--r-sm);
   cursor: pointer;
 }
-.explore-knn-mode button.active {
+.explore-grow-segmented button.active {
   background: var(--accent);
   color: white;
   border-color: var(--accent);
 }
-.explore-knn-input {
-  font: inherit;
-  font-size: 13px;
-  color: var(--fg);
-  background: var(--bg);
-  border: 1px solid var(--line);
-  border-radius: var(--r-sm);
-  padding: 6px 8px;
+.explore-grow-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
 }
-.explore-knn-k { display: flex; align-items: center; gap: 8px; font-size: 12px; }
-.explore-knn-k label { color: var(--muted); }
-.explore-knn-k input {
+.explore-grow-row label { color: var(--muted); }
+.explore-grow-row input[type="number"] {
   font: inherit;
-  font-size: 13px;
+  font-size: 12px;
   color: var(--fg);
   background: var(--bg);
   border: 1px solid var(--line);
@@ -3245,10 +3380,106 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   padding: 4px 6px;
   width: 80px;
 }
-.explore-knn-actions { display: flex; gap: 6px; }
-.explore-knn-actions button {
+.explore-grow-variance-slider {
   flex: 1;
-  padding: 6px 0;
+  min-width: 90px;
+  max-width: 160px;
+  accent-color: var(--accent);
+}
+.explore-grow-advanced {
+  border-top: 1px dashed var(--line);
+  padding-top: 6px;
+}
+.explore-grow-advanced summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--muted);
+}
+.explore-grow-feature-section {
+  margin-top: 8px;
+  border-top: 1px dotted var(--line);
+  padding-top: 6px;
+}
+.explore-grow-feature-section:first-of-type {
+  margin-top: 6px;
+  border-top: none;
+  padding-top: 0;
+}
+.explore-grow-feature-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--fg);
+  margin-bottom: 3px;
+}
+.explore-grow-feature-section-title { font-weight: 500; }
+.explore-grow-feature-section-count { color: var(--muted); font-weight: 400; }
+.explore-grow-feature-section-actions {
+  display: inline-flex;
+  gap: 4px;
+}
+.explore-grow-feature-section-actions button {
+  font: inherit;
+  font-size: 10px;
+  padding: 2px 6px;
+  background: var(--bg);
+  color: var(--accent);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  text-transform: lowercase;
+}
+.explore-grow-feature-section-actions button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+.explore-grow-feature-section-actions button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.explore-grow-features {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: 220px;
+  overflow-y: auto;
+  padding-left: 6px;
+}
+.explore-grow-features label {
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--fg);
+}
+.explore-grow-feature-reset {
+  font-size: 11px;
+  color: var(--accent);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  align-self: flex-start;
+}
+.explore-grow-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+/* Variant with a flex spacer between left-cluster (selection-bag
+   actions) and right-cluster (scope action). The spacer absorbs all
+   the gap so the two clusters don't drift toward each other on narrow
+   rails. */
+.explore-grow-actions-split {
+  align-items: center;
+  flex-wrap: nowrap;
+}
+.explore-grow-actions-spacer {
+  flex: 1 1 auto;
+}
+.explore-grow-actions button {
+  padding: 6px 10px;
   font-size: 12px;
   border: 1px solid var(--accent);
   border-radius: var(--r-sm);
@@ -3256,14 +3487,303 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   color: var(--accent);
   cursor: pointer;
 }
-.explore-knn-actions button:disabled { opacity: 0.55; cursor: not-allowed; }
-.explore-knn-error { font-size: 11px; color: #b00020; padding: 4px 0; }
+.explore-grow-actions button.primary {
+  background: var(--accent);
+  color: white;
+}
+/* Scope action — distinct from the bag-cluster buttons because it
+   writes to ?cells= (a different surface, different undo path).
+   Uses --accent-scope (slate/teal) instead of the warm --accent so the
+   user reads it as a category-shift rather than a louder version of
+   "Select". */
+.explore-grow-actions button.scope-action {
+  border-color: var(--accent-scope);
+  color: var(--accent-scope);
+}
+.explore-grow-actions button.scope-action:hover:not(:disabled) {
+  background: var(--accent-scope);
+  color: white;
+}
+.explore-grow-actions button:disabled { opacity: 0.55; cursor: not-allowed; }
+.explore-grow-stats { font-size: 11px; color: var(--muted); }
+.explore-grow-help {
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.4;
+  font-style: italic;
+}
+.explore-grow-error { font-size: 11px; color: var(--error); }
 
-/* CellIdSearch — small rail trigger that opens a modal containing
-   the actual search UI. The trigger is a compact one-line button so
-   it doesn't eat the rail real estate of an inline panel; the modal
-   has room for the multi-line input + status detail without crowding
-   the always-on controls (pickers, channel binders) in the rail. */
+.distance-cdf-svg {
+  display: block;
+  width: 100%;
+  height: 80px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  cursor: crosshair;
+}
+.distance-cdf-fill { fill: var(--accent); fill-opacity: 0.15; }
+.distance-cdf-line {
+  stroke: var(--accent);
+  stroke-width: 1.5;
+  fill: none;
+  vector-effect: non-scaling-stroke;
+}
+.distance-cdf-tick-line {
+  stroke: var(--muted);
+  stroke-opacity: 0.3;
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+.distance-cdf-tick-label {
+  fill: var(--muted);
+  font-size: 9px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+}
+.distance-cdf-threshold {
+  stroke: var(--accent);
+  stroke-dasharray: 3 2;
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+/* Threshold label is rendered as HTML overlaid on the SVG (rather
+   than an in-SVG `<text>`) so it isn't stretched by the SVG's
+   `preserveAspectRatio="none"`. Absolutely positioned with a
+   percentage `top` keyed to the threshold's y in viewBox space, so
+   it tracks the dashed line at every chart width. */
+.distance-cdf-wrap {
+  position: relative;
+}
+.distance-cdf-threshold-label {
+  position: absolute;
+  right: 4px;
+  transform: translateY(-100%);
+  font-size: 11px;
+  font-weight: 600;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  color: var(--accent);
+  background: rgba(255, 255, 255, 0.85);
+  padding: 0 4px;
+  border-radius: 2px;
+  pointer-events: none;
+  white-space: nowrap;
+}
+.distance-cdf-threshold-d {
+  opacity: 0.75;
+  font-weight: 500;
+}
+
+/* SelectionBuilderPanel — multi-column AND-predicate builder. Same
+   visual language as GrowSelectionPanel; predicate rows nest a
+   per-column control set (numeric inputs or a categorical checklist). */
+.explore-select-builder {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.explore-select-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 0;
+  border-top: 1px dotted var(--line);
+}
+.explore-select-row:first-of-type {
+  border-top: none;
+}
+.explore-select-row-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+.explore-select-row-col {
+  font-size: 12px;
+  color: var(--fg);
+  font-weight: 500;
+}
+.explore-select-row-head button {
+  font: inherit;
+  font-size: 12px;
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+}
+.explore-select-row-head button:hover { color: var(--error); }
+.explore-select-row-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+.explore-select-row-row input[type="number"] {
+  font: inherit;
+  font-size: 12px;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  padding: 4px 6px;
+  width: 90px;
+}
+.explore-select-row-sep { color: var(--muted); }
+
+/* Numeric predicate: histogram + dual-handle range slider */
+.explore-select-numeric {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.explore-select-histogram { display: flex; flex-direction: column; gap: 2px; }
+.explore-select-histogram-svg {
+  display: block;
+  width: 100%;
+  height: 38px;
+  cursor: crosshair;
+  user-select: none;
+}
+.explore-select-histogram-bound {
+  stroke: var(--accent);
+  stroke-width: 1;
+  stroke-dasharray: 3 2;
+  vector-effect: non-scaling-stroke;
+}
+.explore-select-tick {
+  cursor: text;
+  border-bottom: 1px dotted transparent;
+  padding: 0 2px;
+}
+.explore-select-tick:hover {
+  border-bottom-color: var(--accent);
+  color: var(--accent);
+}
+.explore-select-tick-input {
+  font: inherit;
+  font-size: 10px;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--accent);
+  border-radius: var(--r-sm);
+  padding: 0 4px;
+  width: 80px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+}
+.explore-select-histogram-ticks-right,
+.summary-histogram-ticks-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Lin/log axis toggle — used by every histogram in the rail. Compact
+   chip: shows the active scale; click flips. Restyled when "log" so
+   the user sees at a glance which mode is on. */
+.linlog-toggle {
+  font: inherit;
+  font-size: 9px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 1px 5px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--bg);
+  color: var(--muted);
+  cursor: pointer;
+}
+.linlog-toggle:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.linlog-toggle.linlog-log {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: rgba(245, 158, 11, 0.08);
+}
+.explore-select-histogram-bar-in {
+  fill: var(--accent);
+  fill-opacity: 0.75;
+}
+.explore-select-histogram-bar-out {
+  fill: rgba(0, 0, 0, 0.18);
+}
+.explore-select-histogram-ticks {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10px;
+  color: var(--muted);
+  font-family: var(--font-mono, ui-monospace, monospace);
+}
+
+/* Categorical predicate: checkbox + count bar per value */
+.explore-select-categorical {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.explore-select-cat-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 240px;
+  overflow-y: auto;
+}
+.explore-select-cat-row {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr) 60px 44px;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 1px 2px;
+}
+.explore-select-cat-row.checked { color: var(--fg); }
+.explore-select-cat-row-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.explore-select-cat-row-bar-wrap {
+  height: 8px;
+  background: rgba(0, 0, 0, 0.08);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.explore-select-cat-row-bar {
+  display: block;
+  height: 100%;
+  background: rgba(0, 0, 0, 0.25);
+}
+.explore-select-cat-row.checked .explore-select-cat-row-bar {
+  background: var(--accent);
+  opacity: 0.85;
+}
+.explore-select-cat-row-count {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10px;
+  text-align: right;
+  color: var(--muted);
+}
+.explore-select-cat-row.checked .explore-select-cat-row-count {
+  color: var(--fg);
+}
+
+/* CellIdSearch — rail-anchored trigger + popover. The trigger is a
+   compact one-line button in the "Build selection" section header;
+   clicking it opens an anchored popover with the actual search UI.
+   Popover opens *downward* (default placement) — the trigger sits in
+   the upper portion of the rail, so there's room below; it would clip
+   above. Width is generous (360px) to comfortably hold the multi-line
+   textarea + mode toggle + Select/Add actions + status detail; it
+   overflows the rail rightward onto the scatter, which is fine
+   because the scatter dims under the popover's box-shadow. */
+.cell-id-search-menu {
+  position: relative;
+  display: inline-block;
+}
 .cell-id-search-trigger {
   display: inline-flex;
   align-items: center;
@@ -3281,65 +3801,38 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   border-color: var(--accent);
   color: var(--accent);
 }
+.cell-id-search-trigger[aria-expanded="true"] {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-bg);
+}
 .cell-id-search-trigger > span:first-child {
   font-size: 14px;
   line-height: 1;
 }
 
-.cell-id-search-modal-backdrop {
-  position: fixed;
-  inset: 0;
-  background: rgba(15, 18, 25, 0.55);
-  z-index: 1000;
-  display: flex;
-  align-items: flex-start;
-  justify-content: center;
-  /* Vertical offset so the modal sits in the upper third of the
-     viewport rather than dead center — keeps the scatter visible
-     behind/below it so the user can see the highlight light up as
-     soon as the search resolves. */
-  padding: 8vh 24px 24px;
-}
-.cell-id-search-modal {
-  position: relative;
-  width: min(520px, 92vw);
-  max-height: 80vh;
+.cell-id-search-popover {
+  position: absolute;
+  top: calc(100% + 4px);
+  /* Left-anchor — the trigger sits at the right end of the rail's
+     section header, but the rail itself is narrow (~280px). Anchoring
+     the popover's right edge to the trigger would push the popover's
+     left edge off the rail. Left-anchoring grows it rightward into the
+     scatter area, which has plenty of room. */
+  left: 0;
+  width: 360px;
+  max-width: 92vw;
+  max-height: 70vh;
+  overflow: auto;
   background: var(--bg);
   border: 1px solid var(--line);
-  border-radius: var(--r-lg);
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.25);
-  padding: 14px 16px 16px;
-  overflow: auto;
+  border-radius: var(--r-md);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+  padding: 10px 12px 12px;
+  z-index: 1000;
   display: flex;
   flex-direction: column;
   gap: 8px;
-}
-.cell-id-search-modal-header {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
-}
-.cell-id-search-modal-title {
-  margin: 0;
-  font-size: 14px;
-  font-weight: 600;
-  letter-spacing: 0.01em;
-}
-.cell-id-search-modal-close {
-  width: 26px;
-  height: 26px;
-  font-size: 14px;
-  line-height: 1;
-  border: 1px solid var(--line);
-  background: var(--bg);
-  color: var(--muted);
-  border-radius: var(--r-md);
-  cursor: pointer;
-}
-.cell-id-search-modal-close:hover {
-  color: var(--error);
-  border-color: var(--accent);
 }
 .cell-id-search-form {
   display: flex;
@@ -3365,8 +3858,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .cell-id-search-input {
   font: inherit;
   font-size: 12px;
-  font-family:
-    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-family: var(--font-mono, ui-monospace, monospace);
   color: var(--fg);
   background: var(--bg);
   border: 1px solid var(--line);
@@ -3380,10 +3872,14 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   color: var(--muted);
   font-family: inherit;
 }
-.cell-id-search-actions { display: flex; justify-content: flex-end; }
+.cell-id-search-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
 .cell-id-search-submit {
-  padding: 5px 14px;
-  font-size: 13px;
+  padding: 4px 10px;
+  font-size: 12px;
   line-height: 1;
   border: 1px solid var(--accent);
   border-radius: var(--r-sm);
@@ -3391,13 +3887,17 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   color: var(--accent);
   cursor: pointer;
 }
+.cell-id-search-submit.primary {
+  background: var(--accent);
+  color: white;
+}
 .cell-id-search-submit:disabled {
   opacity: 0.55;
   cursor: not-allowed;
 }
 .cell-id-search-error {
   font-size: 11px;
-  color: #b00020;
+  color: var(--error);
   padding: 4px 0;
   word-break: break-word;
 }
@@ -3488,7 +3988,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   padding: 0 2px;
   line-height: 1;
 }
-.explore-dec-chip-remove:hover { color: #b00020; }
+.explore-dec-chip-remove:hover { color: var(--error); }
 
 /* ---- Feature Explorer layout (v2) -------------------------------------- */
 /* Cinematic layout: full-bleed scatter, bottom drawer for the table.
@@ -3571,7 +4071,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   pointer-events: none;
   z-index: 1;
 }
-.universe-scatter-placeholder.error { color: #b00020; }
+.universe-scatter-placeholder.error { color: var(--error); }
 
 /* Drawer — always shows a handle strip; body slides in when open. */
 .explore-drawer {
@@ -3580,7 +4080,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   flex-direction: column;
   border-top: 1px solid var(--border, #e5e7eb);
   min-height: 0;
-  background: white;
+  background: var(--bg);
   transition: flex-basis 0.18s ease-out;
 }
 .explore-drawer.open {
@@ -3659,7 +4159,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   font-style: normal;
   color: var(--muted, #6b7280);
 }
-.explore-drawer-count .error { color: #b00020; }
+.explore-drawer-count .error { color: var(--error); }
 .explore-clear-lasso {
   margin-left: auto;
   font-size: 11px;
@@ -3711,9 +4211,11 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   right: 8px;
   display: flex;
   gap: 4px;
-  background: rgba(255, 255, 255, 0.85);
-  border: 1px solid var(--border, #e5e7eb);
-  border-radius: 4px;
+  /* Translucent paper-cream — matches the page bg with a slight
+     transparency so the scatter beneath shows through faintly. */
+  background: rgba(253, 252, 247, 0.85);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
   padding: 2px;
   z-index: 2;
 }
@@ -3722,16 +4224,62 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   padding: 3px 8px;
   background: transparent;
   border: none;
-  border-radius: 3px;
+  border-radius: var(--r-sm);
   cursor: pointer;
-  color: var(--muted, #6b7280);
+  color: var(--muted);
 }
 .universe-toolbar button:hover {
-  background: rgba(0, 0, 0, 0.05);
+  background: var(--accent-bg);
+  color: var(--accent);
 }
+/* Active tool = iron-gall ink on paper. Matches the workspace accent
+   the way every other "selected" affordance does (mode toggles,
+   primary buttons), so the pan/lasso/fit toolbar reads as part of
+   the same UI family rather than a Material-y bright orange. */
 .universe-toolbar button.active {
-  background: #f59e0b;
-  color: white;
+  background: var(--accent);
+  color: var(--bg);
+}
+/* Hover-revealed cheat sheet for the lasso modifiers. Wraps the lasso
+   toolbar button so the tooltip can anchor relative to it. */
+.universe-lasso-btn-wrap {
+  position: relative;
+  display: inline-flex;
+}
+.universe-lasso-tooltip {
+  display: none;
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  flex-direction: column;
+  gap: 5px;
+  background: rgba(15, 23, 42, 0.94);
+  color: #f3f4f6;
+  font-size: 12px;
+  line-height: 1.4;
+  padding: 8px 10px;
+  border-radius: 5px;
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 3;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+.universe-lasso-btn-wrap:hover .universe-lasso-tooltip,
+.universe-lasso-btn-wrap:focus-within .universe-lasso-tooltip {
+  display: flex;
+}
+.universe-lasso-tooltip kbd {
+  display: inline-block;
+  min-width: 1.4em;
+  padding: 1px 5px;
+  margin-right: 6px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
+  text-align: center;
+  background: rgba(255, 255, 255, 0.16);
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 3px;
+  color: #f9fafb;
 }
 .universe-tooltip {
   background: rgba(15, 23, 42, 0.92);
@@ -4348,7 +4896,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   left: 0;
   right: 0;
   z-index: 20;
-  background: #fff;
+  background: var(--bg);
   border: 1px solid var(--border, #d1d5db);
   border-radius: 4px;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
@@ -4519,7 +5067,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 }
 .explore-ngl-error {
   font-size: 11px;
-  color: #b00020;
+  color: var(--error);
 }
 
 /* Pills in the drawer header — both "open in NGL" actions and
@@ -4607,15 +5155,18 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   border-color: var(--border, #e5e7eb);
 }
 
-/* "★ Save selection" pill — same shape language as the NGL / clear
-   pills, distinct color (gold) so it reads as a separate affordance
-   rather than another clear-action. */
+/* "★ Save selection" pill — iron-gall outline, matched with the
+   filled "★ Sets" pill so the pair reads as one verb/collection
+   family. Clear / NGL pills keep their semantic colors (lasso orange,
+   row-sel blue, NGL indigo) because those mirror the scatter
+   highlight colors; Save/Sets have no scatter-side anchor, so they
+   drop into the workspace accent. */
 .explore-save-pill {
-  background: rgba(202, 138, 4, 0.12);
-  color: #854d0e;
-  border: 1px solid #ca8a04;
+  background: transparent;
+  color: var(--accent);
+  border: 1px solid var(--accent);
 }
-.explore-save-pill:hover:not(.disabled) { background: rgba(202, 138, 4, 0.22); }
+.explore-save-pill:hover:not(.disabled) { background: var(--accent-bg); }
 .explore-save-pill.disabled {
   opacity: 0.4;
   cursor: not-allowed;
@@ -4623,22 +5174,39 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   color: var(--muted, #6b7280);
   border-color: var(--border, #e5e7eb);
 }
-.explore-save-prompt {
+/* "★ Save selection" pill + anchored popover. The popover is
+   position: absolute relative to the menu wrapper so opening it
+   doesn't push the sibling "★ Sets" pill sideways. Same idiom as
+   .saved-sets-menu below — both sibling pills behave identically. */
+.save-selection-menu {
+  position: relative;
+  display: inline-block;
+}
+.save-selection-popover {
+  position: absolute;
+  /* Right-anchor — the Save pill sits before "★ Sets" in the cluster;
+     anchoring left would push the popover off-screen on narrow rails. */
+  right: 0;
   display: inline-flex;
   align-items: center;
   gap: 2px;
-  margin-left: 4px;
-  background: #fff;
-  border: 1px solid #ca8a04;
-  border-radius: 4px;
-  padding: 1px 2px;
+  background: var(--bg);
+  border: 1px solid var(--accent);
+  border-radius: var(--r-md);
+  padding: 2px 4px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+  z-index: 1000;
+  /* .cell-filter-menu-popover-up handles bottom: calc(100% + 4px) so
+     the popover opens upward from the drawer-anchored pill. */
 }
 .explore-save-prompt-input {
-  font-size: 11px;
-  padding: 1px 4px;
+  font-size: 12px;
+  padding: 2px 4px;
   border: none;
   outline: none;
-  min-width: 120px;
+  min-width: 160px;
+  background: transparent;
+  color: var(--fg);
 }
 .explore-save-prompt-ok,
 .explore-save-prompt-cancel {
@@ -4648,10 +5216,10 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   line-height: 1;
   padding: 0 4px;
   cursor: pointer;
-  color: var(--muted, #6b7280);
+  color: var(--muted);
 }
-.explore-save-prompt-ok:hover { color: #16a34a; }
-.explore-save-prompt-cancel:hover { color: #dc2626; }
+.explore-save-prompt-ok:hover { color: var(--ok); }
+.explore-save-prompt-cancel:hover { color: var(--error); }
 
 /* ---- Saved cell sets menu (drawer toolbar pill + popover) ------------ */
 /* Trigger pill — sibling to .explore-save-pill so the two read as a
@@ -4662,11 +5230,14 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   display: inline-block;
 }
 .saved-sets-menu-trigger {
-  background: rgba(202, 138, 4, 0.12);
-  color: #854d0e;
-  border: 1px solid #ca8a04;
+  background: var(--accent-bg);
+  color: var(--accent-strong);
+  border: 1px solid var(--accent);
 }
-.saved-sets-menu-trigger.has-sets:hover { background: rgba(202, 138, 4, 0.22); }
+.saved-sets-menu-trigger.has-sets:hover {
+  background: var(--accent);
+  color: var(--bg);
+}
 .saved-sets-menu-trigger.disabled {
   opacity: 0.4;
   cursor: not-allowed;
@@ -4751,7 +5322,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   border: 1px solid #6366f1;
   border-radius: 3px;
   outline: none;
-  background: #fff;
+  background: var(--bg);
 }
 .saved-sets-actions {
   display: inline-flex;

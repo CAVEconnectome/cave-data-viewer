@@ -292,6 +292,15 @@ _KINDS: tuple[str, ...] = (
     # mat_version pays the CAVE round-trip; all subsequent pods +
     # users hit warm.
     "cell_id_universe",
+    # Tiny histogram summary of one feature column (bin counts +
+    # min/max for numeric; per-value counts for categorical). A
+    # hundred-ish bytes per entry; immutable per (ds, ft, column,
+    # dec, mv, bins) since the parquet content is pinned by URI and
+    # decoration snapshots are pinned by mat_version. Heavily shared:
+    # every user opening the Selection Builder on the same column
+    # hits the same entry, so the first user warms the cache and the
+    # rest read for the cost of a single small GCS object fetch.
+    "column_histograms",
 )
 _RETENTION_CLASSES: tuple[str, ...] = ("default", "longlived")
 

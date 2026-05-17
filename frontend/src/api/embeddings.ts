@@ -1,17 +1,20 @@
 // Feature Explorer TanStack Query hooks.
 //
 // Slim foundation surface — only what the refactored explorer will need:
-// the catalog list, kNN, and the cell_id->root_id resolver. The bulk
-// data-fetching hooks (useEmbeddingPoints, useEmbeddingColumn,
-// useDecorationCategoricalColumns) were removed when the UI flipped
-// onto the shared toolkit — `/plots` covers plotting and a new
-// `/feature_tables/<ft>/rows` endpoint will cover the table.
+// the catalog list, the distance-to-set similarity primitive, and the
+// cell_id->root_id resolver. The bulk data-fetching hooks
+// (useEmbeddingPoints, useEmbeddingColumn, useDecorationCategoricalColumns)
+// were removed when the UI flipped onto the shared toolkit — `/plots`
+// covers plotting and a new `/feature_tables/<ft>/rows` endpoint will
+// cover the table.
 
 import { useMutation, useQuery, type QueryKey } from "@tanstack/react-query";
 import { apiFetch } from "./client";
 import type {
+  ColumnHistogramResponse,
+  DistanceToSetArgs,
+  DistanceToSetResponse,
   EmbeddingColumnResponse,
-  EmbeddingKnnResponse,
   EmbeddingListResponse,
   EmbeddingScatterResponse,
   FeatureTableCellsResponse,
@@ -31,8 +34,10 @@ const PATHS = {
     // We still encodeURIComponent the segment so slashes or unusual
     // characters in a column name don't break the URL.
     `/api/v1/datastacks/${ds}/feature_tables/${ftId}/column/${encodeURIComponent(column)}`,
-  knn: (ds: string, ftId: string) =>
-    `/api/v1/datastacks/${ds}/feature_tables/${ftId}/knn`,
+  columnHistogram: (ds: string, ftId: string, column: string) =>
+    `/api/v1/datastacks/${ds}/feature_tables/${ftId}/column/${encodeURIComponent(column)}/histogram`,
+  distanceToSet: (ds: string, ftId: string) =>
+    `/api/v1/datastacks/${ds}/feature_tables/${ftId}/distance_to_set`,
   resolveRoots: (ds: string, ftId: string) =>
     `/api/v1/datastacks/${ds}/feature_tables/${ftId}/resolve_roots`,
   findCells: (ds: string, ftId: string) =>
@@ -136,7 +141,7 @@ export interface CellListArgs {
   /** Explicit cell_id subset (e.g. from a universe-scatter lasso).
    *  ANDs with the `cells` filter expression server-side. Null or
    *  empty means no lasso constraint. */
-  selCellIds?: string[] | null;
+  cellIds?: string[] | null;
   limit?: number;
 }
 
@@ -152,12 +157,12 @@ export function useCellList(args: CellListArgs | null) {
           args.matVersion,
           (args.decorationTables ?? []).join(","),
           args.cells ?? "",
-          (args.selCellIds ?? []).join(","),
+          (args.cellIds ?? []).join(","),
           args.limit ?? null,
         ]
       : ["feature_cells", "disabled"],
     queryFn: () =>
-      // POST rather than GET — sel_cell_ids can run into the tens of
+      // POST rather than GET — cell_ids can run into the tens of
       // thousands of ids on a large lasso, which overflows Node's
       // default 8KB request-header limit when it rides in a query
       // string. Body has no such limit.
@@ -172,7 +177,7 @@ export function useCellList(args: CellListArgs | null) {
                 : args!.matVersion,
           dec: args!.decorationTables?.length ? args!.decorationTables : undefined,
           cells: args!.cells || undefined,
-          sel_cell_ids: args!.selCellIds?.length ? args!.selCellIds : undefined,
+          cell_ids: args!.cellIds?.length ? args!.cellIds : undefined,
           limit: args!.limit,
         },
       }),
@@ -243,42 +248,94 @@ export function useEmbeddingColumn(args: EmbeddingColumnArgs | null) {
   });
 }
 
-// ---- /knn ------------------------------------------------------------------
+// ---- /column/<col>/histogram ----------------------------------------------
 
-export interface EmbeddingKnnArgs {
-  ds: string;
-  /** Feature table id — kNN is data-level, not view-level, so it's keyed
-   *  on the table rather than any one embedding. Multiple embeddings on
-   *  one table share the kNN index. */
-  featureTableId: string;
-  /** Provide either `cellId` (preferred — stable across edits) or
-   *  `rootId` + `matVersion` (server reverse-resolves to cell_id). */
-  cellId?: string | number;
-  rootId?: string | number;
-  matVersion?: number | "live" | null;
-  k?: number;
-  featureColumns?: string[];
+export interface ColumnHistogramArgs extends EmbeddingColumnArgs {
+  /** Numeric bin count. Default 60. Ignored for categorical. */
+  bins?: number;
+  /** Bin edge spacing. ``linear`` (default) gives equal-width bins
+   *  between min and max; ``log`` gives exponentially-spaced edges
+   *  for heavy-tailed distributions. Server silently falls back to
+   *  linear when the column contains non-positive values (response
+   *  carries ``log_fallback: true``). Ignored for categorical. */
+  binning?: "linear" | "log";
 }
 
-/** kNN is a one-shot user action ("Find neighbors" click), so a mutation
- *  rather than a query — fires on demand, no auto-refetch on focus etc. */
-export function useEmbeddingKnnMutation() {
-  return useMutation<EmbeddingKnnResponse, Error, EmbeddingKnnArgs>({
-    mutationFn: (args) =>
-      apiFetch<EmbeddingKnnResponse>(PATHS.knn(args.ds, args.featureTableId), {
-        method: "POST",
-        body: {
-          ...(args.cellId !== undefined ? { cell_id: args.cellId } : {}),
-          ...(args.rootId !== undefined ? { root_id: args.rootId } : {}),
-          ...(args.matVersion !== undefined && args.matVersion !== null
-            ? { mat_version: args.matVersion }
-            : {}),
-          ...(args.k !== undefined ? { k: args.k } : {}),
-          ...(args.featureColumns !== undefined
-            ? { feature_columns: args.featureColumns }
-            : {}),
+/** Tiny histogram summary of one column. Backed by the L2-cached
+ *  ``dcv_column_histogram_cache`` on the server — warm hits round-trip
+ *  in tens of milliseconds with a hundreds-of-bytes payload, so this
+ *  is the right primitive for first-paint of any per-column
+ *  distribution display.
+ *
+ *  The full ``useEmbeddingColumn`` is still needed when the consumer
+ *  requires per-cell-id masks (e.g. the SelectionBuilder's cross-
+ *  column AND intersection). They can be requested in parallel; the
+ *  histogram lands first and paints the chart while the heavier
+ *  column data streams in for the matching pass. */
+export function useColumnHistogram(args: ColumnHistogramArgs | null) {
+  return useQuery<ColumnHistogramResponse>({
+    queryKey: args
+      ? [
+          "column_histogram",
+          args.ds,
+          args.featureTableId,
+          args.column,
+          (args.decorationTables ?? []).join(","),
+          args.matVersion ?? "",
+          args.bins ?? 60,
+          args.binning ?? "linear",
+        ]
+      : ["column_histogram", "disabled"],
+    queryFn: () =>
+      apiFetch<ColumnHistogramResponse>(
+        PATHS.columnHistogram(args!.ds, args!.featureTableId, args!.column),
+        {
+          query: {
+            bins: String(args!.bins ?? 60),
+            binning: args!.binning ?? "linear",
+            dec: args!.decorationTables?.length
+              ? args!.decorationTables.join(",")
+              : undefined,
+            mat_version:
+              args!.matVersion === "live"
+                ? "live"
+                : args!.matVersion === null || args!.matVersion === undefined
+                  ? undefined
+                  : String(args!.matVersion),
+          },
         },
-      }),
+      ),
+    enabled:
+      !!args && !!args.ds && !!args.featureTableId && !!args.column,
+    staleTime: Infinity,
+  });
+}
+
+// ---- /distance_to_set ------------------------------------------------------
+
+/** Distance-to-set is a one-shot user action ("Compute distances" click)
+ *  so this is a mutation rather than a query. Caching of identical
+ *  inputs is left to the panel — it holds a small probe state and only
+ *  re-fires when seed-bag / space / k_pca / reduction / features change. */
+export function useDistanceToSetMutation() {
+  return useMutation<DistanceToSetResponse, Error, DistanceToSetArgs>({
+    mutationFn: (args) =>
+      apiFetch<DistanceToSetResponse>(
+        PATHS.distanceToSet(args.ds, args.featureTableId),
+        {
+          method: "POST",
+          body: {
+            cell_ids: args.cellIds,
+            space: args.space,
+            reduction: args.reduction,
+            ...(args.variance !== undefined ? { variance: args.variance } : {}),
+            ...(args.limit !== undefined ? { limit: args.limit } : {}),
+            ...(args.featureColumns !== undefined
+              ? { feature_columns: args.featureColumns }
+              : {}),
+          },
+        },
+      ),
   });
 }
 
@@ -287,7 +344,7 @@ export function useEmbeddingKnnMutation() {
 export interface ResolveRootsArgs {
   ds: string;
   featureTableId: string;
-  cellIds: Array<string | number>;
+  cellIds: string[];
   matVersion: number | "live";
 }
 

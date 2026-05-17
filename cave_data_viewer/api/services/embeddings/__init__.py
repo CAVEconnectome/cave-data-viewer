@@ -20,7 +20,7 @@ reader are implementation details.
 """
 
 from .decoration_join import get_decoration_table_snapshot, join_decoration_column
-from .knn import EmbeddingIndex, build_index, get_index
+from .feature_matrix import EmbeddingMatrix, build_matrix, get_matrix
 from .loader import load_feature_table_frame
 from .query import FeatureTableQuery
 from .manifest import (
@@ -70,10 +70,10 @@ __all__ = [
     "load_feature_table_frame",
     # Row context for ``embedding_cells``-sourced plots.
     "FeatureTableQuery",
-    # kNN index.
-    "EmbeddingIndex",
-    "build_index",
-    "get_index",
+    # Standardized feature matrix (powers distance-to-set + PCA + Mahalanobis).
+    "EmbeddingMatrix",
+    "build_matrix",
+    "get_matrix",
     # cell_id <-> root_id resolver.
     "Resolution",
     "ResolutionStatus",
