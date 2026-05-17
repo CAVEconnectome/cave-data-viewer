@@ -356,6 +356,7 @@ _KNOWN_FIELDS: tuple[str, ...] = (
     "coll",
     # explorer-shape top-level (single nested block)
     "explorer",
+    "scope",        # NEW — first-class recipe field (Filter Scope predicates)
     "saved_at",
 )
 
@@ -376,6 +377,7 @@ _DISK_ORDER: tuple[str, ...] = (
     "hide",
     "show",
     "coll",
+    "scope",        # NEW
     "plots",
     "explorer",
 )
