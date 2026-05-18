@@ -120,66 +120,66 @@ def _build_frame(n: int, rng: np.random.Generator, cell_ids: Sequence[int] | Non
     )
 
 
-def _build_manifest(parquet_path: Path) -> dict:
-    """Manifest (schema v2: feature_tables with nested embeddings) pointing
-    at the local parquet. URI is file:// so the dev backend resolves
-    without GCS auth."""
+def _build_feature_table(parquet_path: Path) -> dict:
+    """One per-file FeatureTableSpec (schema v1) pointing at the local
+    parquet. URI is file:// so the dev backend resolves without GCS
+    auth. Returned ready for yaml.safe_dump."""
     return {
-        "schema_version": 2,
-        "knn": {"default_k": 25, "max_k": 200, "standardize": True},
-        "feature_tables": [
+        "schema_version": 1,
+        "id": "morpho_sample",
+        "title": "Morphology features (synthetic sample)",
+        "description": (
+            "Synthetic sample feature table for local Feature Explorer "
+            "development. cell_ids do not correspond to real "
+            "nucleus_detection_v0 rows unless the generator was run with "
+            "--ids-csv."
+        ),
+        "source": {"kind": "parquet", "uri": f"file://{parquet_path}"},
+        "id_column": "cell_id",
+        "cell_id_source_table": "nucleus_detection_v0",
+        "feature_columns": [
+            "soma_depth_y",
+            "nucleus_volume_um",
+            "soma_area_um",
+        ],
+        "categorical_columns": ["predicted_class", "predicted_subclass"],
+        "spatial_columns": ["soma_depth_y"],
+        "depth_columns": ["soma_depth_y"],
+        "audit": {
+            "source_root_column": "source_root_id",
+            "source_mat_version_column": "source_mat_version",
+        },
+        # Categories group columns for the channel picker and the
+        # manual-histogram menu. A column may appear in multiple
+        # categories; columns not listed here render under an implicit
+        # "Uncategorized" group.
+        "categories": [
             {
-                "id": "morpho_sample",
-                "title": "Morphology features (synthetic sample)",
-                "description": (
-                    "Synthetic sample feature table for local Feature Explorer "
-                    "development. cell_ids do not correspond to real "
-                    "nucleus_detection_v0 rows unless the generator was run with "
-                    "--ids-csv."
-                ),
-                "source": {"kind": "parquet", "uri": f"file://{parquet_path}"},
-                "id_column": "cell_id",
-                "feature_columns": [
+                "id": "morphology",
+                "title": "Morphology",
+                "description": "Soma + nucleus geometry",
+                "columns": [
                     "soma_depth_y",
                     "nucleus_volume_um",
                     "soma_area_um",
                 ],
-                "categorical_columns": ["predicted_class", "predicted_subclass"],
-                "depth_columns": ["soma_depth_y"],
-                "audit": {
-                    "source_root_column": "source_root_id",
-                    "source_mat_version_column": "source_mat_version",
-                },
-                # Categories group columns for the channel picker and
-                # the manual-histogram menu. A column may appear in
-                # multiple categories; columns not listed here render
-                # under an implicit "Uncategorized" group.
-                "categories": [
-                    {
-                        "id": "morphology",
-                        "title": "Morphology",
-                        "description": "Soma + nucleus geometry",
-                        "columns": [
-                            "soma_depth_y",
-                            "nucleus_volume_um",
-                            "soma_area_um",
-                        ],
-                    },
-                    {
-                        "id": "classifier",
-                        "title": "Classifier",
-                        "description": "Predicted class labels",
-                        "columns": ["predicted_class", "predicted_subclass"],
-                    },
-                ],
-                "embeddings": [
-                    {
-                        "id": "umap",
-                        "title": "UMAP",
-                        "axes": ["umap_x", "umap_y"],
-                        "default_color_by": "predicted_subclass",
-                    }
-                ],
+            },
+            {
+                "id": "classifier",
+                "title": "Classifier",
+                "description": "Predicted class labels",
+                "columns": ["predicted_class", "predicted_subclass"],
+            },
+        ],
+        # Similarity controls moved per-table in schema v1.
+        "scaling": "zscore",
+        "clip_percentiles": [0.1, 99.9],
+        "embeddings": [
+            {
+                "id": "umap",
+                "title": "UMAP",
+                "axes": ["umap_x", "umap_y"],
+                "default_color_by": "predicted_subclass",
             }
         ],
     }
@@ -203,18 +203,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     frame.to_parquet(parquet_path, index=False)
     print(f"wrote {parquet_path}  ({len(frame)} rows, {len(frame.columns)} cols)")
 
-    manifest_path = args.outdir / "manifest.yaml"
-    manifest_path.write_text(
-        yaml.safe_dump(_build_manifest(parquet_path), sort_keys=False, allow_unicode=True)
-    )
-    print(f"wrote {manifest_path}")
+    # v1 catalog shape: each feature_table is its own .yaml file in a
+    # directory the datastack YAML's manifest_uri points at. The
+    # filename basename must equal the file's `id` (validated at load
+    # time).
+    catalog_dir = args.outdir / "feature_tables"
+    catalog_dir.mkdir(parents=True, exist_ok=True)
+    ft = _build_feature_table(parquet_path)
+    ft_path = catalog_dir / f"{ft['id']}.yaml"
+    ft_path.write_text(yaml.safe_dump(ft, sort_keys=False, allow_unicode=True))
+    print(f"wrote {ft_path}")
 
     print()
-    print("Next: point a datastack config at this manifest, e.g.")
+    print("Next: point a datastack config at this directory, e.g.")
     print("  feature_explorer:")
     print("    enabled: true")
-    print("    cell_id_source_table: nucleus_detection_v0")
-    print(f"    manifest_uri: file://{manifest_path}")
+    print("    cell_id_source_table: nucleus_detection_v0   # optional fallback")
+    print(f"    manifest_uri: file://{catalog_dir}/")
 
     return 0
 

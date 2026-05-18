@@ -261,39 +261,53 @@ def _classify_one(
 # ────────── Manifest construction ──────────
 
 
-def _build_manifest_dict(
+def _build_feature_table_dict(
     *,
     feature_table_id: str,
     title: str,
     description: str | None,
     parquet_uri: str,
     id_column: str,
+    cell_id_source_table: str | None,
     classification: dict[str, set[str]],
     audit: dict[str, str],
     embeddings: list[dict[str, Any]],
     categories: list[dict[str, Any]],
     knn: dict[str, Any],
 ) -> dict[str, Any]:
+    """Build the per-file FeatureTableSpec dict (schema v1) ready for
+    yaml.safe_dump. One file = one feature table at the top level — no
+    `feature_tables: [...]` wrapper, no manifest-level `knn:` block."""
     feature_columns = [c for c, tags in classification.items() if "feature" in tags]
     categorical_columns = [c for c, tags in classification.items() if "categorical" in tags]
     spatial_columns = [c for c, tags in classification.items() if "spatial" in tags]
     depth_columns = [c for c, tags in classification.items() if "depth" in tags]
 
-    feature_table: dict[str, Any] = {"id": feature_table_id, "title": title}
+    ft: dict[str, Any] = {"schema_version": 1, "id": feature_table_id, "title": title}
     if description:
-        feature_table["description"] = description
-    feature_table["source"] = {"kind": "parquet", "uri": parquet_uri}
-    feature_table["id_column"] = id_column
-    feature_table["feature_columns"] = feature_columns
-    feature_table["categorical_columns"] = categorical_columns
+        ft["description"] = description
+    ft["source"] = {"kind": "parquet", "uri": parquet_uri}
+    ft["id_column"] = id_column
+    if cell_id_source_table:
+        ft["cell_id_source_table"] = cell_id_source_table
+    ft["feature_columns"] = feature_columns
+    ft["categorical_columns"] = categorical_columns
     if spatial_columns:
-        feature_table["spatial_columns"] = spatial_columns
+        ft["spatial_columns"] = spatial_columns
     if depth_columns:
-        feature_table["depth_columns"] = depth_columns
+        ft["depth_columns"] = depth_columns
     if audit:
-        feature_table["audit"] = audit
+        ft["audit"] = audit
     if categories:
-        feature_table["categories"] = categories
+        ft["categories"] = categories
+    # Similarity controls (per-table since v1). Always emit so the YAML
+    # is self-documenting; defaults that match Pydantic's are still nice
+    # to surface for an operator scanning the file.
+    ft["scaling"] = knn.get("scaling", "zscore")
+    if knn.get("clip_percentiles") is None:
+        ft["clip_percentiles"] = None
+    else:
+        ft["clip_percentiles"] = list(knn["clip_percentiles"])
     # Embeddings: drop entries whose default_color_by is still None so
     # the wire shape stays clean. The Pydantic schema allows it null
     # but absent reads cleaner.
@@ -301,13 +315,8 @@ def _build_manifest_dict(
     for emb in embeddings:
         e = {k: v for k, v in emb.items() if v is not None}
         cleaned_embeddings.append(e)
-    feature_table["embeddings"] = cleaned_embeddings
-
-    return {
-        "schema_version": 2,
-        "knn": knn,
-        "feature_tables": [feature_table],
-    }
+    ft["embeddings"] = cleaned_embeddings
+    return ft
 
 
 # ────────── UI helpers (rich) ──────────
@@ -573,13 +582,20 @@ def _slugify_for_id(text: str) -> str:
 
 def _interactive_feature_table_identity(
     console: Console, parquet: Path, initial_id: str | None
-) -> tuple[str, str, str | None]:
-    """Prompt for feature_table id + title + description. Returns the trio.
+) -> tuple[str, str, str | None, str | None]:
+    """Prompt for feature_table id + title + description +
+    cell_id_source_table. Returns the quadruple.
 
-    The id is the manifest's `feature_tables[].id` — the stable handle
-    that shows up in /explore URLs (`?ft=<id>`), in recipes
-    (`explorer.ft: <id>`), and in operator examples. Slug-shaped:
-    lowercase, kebab or underscore.
+    The id is the stable handle the SPA uses in /explore URLs
+    (`?ft=<id>`), in recipes (`explorer.ft: <id>`), and in operator
+    examples. Slug-shaped: lowercase, kebab or underscore.
+
+    `cell_id_source_table` is the CAVE annotation table whose row ids
+    `id_column` references. Combined they form the composite stable
+    identity `(cell_id_source_table, id_column)` — necessary because
+    not every object gets a universal id; the source table is part of
+    the key. Optional here (an empty answer leaves the datastack-level
+    fallback to fill in).
     """
     console.print()
     console.rule("[bold]Step 1/6 — Feature table identity[/]")
@@ -602,7 +618,24 @@ def _interactive_feature_table_identity(
         default="",
         console=console,
     )
-    return ft_id, title, description.strip() or None
+    console.print(
+        "[dim]\n`cell_id_source_table` is the CAVE table whose row ids "
+        "this parquet's id_column references (e.g. nucleus_detection_v0). "
+        "Combined with id_column it forms the stable identity for every "
+        "row. Leave empty to inherit the datastack-level fallback "
+        "(feature_explorer.cell_id_source_table in the datastack YAML).[/]"
+    )
+    cell_id_source_table = Prompt.ask(
+        "cell_id_source_table  [empty = use datastack fallback]",
+        default="",
+        console=console,
+    )
+    return (
+        ft_id,
+        title,
+        description.strip() or None,
+        cell_id_source_table.strip() or None,
+    )
 
 
 def _interactive_embeddings(
@@ -766,20 +799,23 @@ def _interactive_knn(console: Console) -> dict[str, Any]:
 # ────────── Validation + write ──────────
 
 
-def _validate_manifest(manifest: dict[str, Any], console: Console) -> bool:
-    """Run the Pydantic Manifest validator over the dict. Returns True on
-    success; prints validation errors and returns False on failure."""
+def _validate_feature_table(feature_table: dict[str, Any], console: Console) -> bool:
+    """Run the Pydantic FeatureTableSpec validator over the dict. Returns
+    True on success; prints validation errors and returns False on
+    failure."""
     try:
-        from cave_data_viewer.api.services.embeddings.manifest import Manifest
+        from cave_data_viewer.api.services.embeddings.manifest import FeatureTableSpec
     except Exception as exc:
-        console.print(f"[yellow]could not import Manifest for validation: {exc}[/]")
+        console.print(f"[yellow]could not import FeatureTableSpec for validation: {exc}[/]")
         console.print("[yellow]writing without validation — please verify by hand[/]")
         return True
     try:
-        Manifest.model_validate(manifest)
+        FeatureTableSpec.model_validate(feature_table)
         return True
     except Exception as exc:
-        console.print(Panel(str(exc), title="Manifest validation failed", border_style="red"))
+        console.print(
+            Panel(str(exc), title="FeatureTableSpec validation failed", border_style="red")
+        )
         return False
 
 
@@ -788,20 +824,30 @@ def _format_yaml(manifest: dict[str, Any]) -> str:
 
 
 def _print_datastack_snippet(
-    console: Console, manifest_path: Path, feature_table_id: str
+    console: Console, ft_path: Path, feature_table_id: str
 ) -> None:
-    """Print the YAML block to paste into the datastack YAML."""
+    """Print the YAML block to paste into the datastack YAML.
+
+    Points `manifest_uri` at the *directory* containing this per-file
+    feature_table YAML — that's the v1 catalog shape. Adding more
+    feature tables is then just dropping more `.yaml` files into the
+    same directory.
+    """
+    directory = ft_path.parent.resolve()
     snippet = (
         "feature_explorer:\n"
         "  enabled: true\n"
-        "  cell_id_source_table: <CAVE table that defines this cell_id namespace>\n"
-        f"  manifest_uri: file://{manifest_path.resolve()}\n"
+        "  # cell_id_source_table here is a fallback used only when a\n"
+        "  # feature_table.yaml in the directory below doesn't declare\n"
+        "  # its own cell_id_source_table.\n"
+        "  cell_id_source_table: <CAVE table>     # optional fallback\n"
+        f"  manifest_uri: file://{directory}/\n"
     )
     console.print()
     console.print(
         Panel(
             snippet,
-            title=f"Paste into config/datastacks/<ds>.yaml for feature_table '{feature_table_id}'",
+            title=f"Paste into config/datastacks/<ds>.yaml — feature_table '{feature_table_id}'",
             border_style="green",
         )
     )
@@ -826,7 +872,17 @@ def main(argv: list[str] | None = None) -> int:
             "slugified). Required when --non-interactive."
         ),
     )
-    parser.add_argument("--out", type=Path, default=Path("/tmp/manifest.yaml"), help="output manifest path")
+    parser.add_argument(
+        "--out",
+        type=Path,
+        default=Path("/tmp/cdv-feature-tables/"),
+        help=(
+            "output path. If a directory (or ends with /), writes "
+            "<feature-table-id>.yaml inside it — the recommended shape "
+            "for the new per-file catalog. If a specific .yaml file path, "
+            "writes there directly (basename should match the feature_table id)."
+        ),
+    )
     parser.add_argument(
         "--parquet-uri",
         default=None,
@@ -846,10 +902,8 @@ def main(argv: list[str] | None = None) -> int:
     if not args.parquet.exists():
         console.print(f"[red]parquet not found:[/] {args.parquet}")
         return 2
-    if args.out.exists() and not args.force:
-        console.print(f"[red]refusing to overwrite existing file:[/] {args.out}")
-        console.print("[dim](pass --force, or --out <path>)[/]")
-        return 2
+    # The existence check on the final path moved down to after we know
+    # feature_table_id (the filename is derived from it).
 
     parquet_uri = args.parquet_uri or f"file://{args.parquet.resolve()}"
 
@@ -877,6 +931,7 @@ def main(argv: list[str] | None = None) -> int:
         feature_table_id = _slugify_for_id(args.feature_table_id)
         title = f"Feature table: {feature_table_id}"
         description = None
+        cell_id_source_table: str | None = None
         id_column = auto_id
         id_like_set = set(_id_like_columns(df, id_column))
         # Wire default_color_by from the first categorical column when present.
@@ -890,7 +945,7 @@ def main(argv: list[str] | None = None) -> int:
         categories: list[dict[str, Any]] = []
         knn = {"scaling": "zscore", "clip_percentiles": [0.1, 99.9]}
     else:
-        feature_table_id, title, description = _interactive_feature_table_identity(
+        feature_table_id, title, description, cell_id_source_table = _interactive_feature_table_identity(
             console, args.parquet, args.feature_table_id
         )
         id_column = _interactive_pick_id_column(console, df, auto_id)
@@ -926,12 +981,13 @@ def main(argv: list[str] | None = None) -> int:
             for col in df.columns
         }
 
-    manifest = _build_manifest_dict(
+    feature_table = _build_feature_table_dict(
         feature_table_id=feature_table_id,
         title=title,
         description=description,
         parquet_uri=parquet_uri,
         id_column=id_column,
+        cell_id_source_table=cell_id_source_table,
         classification=classification,
         audit=audit,
         embeddings=embeddings,
@@ -941,8 +997,8 @@ def main(argv: list[str] | None = None) -> int:
 
     # ── Validate ──
     console.print()
-    console.rule("[bold]Validating against Manifest schema[/]")
-    ok = _validate_manifest(manifest, console)
+    console.rule("[bold]Validating against FeatureTableSpec schema[/]")
+    ok = _validate_feature_table(feature_table, console)
     if not ok:
         if args.non_interactive or not Confirm.ask(
             "[yellow]validation failed — write anyway?[/]", default=False, console=console
@@ -952,13 +1008,36 @@ def main(argv: list[str] | None = None) -> int:
         console.print("[green]✓ valid[/]")
 
     # ── Write ──
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(_format_yaml(manifest))
+    # Per-file v1: one feature table = one .yaml file. If --out doesn't
+    # end with a YAML extension, treat it as a directory and drop
+    # `<feature-table-id>.yaml` inside — that's the canonical "drop into
+    # a GCS prefix" workflow. If --out IS a .yaml path, honor it but
+    # warn when the basename doesn't match the feature_table_id (the
+    # registry will skip the file at directory-mode load time).
+    out_str = str(args.out)
+    looks_like_file = out_str.endswith(".yaml") or out_str.endswith(".yml")
+    if not looks_like_file:
+        out_path = args.out / f"{feature_table_id}.yaml"
+    else:
+        out_path = args.out
+        if out_path.stem != feature_table_id:
+            console.print(
+                f"[yellow]warning:[/] output filename basename "
+                f"{out_path.stem!r} doesn't match feature_table id "
+                f"{feature_table_id!r}. The catalog loader requires them "
+                f"to match for directory-mode loads."
+            )
+    if out_path.exists() and not args.force:
+        console.print(f"[red]refusing to overwrite existing file:[/] {out_path}")
+        console.print("[dim](pass --force, or --out <path>)[/]")
+        return 2
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(_format_yaml(feature_table))
     console.print()
-    console.print(f"[bold green]wrote[/] {args.out}")
+    console.print(f"[bold green]wrote[/] {out_path}")
 
     # ── Datastack snippet ──
-    _print_datastack_snippet(console, args.out, feature_table_id)
+    _print_datastack_snippet(console, out_path, feature_table_id)
 
     return 0
 

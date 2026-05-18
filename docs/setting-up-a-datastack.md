@@ -139,103 +139,144 @@ Without this file, every example for the datastack is hidden behind the "no LTS 
 
 ## 2. Feature explorer configuration
 
-**File:** A YAML *manifest* at `feature_explorer.manifest_uri` (any URI scheme: `gs://`, `file://`, `http(s)://`).
-**Schema:** `cave_data_viewer/api/services/embeddings/manifest.py::Manifest`
+**Directory:** `feature_explorer.manifest_uri` points at a **directory** of per-file feature-table YAMLs (`gs://...prefix/`, `file:///path/to/dir/`). One file per feature table. Adding a new feature table = drop another `.yaml` into the directory.
+**Single-file shorthand:** if `manifest_uri` ends in `.yaml`, the file is parsed as one feature table (useful for tiny dev setups).
+**Schema:** `cave_data_viewer/api/services/embeddings/manifest.py::FeatureTableSpec`
 
-The manifest is the source of truth for the embedding catalog: which feature tables (parquets) exist, what columns they expose for plotting / kNN / filtering, what 2D scatter views project from those columns, and how similarity computations should standardize features. **It lives outside the wheel** so adding new feature data is a manifest edit, not a backend redeploy.
+The catalog lives outside the wheel so adding new feature data is an upload (or a `gsutil cp`), not a backend redeploy. The catalog is fetched with stale-while-revalidate semantics (soft TTL ~5 min), so directory edits propagate to running pods without a restart.
 
-The manifest is fetched with stale-while-revalidate semantics (soft TTL ~5 min), so manifest edits propagate to running pods without a restart.
+**Filename convention.** Each file's name must be `<feature-table-id>.yaml` — the basename of the file MUST match the file's `id:` field. The loader skips (with a warning) any file whose `id` and filename disagree.
 
-### Schema overview
+### Per-file schema (one feature table)
 
 ```yaml
-schema_version: 2
+schema_version: 1              # required; v1 is current
 
-# Manifest-level similarity config (applies to every embedding below).
-knn:
-  scaling: zscore             # zscore | robust | percentile | raw
-  clip_percentiles: [0.1, 99.9]  # winsorize bounds (null = disabled)
+id: morpho_v1                  # MUST match filename basename
+title: "Morphology features (v1)"
+description: "Soma + nucleus geometry from the 2024-10 pipeline."
 
-# One or more feature tables. Each owns a parquet keyed by cell_id and
-# declares all the columns the explorer can plot / filter / kNN over.
-feature_tables:
-  - id: morpho_v1
-    title: "Morphology features (v1)"
-    description: "Soma + nucleus geometry from the 2024-10 pipeline."
+# The parquet (only kind supported in v1).
+source:
+  kind: parquet
+  uri: gs://my-bucket/embeddings/morpho_v1.parquet
 
-    # The parquet (only kind supported in v1).
-    source:
-      kind: parquet
-      uri: gs://my-bucket/embeddings/morpho_v1.parquet
+# The cell_id column in the parquet.
+id_column: cell_id
 
-    # The cell_id column in the parquet.
-    id_column: cell_id
+# The CAVE table whose row ids the `id_column` references. Combined
+# with `id_column` it forms the stable identity `(cell_id_source_table,
+# id_column)` — necessary because not every object gets a universal id;
+# the source table is part of the key. Optional here: when null, the
+# datastack-level `feature_explorer.cell_id_source_table` is used as a
+# fallback. Required overall (at least one of the two must be set).
+cell_id_source_table: nucleus_detection_v0
 
-    # Numeric columns eligible for kNN + range filtering. If null, the
-    # loader infers all non-axis non-audit numerics.
-    feature_columns:
-      - soma_depth_y
-      - nucleus_volume_um
-      - soma_area_um
+# Numeric columns eligible for kNN + range filtering. If null, the
+# loader infers all non-axis non-audit numerics.
+feature_columns:
+  - soma_depth_y
+  - nucleus_volume_um
+  - soma_area_um
 
-    # String / categorical columns. Usable for color and equality
-    # filters; excluded from kNN.
-    categorical_columns:
-      - predicted_class
-      - predicted_subclass
+# String / categorical columns. Usable for color and equality filters;
+# excluded from kNN.
+categorical_columns:
+  - predicted_class
+  - predicted_subclass
 
-    # Numeric columns that are depth-shaped. When a depth column is
-    # bound to a plot's axis, the renderer auto-flips the axis and
-    # overlays layer-boundary markers.
-    depth_columns:
-      - soma_depth_y
+# Numeric columns with spatial meaning (positions, distances, depths).
+# Overlaps with `feature_columns` — a spatial column is still a feature.
+# Reserved for UI groupings and future spatial-aware visualizations.
+spatial_columns:
+  - soma_depth_y
+  - soma_to_nucleus_center_dist_um
 
-    # Optional. Names of audit columns in the parquet — surfaced in
-    # cell-detail tooltips so a user can see which root_id the features
-    # were computed against (useful when the parquet is older than the
-    # mat_version they're currently looking at).
-    audit:
-      source_root_column: source_root_id
-      source_mat_version_column: source_mat_version
+# A *special case* of spatial that the renderer consumes: depth-shaped
+# columns trigger axis flip + cortical layer markers when bound to a
+# plot axis. Every depth column should also appear in spatial_columns.
+depth_columns:
+  - soma_depth_y
 
-    # Optional. UI-only column groupings for the channel picker. A
-    # column may appear in multiple categories; columns not listed
-    # anywhere render under an implicit "Uncategorized" group.
-    categories:
-      - id: morphology
-        title: Morphology
-        description: "Soma and nucleus geometry"
-        columns: [soma_depth_y, nucleus_volume_um, soma_area_um]
-      - id: classifier
-        title: Classifier
-        columns: [predicted_class, predicted_subclass]
+# Optional. Names of audit columns in the parquet — surfaced in
+# cell-detail tooltips so a user can see which root_id the features
+# were computed against.
+audit:
+  source_root_column: source_root_id
+  source_mat_version_column: source_mat_version
 
-    # 2D scatter views onto this feature table. Multiple per table is
-    # the point of v2: one feature dataframe can carry a whole-pop UMAP
-    # + an inhibitory-only UMAP + a t-SNE, all sharing rows and features.
-    embeddings:
-      - id: umap
-        title: UMAP
-        axes: [umap_x, umap_y]      # must be exactly 2
-        default_color_by: predicted_subclass
-        # depth_axis names which axis is depth-shaped (if any). Usually
-        # null for UMAP/t-SNE axes; set when binding a real depth column.
-        # depth_axis: y
+# Optional. UI-only column groupings for the channel picker. A column
+# may appear in multiple categories; columns not listed anywhere
+# render under an implicit "Uncategorized" group.
+categories:
+  - id: morphology
+    title: Morphology
+    description: "Soma and nucleus geometry"
+    columns: [soma_depth_y, nucleus_volume_um, soma_area_um]
+  - id: classifier
+    title: Classifier
+    columns: [predicted_class, predicted_subclass]
+
+# Similarity-pipeline controls (per-table since v1). Different feature
+# sets can use different standardization — a robust-scaled dataset
+# stays robust, a pre-standardized one sets `scaling: raw`.
+scaling: zscore                 # zscore | robust | percentile | raw
+clip_percentiles: [0.1, 99.9]   # winsorize bounds (null = disabled)
+# standardize: true             # legacy boolean; default true
+
+# 2D scatter views onto this feature table. Multiple per table is the
+# point — one feature dataframe can carry a whole-pop UMAP + an
+# inhibitory-only UMAP + a t-SNE, all sharing rows and features.
+embeddings:
+  - id: umap
+    title: UMAP
+    axes: [umap_x, umap_y]       # must be exactly 2
+    default_color_by: predicted_subclass
+    # depth_axis names which axis is depth-shaped (if any). Usually
+    # null for UMAP/t-SNE axes; set when binding a real depth column.
+    # depth_axis: y
 ```
 
-### Multi-dataset manifests (phase 2)
+### Directory layout
 
-A single manifest can span multiple datastacks. Add a top-level `datastacks:` block enumerating them; each entry can override the parent datastack's `cell_id_source_table` if its source-table convention differs:
+```
+gs://my-bucket/embeddings/
+└── feature_tables/                       ← manifest_uri points here
+    ├── morpho_v1.yaml
+    ├── morpho_v2.yaml
+    └── synaptic_v1.yaml
+```
+
+The datastack YAML side:
 
 ```yaml
-schema_version: 2
+feature_explorer:
+  enabled: true
+  # Fallback used only when a feature_table.yaml in the directory below
+  # doesn't declare its own cell_id_source_table. Optional when every
+  # feature_table.yaml sets its own.
+  cell_id_source_table: nucleus_detection_v0
+  manifest_uri: gs://my-bucket/embeddings/feature_tables/
+```
+
+### Multi-dataset feature tables
+
+A feature table can declare which datastacks it participates in via a per-file `datastacks:` block. Used in joint manifests where one parquet spans multiple datastacks with potentially different source-table conventions:
+
+```yaml
+schema_version: 1
+id: shared_morpho
+title: "Morphology shared across MICrONS public + phase3"
+source: { kind: parquet, uri: gs://.../shared_morpho.parquet }
+id_column: cell_id
 datastacks:
   - name: minnie65_public
   - name: minnie65_phase3_v1
-    cell_id_source_table: nucleus_detection_v0  # only when it differs
+    cell_id_source_table: nucleus_detection_v0  # override only when differs
+# ... rest of the feature_table fields ...
 ```
 
-When `datastacks:` is omitted (the v2-single-ds shape), the manifest is treated as belonging to whichever datastack referenced it via `manifest_uri`.
+When `datastacks:` is omitted (typical case), the feature table belongs to whichever datastack pointed at the directory via `manifest_uri`.
 
 ### Subset embeddings
 
