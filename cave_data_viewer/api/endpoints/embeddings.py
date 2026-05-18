@@ -201,23 +201,27 @@ def list_feature_tables(ds: str):
             f"could not load feature explorer manifest: {exc}",
         ) from exc
 
-    # ``datastacks`` surfaces the manifest's declared participant set so
-    # the SPA can detect multi-ds manifests up front (phase 2 surface).
-    # Single-ds and v2 manifests fall back to ``[ds]`` via
-    # ``effective_datastacks`` so the field is always populated.
-    declared_datastacks = effective_datastacks(manifest, ds)
+    # ``datastacks`` is now per-feature-table (v1 schema). Aggregate the
+    # union across all loaded tables so the SPA still gets one catalog-
+    # level list; falls back to ``[ds]`` when no table declares any.
+    # First-occurrence wins for the per-datastack cell_id_source_table
+    # override (consistent with the rest of the registry's first-wins
+    # duplicate-handling).
+    declared_by_name: dict[str, str | None] = {}
+    for ft in manifest.feature_tables:
+        for entry in effective_datastacks(ft, ds):
+            if entry.name not in declared_by_name:
+                declared_by_name[entry.name] = entry.cell_id_source_table
+    if not declared_by_name:
+        declared_by_name = {ds: None}
     return jsonify(
         {
             "enabled": True,
             "cell_id_source_table": cfg.feature_explorer.cell_id_source_table,
             "datastacks": [
-                {
-                    "name": entry.name,
-                    "cell_id_source_table": entry.cell_id_source_table,
-                }
-                for entry in declared_datastacks
+                {"name": name, "cell_id_source_table": cst}
+                for name, cst in declared_by_name.items()
             ],
-            "knn": manifest.knn.model_dump(),
             "feature_tables": [_feature_table_summary(ft) for ft in manifest.feature_tables],
         }
     )
@@ -1216,24 +1220,26 @@ def distance_to_set(ds: str, feature_table_id: str):
                 "PCA / Mahalanobis are undefined)",
             )
 
-    manifest = src.list()
     # Pydantic deserializes ``[lo, hi]`` from YAML as a list; normalize
     # to a 2-tuple at the boundary so the matrix layer's type hint is
     # honored and the digest formatter doesn't have to branch.
-    clip_setting = manifest.knn.clip_percentiles
+    #
+    # Per-table since schema v1: each FeatureTableSpec owns its own
+    # `scaling` / `standardize` / `clip_percentiles`. The endpoint reads
+    # from `ft` directly — no manifest-level fallback to consult.
+    clip_setting = ft.clip_percentiles
     clip_percentiles: tuple[float, float] | None = (
         (float(clip_setting[0]), float(clip_setting[1]))
         if clip_setting is not None
         else None
     )
-    # Scaling source-of-truth is the new ``scaling`` field. The legacy
-    # ``standardize: bool`` overrides only when an old manifest
-    # explicitly opts out of standardization (sets it to false) and
-    # hasn't set ``scaling``. Old manifests that left ``standardize``
-    # at its default land at ``zscore`` either way — no silent behavior
-    # change.
-    scaling = manifest.knn.scaling
-    if not manifest.knn.standardize and scaling == "zscore":
+    # Scaling source-of-truth is the ``scaling`` field. The legacy
+    # ``standardize: bool`` overrides only when a YAML explicitly opts
+    # out of standardization (sets it to false) and hasn't set
+    # ``scaling``. Tables that leave ``standardize`` at its default land
+    # at ``zscore`` either way — no silent behavior change.
+    scaling = ft.scaling
+    if not ft.standardize and scaling == "zscore":
         scaling = "raw"
     try:
         matrix = get_matrix(
@@ -1751,8 +1757,10 @@ def _feature_table_summary(ft: FeatureTableSpec) -> dict[str, Any]:
         "title": ft.title,
         "description": ft.description,
         "id_column": ft.id_column,
+        "cell_id_source_table": ft.cell_id_source_table,
         "feature_columns": ft.feature_columns,
         "categorical_columns": ft.categorical_columns,
+        "spatial_columns": list(ft.spatial_columns),
         "depth_columns": ft.depth_columns,
         "has_audit": ft.audit is not None,
         "categories": [
@@ -1765,6 +1773,17 @@ def _feature_table_summary(ft: FeatureTableSpec) -> dict[str, Any]:
             for c in ft.categories
         ],
         "embeddings": [_embedding_summary(e) for e in ft.embeddings],
+        # Similarity controls moved from the manifest-level `knn:` block
+        # to per-table in schema v1. Surfaced for SPA inspection (the
+        # similarity computation itself happens server-side and reads
+        # the same fields).
+        "knn": {
+            "scaling": ft.scaling,
+            "standardize": ft.standardize,
+            "clip_percentiles": (
+                list(ft.clip_percentiles) if ft.clip_percentiles is not None else None
+            ),
+        },
     }
 
 

@@ -7,8 +7,8 @@ Discovery flow (one indirection):
     datastack YAML (feature_explorer.manifest_uri)
           │
           ▼
-    manifest YAML (schema_v2)   ← cached, SWR ~5 min soft / ~1 h hard
-          │ FeatureTableSpec × N  (each owning a parquet)
+    directory of per-file FeatureTableSpec YAMLs  ← cached, SWR ~5 min soft / ~1 h hard
+          │ schema_version: 1 on each file; filename basename = id
           │   └── EmbeddingSpec × N  (axes-only views onto the table)
           ▼
     parquet DataFrame             ← cached, immutable, L2 GCS-backed
@@ -30,7 +30,6 @@ from .manifest import (
     FeatureTableAudit,
     FeatureTableSourceRef,
     FeatureTableSpec,
-    KnnDefaults,
     Manifest,
     SUPPORTED_SCHEMA_VERSIONS,
     effective_cell_id_source_table,
@@ -59,7 +58,6 @@ __all__ = [
     "FeatureTableAudit",
     "FeatureTableSourceRef",
     "FeatureTableSpec",
-    "KnnDefaults",
     "Manifest",
     "SUPPORTED_SCHEMA_VERSIONS",
     "effective_cell_id_source_table",

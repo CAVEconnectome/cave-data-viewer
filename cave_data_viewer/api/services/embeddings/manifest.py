@@ -1,39 +1,53 @@
-"""Feature-table catalog manifest: schema, fetch, parse, validate, SWR cache.
+"""Feature-table catalog: schema, fetch, parse, validate, SWR cache.
 
-The manifest is a single YAML file in GCS (or anywhere the URI resolver can
-reach) that describes the feature dataframes available for a datastack and
-the embeddings declared over each one. The datastack YAML carries only
-``manifest_uri:`` — the catalog lives here, so adding a new feature table or
-embedding is an edit-in-GCS workflow rather than a backend redeploy.
+The catalog is a **directory of per-file feature-table YAMLs** referenced by
+the datastack YAML's ``feature_explorer.manifest_uri``. Each file is one
+``FeatureTableSpec`` at the top level; the filename basename MUST equal the
+file's ``id`` field. Adding a new feature table = drop a new ``.yaml`` into
+the directory.
 
-Schema v2 separates **data** (a feature table — the parquet, id column,
-feature columns, categoricals, etc.) from **view** (embeddings — pairs of
-axis columns over that data). One feature table can declare multiple
-embeddings: a whole-population UMAP, an inhibitory-only UMAP computed over
-a subset, a t-SNE, etc. Embeddings share the table's rows + features; only
-the axes (and optionally a kNN-feature override) differ.
+A single-file URI (path ending in ``.yaml``) is also accepted as a
+convenience for one-table dev setups — the file's contents are parsed as
+one ``FeatureTableSpec`` exactly the same way.
+
+The older monolithic schema (``schema_version: 2``/``3`` with a top-level
+``feature_tables:`` list plus manifest-wide ``knn:`` and ``datastacks:``
+blocks) is **no longer supported**. Migrate by splitting each entry into
+its own file, moving ``knn`` fields onto each table, and moving any
+``datastacks:`` override onto each table.
+
+Schema v1 (current): each FeatureTableSpec is self-contained. It owns:
+- the data pointer (``source``, ``id_column``, ``cell_id_source_table``)
+- the column layout (``feature_columns``, ``categorical_columns``,
+  ``spatial_columns``, ``depth_columns``, optional ``audit``, ``categories``)
+- the embedding views (``embeddings``)
+- the similarity controls (``scaling``, ``clip_percentiles``,
+  ``standardize``) — moved from the old manifest-level ``knn`` block so
+  one table can be zscored while another is raw
+- the optional ``datastacks`` list (multi-datastack participation)
 
 Caching strategy:
 
 - Cache key is ``(datastack, manifest_uri)``. Two datastacks pointing at the
-  same manifest get independent cache entries — useful for the ``cache_alias``
-  flow where two datastacks share underlying data but route cache reads
-  separately.
+  same directory get independent cache entries — useful for the
+  ``cache_alias`` flow where two datastacks share underlying data but route
+  cache reads separately.
 - SWR semantics via ``services.swr.SwrCache``. Soft TTL ~5 min: stale
   entries are served immediately while a background thread refetches.
   Hard TTL ~1 h bounds how long we'll serve stale data if refresh keeps
   failing — after that, the next caller pays a synchronous fetch and any
   error surfaces loudly.
-- Validation is layered: manifest-level structural errors (bad YAML,
-  unknown schema_version) raise hard; per-entry validation failures are
-  soft — invalid feature_tables / embeddings are dropped with a logged
-  warning, valid ones surface. One bad row should not take down the
-  catalog.
+- Validation is layered: directory-level / single-file structural errors
+  (bad YAML, missing schema_version) raise hard for the failing file;
+  per-FT validation failures are soft — invalid files are dropped with a
+  logged warning, valid ones surface. One bad file should not take down
+  the whole catalog.
 """
 
 from __future__ import annotations
 
 import logging
+import re
 import threading
 from typing import Literal
 
@@ -41,18 +55,19 @@ import yaml
 from flask import current_app
 from pydantic import BaseModel, Field, ValidationError
 
-from .uri import fetch_bytes
+from .uri import fetch_bytes, list_yaml_uris
 
 logger = logging.getLogger(__name__)
 
-# v1 was a flat ``embeddings:`` list with each entry carrying its own
-# source/id_column/feature_columns. v2 splits data (FeatureTableSpec) from
-# view (EmbeddingSpec). v3 adds an optional top-level ``datastacks:`` list
-# declaring the datastacks this manifest spans — empty/absent means
-# "single-ds, parent datastack" and is the default for v2 → v3 upgrades.
-# The lift is forward-compatible: v2 manifests load under v3 semantics
-# unchanged because the new field is optional.
-SUPPORTED_SCHEMA_VERSIONS: frozenset[int] = frozenset({2, 3})
+# v1 is the current shape: each per-file FeatureTableSpec self-contained,
+# scaling/clip/cell_id_source_table/datastacks moved off the (removed)
+# top-level manifest. Older schema versions are not supported — migrate.
+SUPPORTED_SCHEMA_VERSIONS: frozenset[int] = frozenset({1})
+
+# Filename basename allowlist for per-file feature-table YAMLs in a
+# directory. Same shape as the recipe-registry id pattern: lowercase
+# alphanumerics + underscore/dash, 3-64 chars, no leading hyphen.
+_FT_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{2,63}$")
 
 
 class FeatureTableSourceRef(BaseModel):
@@ -109,10 +124,9 @@ class EmbeddingSpec(BaseModel):
     """One ``embeddings:`` entry under a feature table. Describes a single
     2D scatter view onto the table's rows.
 
-    Multiple embeddings per table are the point of the v2 schema: one
-    feature dataframe can have a whole-population UMAP + an
-    inhibitory-only UMAP + a t-SNE, all sharing rows, features, and
-    decorations.
+    Multiple embeddings per table are supported: one feature dataframe can
+    have a whole-population UMAP + an inhibitory-only UMAP + a t-SNE, all
+    sharing rows, features, and decorations.
 
     Display-level only — the data (id column, feature columns, source
     parquet) lives on the parent ``FeatureTableSpec``.
@@ -138,12 +152,30 @@ class EmbeddingSpec(BaseModel):
     depth_axis: Literal["x", "y", None] = None
 
 
+class DatastackEntry(BaseModel):
+    """One datastack participating in a feature-table's catalog.
+
+    Bare-name form is allowed in YAML (``datastacks: [foo, bar]``); the
+    loader coerces strings via :func:`_coerce_datastacks`.
+
+    ``cell_id_source_table``, when set, overrides the feature table's
+    own ``cell_id_source_table`` for THIS datastack only. Used in joint
+    manifests where one parquet spans datastacks with different source-table
+    conventions and a single per-table value can't represent every row.
+    """
+
+    name: str
+    cell_id_source_table: str | None = None
+
+
 class FeatureTableSpec(BaseModel):
-    """One ``feature_tables:`` entry. Owns the data (a parquet keyed by
-    cell_id) plus all the columns the explorer can plot / filter / kNN
-    over. Embeddings nested under this entry share the same row set and
-    feature universe; they differ only in which two columns they bind
-    to the axes.
+    """One per-file feature-table YAML. Owns the data (a parquet keyed
+    by cell_id), the columns the explorer can plot / filter / kNN over,
+    the embeddings declared over those columns, AND the similarity-pipeline
+    controls.
+
+    Schema v1: each FeatureTableSpec is the entire YAML file — no wrapper.
+    Multiple feature tables = multiple files in the same directory.
 
     ``feature_columns`` are numeric columns eligible for kNN + range
     filtering (None → infer at load time from non-axis non-audit
@@ -169,13 +201,42 @@ class FeatureTableSpec(BaseModel):
     ``depth_columns`` SHOULD also appear in ``spatial_columns`` — the
     loader doesn't enforce this today, but consumers may rely on the
     invariant later.
+
+    ``cell_id_source_table`` names the CAVE table whose row ids the
+    ``id_column`` references. The composite
+    ``(cell_id_source_table, id_column)`` is the stable identity for
+    each row — necessary because not every object gets a universal id;
+    the source table is part of the key. Overrides the datastack-level
+    ``feature_explorer.cell_id_source_table`` fallback.
+
+    ``scaling``, ``standardize``, and ``clip_percentiles`` control the
+    feature-matrix standardization pipeline. Per-table because different
+    feature sets benefit from different transforms — a morphology dataset
+    generated with robust scaling should set ``scaling: robust``; a
+    pre-standardized embedding parquet should set ``scaling: raw``.
     """
+
+    # Per-file schema version. v1 is the only supported version today;
+    # the field is OPTIONAL on the wire (defaults to 1) so the most-common
+    # hand-authored file doesn't need to repeat boilerplate. Future schema
+    # changes bump per-file so files in the same directory can evolve
+    # independently.
+    schema_version: int = 1
 
     id: str
     title: str
     description: str | None = None
+
     source: FeatureTableSourceRef
+    # Column in the parquet that holds the row identifier.
     id_column: str = "cell_id"
+    # CAVE table whose row ids the `id_column` references. Optional at
+    # the file level: when null, the datastack-level
+    # `feature_explorer.cell_id_source_table` is used (resolved via
+    # :func:`effective_cell_id_source_table`). Required when no
+    # datastack-level fallback is set.
+    cell_id_source_table: str | None = None
+
     feature_columns: list[str] | None = None
     categorical_columns: list[str] = Field(default_factory=list)
     spatial_columns: list[str] = Field(default_factory=list)
@@ -184,298 +245,187 @@ class FeatureTableSpec(BaseModel):
     categories: list[FeatureCategorySpec] = Field(default_factory=list)
     embeddings: list[EmbeddingSpec] = Field(default_factory=list)
 
-
-class KnnDefaults(BaseModel):
-    """Manifest-level similarity configuration. Applies to every embedding
-    in the manifest.
-
-    Wire key is ``knn:`` for backward compatibility with manifest YAMLs
-    in the wild — the block predates the kNN→distance_to_set rewrite.
-    The fields control the standardization + outlier-handling pipeline
-    that drives both raw-space distance and the PCA / Mahalanobis
-    projections.
-
-    The intent of exposing ``scaling`` and ``clip_percentiles`` in the
-    manifest (rather than baking tool defaults into the code) is to let
-    each feature dataset's similarity behavior match the conventions
-    of its source — a parquet whose features were generated by a paper
-    using robust scaling can declare ``scaling: robust`` and have the
-    explorer compute similarity *the way the paper assumed it would*,
-    not the way the tool's defaults happen to land."""
-
-    # Standardization mode applied to numeric features before any
-    # similarity computation. Authoritative values match the
-    # ``Scaling`` enum in services/embeddings/feature_matrix.py.
-    # Default ``zscore`` matches the conventional PCA pipeline and
-    # what the explorer used historically.
+    # Similarity-pipeline controls. Moved here from the old manifest-level
+    # `knn:` block. See the class docstring for the per-table-vs-global
+    # rationale.
     scaling: Literal["zscore", "robust", "percentile", "raw"] = "zscore"
-
-    # Legacy boolean — kept so manifests authored before ``scaling``
-    # existed still validate. When ``scaling`` is left at its default
-    # and this field is ``false``, the endpoint translates that to
-    # ``scaling: raw``; otherwise the explicit ``scaling`` value wins.
+    # Legacy boolean. When `scaling` is left at its default ("zscore")
+    # and this is `false`, callers translate to `scaling: raw`. Otherwise
+    # `scaling` wins. Retained so older manifests authored with just
+    # `standardize: false` keep validating after migration.
     standardize: bool = True
-
-    # Per-feature winsorize bounds applied before computing the
-    # standardization stats and before the PCA SVD. A single
-    # biological / segmentation outlier (e.g. a soma_volume_um that
-    # came back as 1e6 for one cell) otherwise inflates that feature's
-    # spread by orders of magnitude and lets PCA fixate on the outlier
-    # direction. The clip is *stats-only*: outlier cells stay in the
-    # matrix at their actual standardized values, so they remain
-    # findable in similarity space — they just no longer distort the
-    # standardization or PCA components everyone else sees.
-    #
-    # No-op under ``scaling: percentile`` (the transform is already
-    # nonparametric / bounded) and ``scaling: raw`` (the matrix isn't
-    # standardized). Set to ``null`` in a manifest to disable when
-    # the input parquet is known to be clean. (0.1, 99.9) is the
-    # empirically-validated default for connectomics morphology
-    # features.
     clip_percentiles: tuple[float, float] | None = (0.1, 99.9)
 
-
-class DatastackEntry(BaseModel):
-    """One datastack participating in a manifest.
-
-    Phase 1 of the multi-dataset generalization uses only ``name``; the
-    field exists so a single-ds manifest can be authored explicitly
-    (``datastacks: [{name: foo}]``) and so the loader has a stable place
-    to read per-ds metadata when phase 2 adds ``cell_id_source_table``
-    overrides and decoration-column aliases.
-
-    ``cell_id_source_table``, when set, overrides the parent datastack
-    YAML's ``feature_explorer.cell_id_source_table``. Multi-ds manifests
-    need this because the datastack YAML can only declare one source
-    table per datastack — but a joint manifest can span datastacks with
-    different source tables, and the per-row resolution path needs to
-    pick the right one. Not exercised by the v1 single-ds endpoints
-    (phase 1 keeps them on the YAML-declared value); the field is in
-    place for phase 2.
-    """
-
-    name: str
-    cell_id_source_table: str | None = None
+    # Multi-datastack participation. When empty (the typical case), the
+    # feature table belongs to whichever datastack pointed at this
+    # directory via `feature_explorer.manifest_uri`. When populated, the
+    # table is shared across the listed datastacks.
+    datastacks: list[DatastackEntry] = Field(default_factory=list)
 
 
 class Manifest(BaseModel):
-    """Parsed + validated manifest.
+    """Parsed + validated feature-table catalog.
 
-    ``datastacks`` declares the set of datastacks this manifest spans.
-    Empty list (the default, and the v2-manifest shape) means "single-ds,
-    inferred from the parent datastack that referenced this manifest" —
-    every consumer that needs the effective list passes the parent
-    datastack name through :func:`effective_datastacks`. Multi-ds
-    manifests (phase 2) list each participant explicitly.
+    Schema v1 retires the manifest-level fields (``schema_version``,
+    ``datastacks``, ``knn``) — those moved onto each FeatureTableSpec.
+    The Manifest is now a simple wrapper around a list of validated
+    feature tables so callers can pass it around as one object.
     """
 
-    schema_version: int
-    datastacks: list[DatastackEntry] = Field(default_factory=list)
-    knn: KnnDefaults = Field(default_factory=KnnDefaults)
     feature_tables: list[FeatureTableSpec]
 
 
 def effective_datastacks(
-    manifest: Manifest, parent_datastack: str
+    ft: FeatureTableSpec, parent_datastack: str
 ) -> list[DatastackEntry]:
-    """Return the declared datastacks, defaulting to ``[parent_datastack]``.
+    """Return the datastacks for ``ft``, defaulting to the parent.
 
-    Single-ds (or v2) manifests omit the ``datastacks`` block; this helper
-    fills in the implicit single-element list so downstream code can
-    treat every manifest as having an explicit datastack set.
+    Single-datastack feature tables omit the ``datastacks:`` block; this
+    helper fills in the implicit single-element list so downstream code
+    can treat every feature table as having an explicit datastack set.
     """
-    if manifest.datastacks:
-        return manifest.datastacks
+    if ft.datastacks:
+        return ft.datastacks
     return [DatastackEntry(name=parent_datastack)]
 
 
 def effective_cell_id_source_table(
-    manifest: Manifest, datastack: str, fallback: str | None
+    ft: FeatureTableSpec, datastack: str, fallback: str | None
 ) -> str | None:
-    """Pick the cell_id source table for a given datastack within this manifest.
+    """Pick the cell_id source table for ``ft`` in ``datastack``.
 
-    Precedence: manifest's per-datastack override > datastack YAML's
-    ``feature_explorer.cell_id_source_table`` (``fallback``). The YAML
-    field stays the canonical place to declare it for the single-ds
-    case; the manifest override exists for joint manifests where one
-    datastack YAML can't represent the right source for every row.
+    Precedence:
+      1. Per-datastack override on the feature table
+         (``ft.datastacks[X].cell_id_source_table``).
+      2. The feature table's own ``cell_id_source_table``.
+      3. The datastack YAML's ``feature_explorer.cell_id_source_table``
+         (passed in as ``fallback``).
+
+    Returns None when no source table is declared anywhere — downstream
+    consumers (e.g. the resolver) surface a 422 in that case.
     """
-    for entry in manifest.datastacks:
+    for entry in ft.datastacks:
         if entry.name == datastack and entry.cell_id_source_table:
             return entry.cell_id_source_table
+    if ft.cell_id_source_table:
+        return ft.cell_id_source_table
     return fallback
 
 
 def fetch_and_parse_manifest(uri: str, *, project: str | None = None) -> Manifest:
-    """Fetch the manifest at ``uri``, parse YAML, validate, return a ``Manifest``.
+    """Load the feature-table catalog at ``uri`` into a Manifest.
 
-    Hard-fail conditions (raise ``ValueError``):
+    ``uri`` may point at:
+      - a single ``.yaml`` file → parsed as one ``FeatureTableSpec``;
+      - a directory (``file://`` path / ``gs://`` prefix) → every
+        ``*.yaml`` under it is parsed as a ``FeatureTableSpec``.
 
-    - Bytes don't parse as YAML.
-    - Top-level isn't a mapping.
-    - ``schema_version`` is missing or not in ``SUPPORTED_SCHEMA_VERSIONS``.
-    - ``feature_tables`` is present but isn't a list.
+    Per-file validation rules:
 
-    Soft-fail conditions (skip with a warning, keep going):
+      - YAML must parse and be a top-level mapping.
+      - ``schema_version`` (default 1 if absent) must be in
+        ``SUPPORTED_SCHEMA_VERSIONS``.
+      - For directory-loaded files: the filename basename must match
+        the file's ``id`` field, and ``id`` must match
+        ``_FT_ID_PATTERN``. Single-file URIs skip the filename check.
 
-    - An individual feature_tables entry fails Pydantic validation.
-    - Two tables share an ``id`` (first wins).
-    - Two embeddings within one table share an ``id`` (first wins).
-    - The ``knn`` block fails validation (falls back to ``KnnDefaults()``).
-
-    The caller (typically the SWR cache wrapper) decides whether to
-    propagate a hard failure: cold path → propagate (so a misconfigured
-    manifest_uri is visible); background refresh → swallow + log + keep
-    the stale entry.
+    Failures on an individual file are logged warnings and skipped; the
+    overall load returns the valid feature tables. A hard failure only
+    happens when the URI itself can't be reached.
     """
-    body = fetch_bytes(uri, project=project)
+    # Single file: end-of-path is `.yaml`.
+    if uri.endswith(".yaml") or uri.endswith(".yml"):
+        ft = _fetch_and_validate_ft(uri, project=project, check_filename_basename=False)
+        return Manifest(feature_tables=[ft] if ft is not None else [])
 
+    # Directory / prefix: list children.
+    child_uris = list_yaml_uris(uri, project=project)
+    if not child_uris:
+        logger.warning(
+            "manifest dir %s contained no .yaml feature-table files", uri
+        )
+        return Manifest(feature_tables=[])
+
+    seen_ids: set[str] = set()
+    out: list[FeatureTableSpec] = []
+    for child in sorted(child_uris):
+        ft = _fetch_and_validate_ft(child, project=project, check_filename_basename=True)
+        if ft is None:
+            continue
+        if ft.id in seen_ids:
+            logger.warning(
+                "manifest dir %s: duplicate feature_table id %r in %s, keeping first",
+                uri, ft.id, child,
+            )
+            continue
+        seen_ids.add(ft.id)
+        out.append(ft)
+    return Manifest(feature_tables=out)
+
+
+def _fetch_and_validate_ft(
+    uri: str, *, project: str | None, check_filename_basename: bool
+) -> FeatureTableSpec | None:
+    """Fetch one per-file YAML and validate it as a FeatureTableSpec.
+    Returns None (with a warning log) on any per-file failure so a sibling
+    bad file doesn't sink the whole load."""
+    try:
+        body = fetch_bytes(uri, project=project)
+    except Exception as e:
+        logger.warning("feature_table file %s: fetch failed: %s", uri, e)
+        return None
     try:
         data = yaml.safe_load(body)
     except yaml.YAMLError as e:
-        raise ValueError(f"manifest at {uri!r} is not valid YAML: {e}") from e
-
+        logger.warning("feature_table file %s: YAML parse failed: %s", uri, e)
+        return None
     if not isinstance(data, dict):
-        raise ValueError(
-            f"manifest at {uri!r} did not parse as a mapping "
-            f"(got {type(data).__name__})"
+        logger.warning(
+            "feature_table file %s: top-level must be a mapping (got %s)",
+            uri, type(data).__name__,
         )
+        return None
 
-    schema_version = data.get("schema_version")
-    if schema_version not in SUPPORTED_SCHEMA_VERSIONS:
-        raise ValueError(
-            f"manifest at {uri!r}: unsupported schema_version={schema_version!r} "
-            f"(supported: {sorted(SUPPORTED_SCHEMA_VERSIONS)})"
+    sv = data.get("schema_version", 1)
+    if sv not in SUPPORTED_SCHEMA_VERSIONS:
+        logger.warning(
+            "feature_table file %s: unsupported schema_version=%r (supported: %s)",
+            uri, sv, sorted(SUPPORTED_SCHEMA_VERSIONS),
         )
+        return None
 
-    raw_tables = data.get("feature_tables") or []
-    if not isinstance(raw_tables, list):
-        raise ValueError(
-            f"manifest at {uri!r}: `feature_tables` must be a list, "
-            f"got {type(raw_tables).__name__}"
-        )
-
-    valid: list[FeatureTableSpec] = []
-    seen_table_ids: set[str] = set()
-    for i, entry in enumerate(raw_tables):
-        try:
-            ft = _validate_feature_table(entry, manifest_uri=uri, index=i)
-        except ValidationError as e:
+    if check_filename_basename:
+        basename = _basename_of(uri)
+        body_id = data.get("id")
+        if body_id != basename:
             logger.warning(
-                "manifest %s: skipping feature_tables entry %d (%s)", uri, i, e
+                "feature_table file %s: id %r doesn't match filename basename %r; skipping",
+                uri, body_id, basename,
             )
-            continue
-        if ft.id in seen_table_ids:
+            return None
+        if not isinstance(body_id, str) or not _FT_ID_PATTERN.match(body_id):
             logger.warning(
-                "manifest %s: duplicate feature_table id %r, keeping first occurrence",
-                uri, ft.id,
+                "feature_table file %s: id %r doesn't match %s; skipping",
+                uri, body_id, _FT_ID_PATTERN.pattern,
             )
-            continue
-        seen_table_ids.add(ft.id)
-        valid.append(ft)
+            return None
 
+    # Datastacks block accepts bare-name strings; coerce before validation.
+    if "datastacks" in data:
+        data["datastacks"] = _coerce_datastacks(data["datastacks"], uri=uri)
+
+    # Validate the parent shape (without embeddings/categories) so per-entry
+    # failures don't sink the file; attach the validated nested lists after.
+    raw_embeddings = data.get("embeddings") or []
+    raw_categories = data.get("categories") or []
+    skeleton = {k: v for k, v in data.items() if k not in ("embeddings", "categories")}
     try:
-        knn = KnnDefaults.model_validate(data.get("knn") or {})
+        parent = FeatureTableSpec.model_validate(
+            {**skeleton, "embeddings": [], "categories": []}
+        )
     except ValidationError as e:
-        logger.warning(
-            "manifest %s: `knn` block invalid (%s); falling back to defaults",
-            uri, e,
-        )
-        knn = KnnDefaults()
-
-    datastacks = _coerce_datastacks(data.get("datastacks"), manifest_uri=uri)
-
-    return Manifest(
-        schema_version=schema_version,
-        datastacks=datastacks,
-        knn=knn,
-        feature_tables=valid,
-    )
-
-
-def _coerce_datastacks(
-    raw, *, manifest_uri: str
-) -> list[DatastackEntry]:
-    """Parse the optional ``datastacks:`` block into ``DatastackEntry`` rows.
-
-    YAML ergonomics: a participant may be written as a bare name string
-    (``- minnie65_public``) or as a mapping (``- {name: minnie65_public,
-    cell_id_source_table: nucleus_detection_v0}``). Both forms coerce to
-    the same model. An invalid entry is dropped with a warning (mirrors
-    the soft-fail policy for feature_tables / embeddings).
-
-    Returns an empty list when ``raw`` is absent / null; the caller falls
-    back to ``[parent_datastack]`` via :func:`effective_datastacks`.
-    """
-    if raw is None:
-        return []
-    if not isinstance(raw, list):
-        logger.warning(
-            "manifest %s: `datastacks` must be a list, got %s; ignoring",
-            manifest_uri, type(raw).__name__,
-        )
-        return []
-
-    valid: list[DatastackEntry] = []
-    seen: set[str] = set()
-    for i, item in enumerate(raw):
-        if isinstance(item, str):
-            payload = {"name": item}
-        elif isinstance(item, dict):
-            payload = item
-        else:
-            logger.warning(
-                "manifest %s: skipping datastacks entry %d "
-                "(expected str or mapping, got %s)",
-                manifest_uri, i, type(item).__name__,
-            )
-            continue
-        try:
-            entry = DatastackEntry.model_validate(payload)
-        except ValidationError as e:
-            logger.warning(
-                "manifest %s: skipping datastacks entry %d (%s)",
-                manifest_uri, i, e,
-            )
-            continue
-        if entry.name in seen:
-            logger.warning(
-                "manifest %s: duplicate datastacks entry %r, keeping first",
-                manifest_uri, entry.name,
-            )
-            continue
-        seen.add(entry.name)
-        valid.append(entry)
-    return valid
-
-
-def _validate_feature_table(
-    entry, *, manifest_uri: str, index: int
-) -> FeatureTableSpec:
-    """Validate one feature_tables entry plus its nested embeddings.
-
-    Embeddings are validated individually; bad embeddings are dropped
-    (with a logged warning) so a typo on one of them doesn't sink the
-    table. Duplicate embedding ids within a table are also dropped.
-    """
-    # First validate the parent shape without the embeddings list — that
-    # gives us a clear error if `source` or `id_column` is malformed,
-    # without conflating it with embedding-entry issues.
-    if not isinstance(entry, dict):
-        # Surface as a ValidationError via Pydantic's own machinery so
-        # the upstream handler's `except ValidationError` catches it.
-        FeatureTableSpec.model_validate(entry)  # raises
-
-    raw_embeddings = entry.get("embeddings") or []
-    raw_categories = entry.get("categories") or []
-    skeleton = {
-        k: v for k, v in entry.items() if k not in ("embeddings", "categories")
-    }
-    # Validate the parent (with embeddings/categories=[] so the model
-    # fields are present); we'll attach the validated lists below.
-    parent = FeatureTableSpec.model_validate(
-        {**skeleton, "embeddings": [], "categories": []}
-    )
+        logger.warning("feature_table file %s: validation failed: %s", uri, e)
+        return None
 
     valid_categories: list[FeatureCategorySpec] = []
     seen_cat_ids: set[str] = set()
@@ -484,15 +434,14 @@ def _validate_feature_table(
             cat = FeatureCategorySpec.model_validate(raw)
         except ValidationError as e:
             logger.warning(
-                "manifest %s: feature_table %r — skipping categories entry %d (%s)",
-                manifest_uri, parent.id, j, e,
+                "feature_table file %s: skipping categories entry %d (%s)",
+                uri, j, e,
             )
             continue
         if cat.id in seen_cat_ids:
             logger.warning(
-                "manifest %s: feature_table %r — duplicate category id %r, "
-                "keeping first occurrence",
-                manifest_uri, parent.id, cat.id,
+                "feature_table file %s: duplicate category id %r, keeping first",
+                uri, cat.id,
             )
             continue
         seen_cat_ids.add(cat.id)
@@ -505,15 +454,14 @@ def _validate_feature_table(
             emb = EmbeddingSpec.model_validate(raw)
         except ValidationError as e:
             logger.warning(
-                "manifest %s: feature_table %r — skipping embeddings entry %d (%s)",
-                manifest_uri, parent.id, j, e,
+                "feature_table file %s: skipping embeddings entry %d (%s)",
+                uri, j, e,
             )
             continue
         if emb.id in seen_emb_ids:
             logger.warning(
-                "manifest %s: feature_table %r — duplicate embedding id %r, "
-                "keeping first occurrence",
-                manifest_uri, parent.id, emb.id,
+                "feature_table file %s: duplicate embedding id %r, keeping first",
+                uri, emb.id,
             )
             continue
         seen_emb_ids.add(emb.id)
@@ -522,6 +470,40 @@ def _validate_feature_table(
     return parent.model_copy(
         update={"embeddings": valid_embeddings, "categories": valid_categories}
     )
+
+
+def _basename_of(uri: str) -> str:
+    """Strip the path and the `.yaml`/`.yml` extension from a URI."""
+    last_slash = uri.rfind("/")
+    name = uri[last_slash + 1:] if last_slash >= 0 else uri
+    for ext in (".yaml", ".yml"):
+        if name.endswith(ext):
+            return name[: -len(ext)]
+    return name
+
+
+def _coerce_datastacks(raw, *, uri: str) -> list:
+    """Allow bare-name strings in the YAML datastacks block. Returns a
+    list of dicts ready for Pydantic to validate as ``DatastackEntry``."""
+    if not isinstance(raw, list):
+        logger.warning(
+            "feature_table file %s: `datastacks` must be a list, got %s; ignoring",
+            uri, type(raw).__name__,
+        )
+        return []
+    out: list = []
+    for i, item in enumerate(raw):
+        if isinstance(item, str):
+            out.append({"name": item})
+        elif isinstance(item, dict):
+            out.append(item)
+        else:
+            logger.warning(
+                "feature_table file %s: skipping datastacks entry %d "
+                "(expected str or mapping, got %s)",
+                uri, i, type(item).__name__,
+            )
+    return out
 
 
 def get_manifest(
@@ -556,12 +538,7 @@ def get_manifest(
 
 
 def _schedule_refresh(cache, key, uri: str, *, project: str | None) -> None:
-    """Refresh a stale manifest entry in a daemon thread.
-
-    Failures are logged and the stale entry stays in place; we never wipe
-    a stale entry just because refresh failed (a transient GCS hiccup
-    shouldn't surface as a broken /feature_tables to the SPA).
-    """
+    """Refresh a stale manifest entry in a daemon thread."""
 
     def _refresh() -> None:
         try:

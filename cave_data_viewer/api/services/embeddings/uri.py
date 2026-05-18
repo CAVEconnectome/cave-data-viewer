@@ -68,6 +68,70 @@ def fetch_bytes(uri: str, *, project: str | None = None) -> bytes:
     raise ValueError(f"unsupported URI scheme {scheme!r} in {uri!r}")
 
 
+def list_yaml_uris(uri: str, *, project: str | None = None) -> list[str]:
+    """List ``*.yaml`` / ``*.yml`` files under a directory or prefix URI.
+
+    Parameters
+    ----------
+    uri
+        Directory URI:
+        - ``file://path/to/dir`` or ``/abs/path/to/dir`` (local)
+        - ``gs://bucket/some/prefix`` or ``gs://bucket/some/prefix/`` (GCS)
+        The trailing slash is optional and stripped before listing.
+
+    Returns a list of URIs (in the same scheme as the input) for the
+    immediate children that end in ``.yaml`` or ``.yml``. Subdirectories
+    are NOT recursed.
+
+    Returns ``[]`` (with a logged warning by the caller, if appropriate)
+    when the directory doesn't exist or contains no YAML files.
+    """
+    parsed = urlparse(uri)
+    scheme = parsed.scheme
+
+    if scheme in ("", "file"):
+        path = local_path_for(uri)
+        if path is None:
+            return []
+        if not path.is_dir():
+            return []
+        out: list[str] = []
+        for child in sorted(path.iterdir()):
+            if child.is_file() and child.suffix.lower() in (".yaml", ".yml"):
+                out.append(f"file://{child.resolve()}")
+        return out
+
+    if scheme == "gs":
+        # Lazy import; see fetch_bytes for the rationale.
+        from google.cloud import storage
+
+        if not parsed.netloc:
+            raise ValueError(f"gs:// URI missing bucket: {uri!r}")
+        client = storage.Client(project=project) if project else storage.Client()
+        bucket = client.bucket(parsed.netloc)
+        prefix = parsed.path.lstrip("/")
+        if prefix and not prefix.endswith("/"):
+            prefix = prefix + "/"
+        out = []
+        for blob in client.list_blobs(bucket, prefix=prefix):
+            name = blob.name
+            # Skip pseudo-subdirectory markers (zero-byte objects whose
+            # name ends with `/`) and anything beneath a subdirectory
+            # (Listing is recursive by default; gate to immediate children
+            # by counting slashes past the prefix.).
+            if name.endswith("/"):
+                continue
+            rest = name[len(prefix):] if prefix else name
+            if "/" in rest:
+                continue
+            if not (rest.endswith(".yaml") or rest.endswith(".yml")):
+                continue
+            out.append(f"gs://{parsed.netloc}/{name}")
+        return sorted(out)
+
+    raise ValueError(f"unsupported URI scheme {scheme!r} in {uri!r}")
+
+
 def local_path_for(uri: str) -> Path | None:
     """Return a ``Path`` for a ``file://`` URI (or a bare absolute path),
     else ``None``.
