@@ -5,7 +5,7 @@ proofreading splits/merges. Root ids do not. To go between them we follow the
 pattern from `ceesem/cortical-tools` (common.py + microns_public.py):
 
   cell_id → root_id  (forward)
-    Query a materialized view (`cell_id_lookup_view`) keyed on `id`.
+    Query a materialized view (`cell_id_lookup_table`) keyed on `id`.
     - In materialized mode the view's `pt_root_id` is what we want.
     - In live mode we resolve `pt_supervoxel_id` → current root via the
       chunkedgraph (the view itself doesn't update with edits).
@@ -52,6 +52,7 @@ changes within a mat_version. So:
 """
 
 import datetime as _dt
+import logging
 import threading
 from dataclasses import dataclass, field
 from typing import Iterable
@@ -61,6 +62,8 @@ from cachetools import TTLCache
 from .keys import is_live
 from .query_runner import run_query
 from .request_state import current_timestamp
+
+logger = logging.getLogger("cdv.cell_id")
 
 
 # ----- caches -----------------------------------------------------------------
@@ -294,9 +297,24 @@ def cell_ids_to_root_ids(
     cell_id is queried individually-batched against the view, then
     supervoxels resolved to current roots via the chunkedgraph.
     """
-    view = cfg.cell_id_lookup_view
-    if not view:
-        raise ValueError("This datastack has no cell_id_lookup_view configured.")
+    resolved = cfg.cell_id_lookup_resource()
+    if resolved is None:
+        raise ValueError(
+            "This datastack has no cell_id forward lookup configured — set "
+            "either `cell_id_lookup_view` or `cell_id_lookup_table` in the "
+            "datastack YAML."
+        )
+    view, lookup_kind = resolved
+    # TODO: the query path currently treats `view` as a view name (uses
+    # the materialize query factory's view-shaped path). When
+    # lookup_kind == "table", the CAVE API call differs (`query_table`
+    # vs `query_view`). The dispatch lives downstream in this function;
+    # for now it warns if the table path is exercised.
+    if lookup_kind == "table":
+        logger.warning(
+            "datastack uses cell_id_lookup_table — the table-based query "
+            "path is not yet implemented; results may be incorrect."
+        )
     cell_ids = [int(x) for x in cell_ids]
     if not cell_ids:
         return {}
@@ -376,9 +394,24 @@ def cell_ids_to_positions(
     universes change with proofreading; per-cell position queries
     would be possible but would defeat the universe-cache pattern.
     """
-    view = cfg.cell_id_lookup_view
-    if not view:
-        raise ValueError("This datastack has no cell_id_lookup_view configured.")
+    resolved = cfg.cell_id_lookup_resource()
+    if resolved is None:
+        raise ValueError(
+            "This datastack has no cell_id forward lookup configured — set "
+            "either `cell_id_lookup_view` or `cell_id_lookup_table` in the "
+            "datastack YAML."
+        )
+    view, lookup_kind = resolved
+    # TODO: the query path currently treats `view` as a view name (uses
+    # the materialize query factory's view-shaped path). When
+    # lookup_kind == "table", the CAVE API call differs (`query_table`
+    # vs `query_view`). The dispatch lives downstream in this function;
+    # for now it warns if the table path is exercised.
+    if lookup_kind == "table":
+        logger.warning(
+            "datastack uses cell_id_lookup_table — the table-based query "
+            "path is not yet implemented; results may be incorrect."
+        )
     cell_ids = [int(x) for x in cell_ids]
     if not cell_ids:
         return {}

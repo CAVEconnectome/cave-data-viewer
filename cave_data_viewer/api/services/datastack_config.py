@@ -5,7 +5,7 @@ from typing import Annotated, Any, Literal, Union
 
 import yaml
 from cachetools import LRUCache
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from flask import current_app
 
@@ -565,11 +565,21 @@ class DatastackConfig(BaseModel):
     # ---- cell-id lookup -------------------------------------------------------
     # Cell ids (typically nucleus ids) are persistent identifiers that survive
     # proofreading splits/merges; root ids are not. The forward direction
-    # (cell_id → current root_id) uses a materialized view that the dataset
-    # operators provide. The reverse direction (root_id → cell_id) walks one or
-    # more annotation tables. Datastacks without these resources omit the keys;
-    # the SPA hides the cell-id input when the config is empty.
-    cell_id_lookup_view: str | None = None       # materialized view: id → pt_root_id (+ pt_supervoxel_id)
+    # (cell_id → current root_id) uses one CAVE resource — either a
+    # materialized view OR an annotation table, depending on the datastack.
+    # The two need separate CAVE API calls (`query_view` vs `query_table`),
+    # so the config carries them as two distinct fields and the consuming
+    # code dispatches on which is set. Exactly one should be populated when
+    # the cell-id input is to be enabled; the loader logs a warning when
+    # both are set (first-wins, view preferred).
+    #
+    # The reverse direction (root_id → cell_id) walks one or more annotation
+    # tables — those don't have a view counterpart in this codebase.
+    #
+    # Datastacks without these resources omit the keys; the SPA hides the
+    # cell-id input when the config is empty.
+    cell_id_lookup_view: str | None = None       # CAVE materialized view: id → pt_root_id
+    cell_id_lookup_table: str | None = None      # CAVE annotation table: id → pt_root_id
     root_id_lookup_main_table: str | None = None # primary table: pt_root_id → id
     root_id_lookup_alt_tables: list[str] = Field(default_factory=list)
 
@@ -578,6 +588,33 @@ class DatastackConfig(BaseModel):
     # route for this datastack. The embedding catalog itself lives in a GCS
     # manifest referenced from this block — see FeatureExplorerConfig.
     feature_explorer: FeatureExplorerConfig | None = None
+
+    @model_validator(mode="after")
+    def _check_lookup_exclusivity(self) -> "DatastackConfig":
+        """Exactly one of `cell_id_lookup_view` / `cell_id_lookup_table`
+        can be set. Both empty = cell-id lookup is disabled (the SPA
+        hides the input). Both populated = ambiguous config; the loader
+        rejects it rather than silently picking one."""
+        if self.cell_id_lookup_view and self.cell_id_lookup_table:
+            raise ValueError(
+                "cell_id_lookup_view and cell_id_lookup_table are mutually "
+                "exclusive — set exactly one (or neither, to disable cell-id "
+                "lookup for this datastack). CAVE distinguishes views from "
+                "tables at the API level; the consuming code dispatches on "
+                "which field is set."
+            )
+        return self
+
+    def cell_id_lookup_resource(self) -> tuple[str, Literal["view", "table"]] | None:
+        """Return ``(name, kind)`` for the configured cell-id forward
+        lookup, or ``None`` when neither field is set. Callers use ``kind``
+        to pick the right CAVE API path (``query_view`` vs ``query_table``).
+        """
+        if self.cell_id_lookup_view:
+            return (self.cell_id_lookup_view, "view")
+        if self.cell_id_lookup_table:
+            return (self.cell_id_lookup_table, "table")
+        return None
 
 
 
