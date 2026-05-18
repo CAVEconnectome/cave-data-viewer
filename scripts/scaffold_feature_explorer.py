@@ -924,14 +924,22 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--datastack",
+        default=None,
+        help=(
+            "datastack name; used to compute the convention output path "
+            "config/feature_tables/<datastack>/<id>.yaml when --out is not given."
+        ),
+    )
+    parser.add_argument(
         "--out",
         type=Path,
-        default=Path("/tmp/cdv-feature-tables/"),
+        default=None,
         help=(
-            "output path. If a directory (or ends with /), writes "
-            "<feature-table-id>.yaml inside it — the recommended shape "
-            "for the new per-file catalog. If a specific .yaml file path, "
-            "writes there directly (basename should match the feature_table id)."
+            "output path override. If a directory (or ends with /), writes "
+            "<feature-table-id>.yaml inside it. If a specific .yaml file path, "
+            "writes there directly. When omitted, the path is computed from "
+            "--datastack as <repo>/config/feature_tables/<datastack>/<id>.yaml."
         ),
     )
     parser.add_argument(
@@ -1058,26 +1066,44 @@ def main(argv: list[str] | None = None) -> int:
     else:
         console.print("[green]✓ valid[/]")
 
-    # ── Write ──
-    # Per-file v1: one feature table = one .yaml file. If --out doesn't
-    # end with a YAML extension, treat it as a directory and drop
-    # `<feature-table-id>.yaml` inside — that's the canonical "drop into
-    # a GCS prefix" workflow. If --out IS a .yaml path, honor it but
-    # warn when the basename doesn't match the feature_table_id (the
-    # registry will skip the file at directory-mode load time).
-    out_str = str(args.out)
-    looks_like_file = out_str.endswith(".yaml") or out_str.endswith(".yml")
-    if not looks_like_file:
-        out_path = args.out / f"{feature_table_id}.yaml"
+    # ── Resolve output path ──
+    # --out overrides; otherwise use the convention
+    # <repo>/config/feature_tables/<datastack>/<id>.yaml.
+    if args.out is not None:
+        # Honor --out as-is. If it doesn't end with a YAML extension,
+        # treat it as a directory and drop `<feature-table-id>.yaml`
+        # inside — that's the canonical "drop into a GCS prefix" workflow.
+        # If --out IS a .yaml path, honor it but warn when the basename
+        # doesn't match the feature_table_id (the registry will skip the
+        # file at directory-mode load time).
+        out_str = str(args.out)
+        looks_like_file = out_str.endswith(".yaml") or out_str.endswith(".yml")
+        if not looks_like_file:
+            out_path = args.out / f"{feature_table_id}.yaml"
+        else:
+            out_path = args.out
+            if out_path.stem != feature_table_id:
+                console.print(
+                    f"[yellow]warning:[/] output filename basename "
+                    f"{out_path.stem!r} doesn't match feature_table id "
+                    f"{feature_table_id!r}. The catalog loader requires them "
+                    f"to match for directory-mode loads."
+                )
     else:
-        out_path = args.out
-        if out_path.stem != feature_table_id:
-            console.print(
-                f"[yellow]warning:[/] output filename basename "
-                f"{out_path.stem!r} doesn't match feature_table id "
-                f"{feature_table_id!r}. The catalog loader requires them "
-                f"to match for directory-mode loads."
+        if args.datastack is None:
+            raise SystemExit(
+                "--datastack is required when --out is not given "
+                "(needed to compute the convention output path)"
             )
+        # Find the repo root by walking up from this script.
+        repo_root = Path(__file__).resolve().parents[1]
+        out_path = (
+            repo_root / "config" / "feature_tables"
+            / args.datastack / f"{feature_table_id}.yaml"
+        )
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # ── Write ──
     if out_path.exists() and not args.force:
         console.print(f"[red]refusing to overwrite existing file:[/] {out_path}")
         console.print("[dim](pass --force, or --out <path>)[/]")
@@ -1086,6 +1112,7 @@ def main(argv: list[str] | None = None) -> int:
     out_path.write_text(_format_yaml(feature_table))
     console.print()
     console.print(f"[bold green]wrote[/] {out_path}")
+    print(f"wrote: {out_path}")
 
     # ── Datastack snippet ──
     _print_datastack_snippet(console, out_path, feature_table_id)
