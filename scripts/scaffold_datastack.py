@@ -182,8 +182,8 @@ def main(argv: list[str] | None = None) -> int:
     print()
     print("Next:")
     print(f"  1. Edit {out_path} — uncomment + fill the blocks you need.")
-    print("  2. If using the feature explorer, generate a manifest:")
-    print("       uv run python scripts/scaffold_feature_explorer.py --parquet <path>")
+    print("  2. If using the feature explorer, author a per-FT YAML:")
+    print(f"       uv run python scripts/scaffold_feature_explorer.py --parquet <path> --datastack {args.datastack}")
     print("  3. Restart the backend; the new datastack appears in /datastacks.")
     return 0
 
