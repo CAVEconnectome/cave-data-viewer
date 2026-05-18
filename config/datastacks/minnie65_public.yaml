@@ -54,15 +54,17 @@ decoration_warmup:
   interval_seconds: 3600       # one hour
   startup_delay_seconds: 180   # three minutes
 
-# Feature Explorer enablement. The embedding catalog (which parquets exist,
-# their axes, feature columns, kNN defaults) lives in the manifest file
-# referenced by `manifest_uri` — not inline here — so adding new feature data
-# does not require a backend redeploy. The manifest is fetched with SWR
-# semantics (soft TTL ~5 min) so edits propagate without a restart.
+# Feature Explorer enablement. The embedding catalog (per-FT YAMLs +
+# their parquets) lives at the convention path
+# `<CDV_FEATURE_TABLES_BASE_URI>/feature_tables/<datastack>/` — one
+# subdir per datastack. Adding a new feature table = drop a (parquet,
+# yaml) pair into the right subdir; no datastack YAML edit and no
+# service redeploy. The manifest is fetched with SWR semantics
+# (soft TTL ~5 min) so edits propagate without a restart.
 #
-# Disabled by default. For local development point this at the manifest
-# produced by `scripts/make_sample_embedding.py`. For production, point at
-# a gs://... manifest file in the cache bucket.
+# `cell_id_source_table` is the CAVE table whose row ids the per-FT
+# `id_column` references — optional fallback that per-FT YAMLs can
+# override.
 feature_explorer:
   enabled: true
   cell_id_source_table: nucleus_detection_v0
