@@ -49,14 +49,13 @@ TEMPLATE = """\
 # spatial:
 #   provider: cortex
 #   params:
-#     # transform: 4x4 affine that maps Neuroglancer-space (nm) → cortex
-#     # space (µm, y-axis = depth, x/z = tangential). Hand-authored from
-#     # registration. The translation column is in µm post-transform.
-#     transform:
-#       - [1.0, 0.0, 0.0, 0.0]
-#       - [0.0, 1.0, 0.0, 0.0]
-#       - [0.0, 0.0, 1.0, 0.0]
-#       - [0.0, 0.0, 0.0, 1.0]
+#     # transform: short name for a standard_transform constructor.
+#     # Bundled names: minnie_nm, minnie_vx, v1dd_nm, v1dd_vx, identity.
+#     # The `_nm` variants expect positions in nanometres (Neuroglancer
+#     # native); `_vx` expects voxels. The transform maps input coords →
+#     # an oriented cortex frame where axis 1 is depth (pia → WM) and
+#     # axes 0/2 are tangential.
+#     transform: minnie_nm
 #
 #     # depth_range: [pia_y, white_matter_y] in µm, post-transform.
 #     # The renderer uses this to set the default y-axis extent on

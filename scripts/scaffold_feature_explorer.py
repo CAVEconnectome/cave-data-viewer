@@ -89,7 +89,14 @@ _ID_LIKE_RE = re.compile(r"_id$", re.IGNORECASE)
 #   transform produces along the cortical axis.
 _SPATIAL_DEPTH_RE = re.compile(r"depth", re.IGNORECASE)
 _SPATIAL_POS_RE = re.compile(r"[_-][xyz]$", re.IGNORECASE)
-_SPATIAL_DIST_RE = re.compile(r"_dist(?:_|\b|$)", re.IGNORECASE)
+# Only tag `_dist_` as spatial when the distance is a *positional relationship*
+# (e.g. `radial_dist_root_soma`, `lateral_dist_x`) — i.e., when the token
+# after `_dist` is another descriptor, not a physical-unit suffix like
+# `_um`, `_nm`, or `_vx`. Columns like `soma_to_nucleus_center_dist_um`
+# are scalar biometrics (the value IS a distance magnitude), not spatial
+# position columns. `_SPATIAL_RADIAL_RE` below covers `radial_*` names
+# regardless of this pattern.
+_SPATIAL_DIST_RE = re.compile(r"_dist_(?!um\b|nm\b|vx\b|px\b)", re.IGNORECASE)
 _SPATIAL_RADIAL_RE = re.compile(r"(?:^|_)radial(?:_|$)", re.IGNORECASE)
 # Pre-transform marker: `pt_position` (CAVE convention for the raw
 # segmentation point in the volume's native frame — always pre-

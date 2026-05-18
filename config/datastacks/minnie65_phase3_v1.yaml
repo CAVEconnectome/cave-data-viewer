@@ -1,5 +1,5 @@
-# minnie65_public is a release datastack — only the published mat versions are
-# meaningful to users; live mode would drift from what's officially released.
+# minnie65_phase3_v1 is an internal working datastack — live mode is enabled
+# so operators can inspect in-progress proofreading state.
 live_mode: true
 
 # Cell-id lookup. Pattern lifted from ceesem/cortical-tools (microns_public.py):
