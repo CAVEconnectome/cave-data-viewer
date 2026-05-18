@@ -150,12 +150,25 @@ class FeatureTableSpec(BaseModel):
     numerics). ``categorical_columns`` are usable for color and equality
     filters but are excluded from kNN by default.
 
+    ``spatial_columns`` declares which numeric columns have a spatial
+    interpretation — coordinates, depths, distances, radial offsets.
+    Overlaps with ``feature_columns`` the way ``depth_columns`` does
+    (a spatial column is still a feature and participates in kNN /
+    range filtering). Reserved for UI groupings and future
+    spatial-aware visualizations — the rendering pipeline doesn't
+    consume the field yet, but the scaffold script populates it via
+    name heuristics (``*_x`` / ``*_y`` / ``*_z`` suffixes, ``radial_*``
+    / ``*_dist*`` patterns, anything that ends up in ``depth_columns``).
+
     ``depth_columns`` declares which numeric columns are
-    depth-shaped — when one is bound on a plot's axis the rendering
-    pipeline auto-flips the axis and overlays layer-boundary markers
-    (the same machinery the connectivity-side plots use, via
-    ``services/plots.py::_is_depth_column``). Typically a single column
-    name (e.g. ``soma_depth_y``).
+    depth-shaped — a *special case* of spatial that the rendering
+    pipeline does consume: when a depth column is bound to a plot's
+    axis, the renderer auto-flips the axis and overlays layer-boundary
+    markers (the same machinery the connectivity-side plots use, via
+    ``services/plots.py::_is_depth_column``). Every column in
+    ``depth_columns`` SHOULD also appear in ``spatial_columns`` — the
+    loader doesn't enforce this today, but consumers may rely on the
+    invariant later.
     """
 
     id: str
@@ -165,6 +178,7 @@ class FeatureTableSpec(BaseModel):
     id_column: str = "cell_id"
     feature_columns: list[str] | None = None
     categorical_columns: list[str] = Field(default_factory=list)
+    spatial_columns: list[str] = Field(default_factory=list)
     depth_columns: list[str] = Field(default_factory=list)
     audit: FeatureTableAudit | None = None
     categories: list[FeatureCategorySpec] = Field(default_factory=list)

@@ -547,14 +547,18 @@ Options:
 - `--non-interactive` — accept all heuristic defaults, no prompts. Useful for scripted regeneration. Requires `--feature-table-id` and `--id-column` (or a canonical `cell_id`/`id` column).
 - `--force` — overwrite an existing output file.
 
-The classification heuristic uses these rules (reviewable interactively in step 2):
+The classification heuristic uses these rules (reviewable interactively in step 3):
 
 | Column heuristic | Bucket |
 |------------------|--------------|
 | Named `cell_id` / `id`, integer-typed | `id_column` |
 | Other integer columns ending in `_id` | id-like (excluded from features) |
-| Numeric, name contains `depth` | `depth_columns` + `feature_columns` |
-| Pair `<prefix>_x` / `<prefix>_y` where the prefix contains `umap`/`tsne`/`pca`/`phate`/`mds`/`isomap`/`lle` | one `embeddings:` entry with that axis pair |
+| Numeric, name contains `depth` | **spatial (depth)** — added to `feature_columns`, `spatial_columns`, AND `depth_columns` |
+| Numeric, name ends in `_x` / `_y` / `_z` (and isn't an embedding axis) | **spatial** — added to `feature_columns` and `spatial_columns` |
+| Numeric, name contains `_dist` or `radial_` | **spatial** — same as above |
+| Pair `<prefix>_x` / `<prefix>_y` where the prefix contains `umap`/`tsne`/`pca`/`phate`/`mds`/`isomap`/`lle` | one `embeddings:` entry with that axis pair (consumed before the spatial check, so embedding axes don't double-classify) |
 | Named matching `source[_-]?root` / `source[_-]?mat[_-]?version` | `audit.source_root_column` / `audit.source_mat_version_column` |
-| Other numeric | `feature_columns` |
+| Other numeric | plain `feature` — added to `feature_columns` only |
 | Object / string / categorical / bool | `categorical_columns` |
+
+**On the spatial vs feature vs depth model.** `spatial_columns` is a tag overlay on `feature_columns` (a spatial column is still a feature — kNN-eligible, range-filterable). `depth_columns` is in turn a subset of `spatial_columns` — the *rendering special case* the backend already consumes (axis flip + cortical layer markers). The label `spatial (depth)` in the review table means "this column is in all three lists." Plain `spatial` (no depth) means "in `feature_columns` and `spatial_columns`, but the renderer treats it as a normal axis." Plain `feature` means "in `feature_columns` only."

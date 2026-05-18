@@ -70,6 +70,30 @@ _ID_CANDIDATES = ("cell_id", "id")
 # Loose pattern for "looks like a foreign key", e.g. `soma_id`, `nucleus_id`.
 _ID_LIKE_RE = re.compile(r"_id$", re.IGNORECASE)
 
+# Spatial-feature heuristics. A numeric column matching any of these is
+# tagged `spatial` (and still counted as a `feature`). Depth columns
+# additionally pick up the `depth` sub-tag.
+#
+# - Depth: any column with `depth` in its name. Always also spatial.
+# - Position coordinates: column name ends in `_x`/`_y`/`_z` (e.g.
+#   `soma_x`, `pt_position_z`). Embedding axes are filtered out before
+#   classification so `umap_x` doesn't accidentally land here.
+# - Distance metrics: contains `_dist` (e.g. `radial_dist_root_soma`,
+#   `soma_to_nucleus_center_dist_um`).
+# - Radial offsets: contains `radial` (preceded by start or underscore).
+_SPATIAL_DEPTH_RE = re.compile(r"depth", re.IGNORECASE)
+_SPATIAL_POS_RE = re.compile(r"[_-][xyz]$", re.IGNORECASE)
+_SPATIAL_DIST_RE = re.compile(r"_dist(?:_|\b|$)", re.IGNORECASE)
+_SPATIAL_RADIAL_RE = re.compile(r"(?:^|_)radial(?:_|$)", re.IGNORECASE)
+
+
+def _is_spatial_name(name: str) -> bool:
+    """True when the column name matches any spatial-feature pattern."""
+    return any(
+        p.search(name)
+        for p in (_SPATIAL_DEPTH_RE, _SPATIAL_POS_RE, _SPATIAL_DIST_RE, _SPATIAL_RADIAL_RE)
+    )
+
 
 # ────────── Classification helpers (pure) ──────────
 
@@ -179,13 +203,14 @@ def _detect_embeddings(df: pd.DataFrame) -> tuple[list[dict[str, Any]], set[str]
 # the heuristic and the interactive review.
 _BUCKETS = (
     "id_column",
-    "feature",
+    "feature",          # plain numeric feature (kNN, range filter, no spatial semantics)
+    "spatial",          # numeric with a spatial interpretation; always co-tagged `feature`
+    "depth",            # special case of spatial; co-tagged `feature` + `spatial`
     "categorical",
-    "depth",         # always also a feature; depth is a tag, not an exclusive bucket
     "audit_root",
     "audit_mat_version",
-    "axis",          # consumed by an embedding pair
-    "id_like",       # excluded foreign-key int
+    "axis",             # consumed by an embedding pair
+    "id_like",          # excluded foreign-key int
     "unclassified",
 )
 
@@ -219,7 +244,11 @@ def _classify_one(
         return tags
     if _is_numeric(dtype):
         tags.add("feature")
-        if "depth" in col.lower():
+        if _is_spatial_name(col):
+            tags.add("spatial")
+        if _SPATIAL_DEPTH_RE.search(col):
+            # Depth implies spatial (it's the rendering special case).
+            tags.add("spatial")
             tags.add("depth")
         return tags
     if _is_categorical_dtype_compat(dtype):
@@ -247,6 +276,7 @@ def _build_manifest_dict(
 ) -> dict[str, Any]:
     feature_columns = [c for c, tags in classification.items() if "feature" in tags]
     categorical_columns = [c for c, tags in classification.items() if "categorical" in tags]
+    spatial_columns = [c for c, tags in classification.items() if "spatial" in tags]
     depth_columns = [c for c, tags in classification.items() if "depth" in tags]
 
     feature_table: dict[str, Any] = {"id": feature_table_id, "title": title}
@@ -256,7 +286,10 @@ def _build_manifest_dict(
     feature_table["id_column"] = id_column
     feature_table["feature_columns"] = feature_columns
     feature_table["categorical_columns"] = categorical_columns
-    feature_table["depth_columns"] = depth_columns
+    if spatial_columns:
+        feature_table["spatial_columns"] = spatial_columns
+    if depth_columns:
+        feature_table["depth_columns"] = depth_columns
     if audit:
         feature_table["audit"] = audit
     if categories:
@@ -300,7 +333,12 @@ def _sample_str(series: pd.Series, n: int = 3) -> str:
 
 
 def _bucket_label(tags: set[str]) -> str:
-    """One-line bucket summary for the column-overview table."""
+    """One-line bucket summary for the column-overview table.
+
+    `spatial` is a tag on top of `feature` (a spatial column is still a
+    feature — it participates in kNN). `depth` is a sub-tag of `spatial`
+    that additionally drives the cortical-axis-flip rendering.
+    """
     if "id_column" in tags:
         return "[bold cyan]id_column[/]"
     if "id_like" in tags:
@@ -312,7 +350,11 @@ def _bucket_label(tags: set[str]) -> str:
     if "axis" in tags:
         return "[yellow]axis (embedding)[/]"
     if "feature" in tags:
-        return "feature" + ("[green] +depth[/]" if "depth" in tags else "")
+        if "depth" in tags:
+            return "[green]spatial (depth)[/]"
+        if "spatial" in tags:
+            return "[green]spatial[/]"
+        return "feature"
     if "categorical" in tags:
         return "categorical"
     if "unclassified" in tags:
@@ -494,15 +536,26 @@ def _interactive_classification_review(
         )
         new_bucket = Prompt.ask(
             "  reassign to",
-            choices=["feature", "categorical", "depth", "audit_root", "audit_mat_version", "id_like", "skip"],
+            choices=[
+                "feature",
+                "spatial",
+                "depth",
+                "categorical",
+                "audit_root",
+                "audit_mat_version",
+                "id_like",
+                "skip",
+            ],
             default="skip",
             console=console,
         )
         if new_bucket == "skip":
             continue
-        # `depth` adds to features rather than replacing.
+        # `spatial` and `depth` co-tag with `feature` (and depth implies spatial).
         if new_bucket == "depth":
-            classification[col] = {"feature", "depth"}
+            classification[col] = {"feature", "spatial", "depth"}
+        elif new_bucket == "spatial":
+            classification[col] = {"feature", "spatial"}
         else:
             classification[col] = {new_bucket}
     console.print()
