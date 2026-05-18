@@ -66,6 +66,26 @@ from .request_state import current_timestamp
 logger = logging.getLogger("cdv.cell_id")
 
 
+def _lookup_query_factory(client, name: str, kind: str, **filters):
+    """Build the CAVE query factory for a cell-id forward-lookup resource.
+
+    CAVE distinguishes views from tables at the API level —
+    ``client.materialize.views[name]()`` and
+    ``client.materialize.tables[name]()`` return query factories of the
+    same shape but come from different accessors. The downstream
+    ``.query(...)`` call is identical for either.
+
+    ``kind`` is ``"view"`` or ``"table"`` (matches the literal returned
+    by ``DatastackConfig.cell_id_lookup_resource()``). Any keyword
+    filters (e.g. ``id=[...]``) pass through to the factory call.
+    """
+    if kind == "view":
+        return client.materialize.views[name](**filters)
+    if kind == "table":
+        return client.materialize.tables[name](**filters)
+    raise ValueError(f"unknown cell_id lookup kind: {kind!r}")
+
+
 # ----- caches -----------------------------------------------------------------
 
 # Universe cache: (datastack, mat_version, view) → CellUniverse. One entry
@@ -141,9 +161,9 @@ def clear_caches() -> None:
 
 
 def _get_universe(
-    *, client, view: str, datastack: str, mat_version: int
+    *, client, view: str, kind: str, datastack: str, mat_version: int
 ) -> CellUniverse:
-    """Return the cached universe for ``(datastack, mat_version, view)``,
+    """Return the cached universe for ``(datastack, mat_version, view, kind)``,
     fetching it if necessary.
 
     Lookup order:
@@ -169,7 +189,7 @@ def _get_universe(
     from .cache_lifecycle import cache_datastack
     cache_ds = cache_datastack(datastack)
     app_cache = _app_universe_cache()
-    app_key = (cache_ds, int(mat_version), view, "v2")
+    app_key = (cache_ds, int(mat_version), view, kind, "v2")
 
     if app_cache is not None:
         hit = app_cache.get(app_key)
@@ -178,7 +198,7 @@ def _get_universe(
             return value
 
     # Fallback: module-level cache, used when there's no Flask context.
-    fallback_key = (datastack, int(mat_version), view, "v2")
+    fallback_key = (datastack, int(mat_version), view, kind, "v2")
     if app_cache is None:
         with _lock:
             hit_local = _universe_mat.get(fallback_key)
@@ -196,7 +216,7 @@ def _get_universe(
     # users can plot nucleus.y vs soma_depth_y and have the axes
     # comparable. Cell ID and root ID values are independent of
     # `desired_resolution`.
-    qf = client.materialize.views[view]()
+    qf = _lookup_query_factory(client, view, kind)
     df = qf.query(split_positions=False, desired_resolution=[1000, 1000, 1000])
 
     cell_to_root: dict[int, int | None] = {}
@@ -305,16 +325,6 @@ def cell_ids_to_root_ids(
             "datastack YAML."
         )
     view, lookup_kind = resolved
-    # TODO: the query path currently treats `view` as a view name (uses
-    # the materialize query factory's view-shaped path). When
-    # lookup_kind == "table", the CAVE API call differs (`query_table`
-    # vs `query_view`). The dispatch lives downstream in this function;
-    # for now it warns if the table path is exercised.
-    if lookup_kind == "table":
-        logger.warning(
-            "datastack uses cell_id_lookup_table — the table-based query "
-            "path is not yet implemented; results may be incorrect."
-        )
     cell_ids = [int(x) for x in cell_ids]
     if not cell_ids:
         return {}
@@ -324,7 +334,11 @@ def cell_ids_to_root_ids(
     if not live:
         # Materialized: universe-cache path.
         universe = _get_universe(
-            client=client, view=view, datastack=datastack, mat_version=int(mat_version),
+            client=client,
+            view=view,
+            kind=lookup_kind,
+            datastack=datastack,
+            mat_version=int(mat_version),
         )
         # Cells outside the universe simply weren't in the view —
         # represent as None to keep the wire shape uniform with the
@@ -345,7 +359,7 @@ def cell_ids_to_root_ids(
     if not misses:
         return out
 
-    qf = client.materialize.views[view](id=misses)
+    qf = _lookup_query_factory(client, view, lookup_kind, id=misses)
     df = qf.query(split_positions=False)
 
     if not df.empty:
@@ -402,16 +416,6 @@ def cell_ids_to_positions(
             "datastack YAML."
         )
     view, lookup_kind = resolved
-    # TODO: the query path currently treats `view` as a view name (uses
-    # the materialize query factory's view-shaped path). When
-    # lookup_kind == "table", the CAVE API call differs (`query_table`
-    # vs `query_view`). The dispatch lives downstream in this function;
-    # for now it warns if the table path is exercised.
-    if lookup_kind == "table":
-        logger.warning(
-            "datastack uses cell_id_lookup_table — the table-based query "
-            "path is not yet implemented; results may be incorrect."
-        )
     cell_ids = [int(x) for x in cell_ids]
     if not cell_ids:
         return {}
@@ -420,6 +424,7 @@ def cell_ids_to_positions(
     universe = _get_universe(
         client=client,
         view=view,
+        kind=lookup_kind,
         datastack=datastack,
         mat_version=int(mat_version),
     )
