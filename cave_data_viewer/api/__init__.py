@@ -21,6 +21,7 @@ def create_app(config_overrides: dict | None = None) -> Flask:
     app = Flask(__name__)
     app.json = NumpyJSONProvider(app)
     configure_app(app, overrides=config_overrides)
+    _wire_feature_tables_base_uri(app)
     CORS(
         app,
         resources={r"/api/*": {"origins": app.config["CORS_ORIGINS"]}},
@@ -278,6 +279,36 @@ def _init_l2_immutable_caches(app: Flask) -> None:
         retention_resolver=_resolve_retention,
         immutable=True,
     )
+
+
+def _wire_feature_tables_base_uri(app: Flask) -> None:
+    """Wire the CDV_FEATURE_TABLES_BASE_URI env var into app.config.
+
+    Feature-table catalog base URI. The loader joins this with
+    "feature_tables/<datastack>/" to find a datastack's per-file FT
+    YAMLs. Read once at boot; the manifest cache key is just
+    `(datastack,)` because the URI is a deterministic function of
+    this value + the datastack name.
+
+    Default: the repo-root or wheel-bundled `config/` dir as a
+    file:// URI. In Docker images this resolves to /app/config/;
+    in a source install to <repo>/config/. Override at deploy time
+    for production (`gs://<bucket>/`) or for bind-mount layouts
+    (`file:///etc/cdv/`).
+    """
+    base_uri = os.environ.get("CDV_FEATURE_TABLES_BASE_URI")
+    if not base_uri:
+        # Use the bundled config dir (source install first, then wheel).
+        from .services.datastack_config import _REPO_ROOT_CONFIG, _PACKAGED_CONFIG
+        for candidate in (_REPO_ROOT_CONFIG, _PACKAGED_CONFIG):
+            if candidate.is_dir():
+                base_uri = f"file://{candidate}/"
+                break
+        else:
+            base_uri = f"file://{_REPO_ROOT_CONFIG}/"
+    if not base_uri.endswith("/"):
+        base_uri += "/"
+    app.config["FEATURE_TABLES_BASE_URI"] = base_uri
 
 
 def _register_spa(app: Flask) -> None:
