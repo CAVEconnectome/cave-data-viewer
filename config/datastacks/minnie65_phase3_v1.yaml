@@ -39,3 +39,8 @@ decoration_warmup:
   warm_soma_table: true
   interval_seconds: 3600       # one hour
   startup_delay_seconds: 180   # three minutes
+
+feature_explorer:
+  enabled: true
+  cell_id_source_table: nucleus_detection_v0
+  manifest_uri: file:///Users/caseysm/Work/Code/cave-data-viewer/config/feature_tables/minnie65_phase3_v1/
