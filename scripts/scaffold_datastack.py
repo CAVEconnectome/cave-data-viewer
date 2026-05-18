@@ -125,15 +125,19 @@ def _render_yaml(datastack: str, aligned_volume: str | None, public: bool) -> st
 #   parallel_workers: 8
 
 # ---- feature explorer -------------------------------------------------
-# Enables /explore for this datastack. The embedding catalog lives in
-# the manifest at `manifest_uri` — see docs/setting-up-a-datastack.md
-# Section 2 (or run scripts/scaffold_feature_explorer.py to generate a
-# starter manifest from a parquet).
+# Enable /explore for this datastack. The embedding catalog lives at the
+# convention path <CDV_FEATURE_TABLES_BASE_URI>/feature_tables/<this datastack>/
+# — there's no per-datastack manifest_uri to set. New feature tables are
+# added by dropping a (parquet, yaml) pair under that subdir; no datastack
+# YAML edit and no service redeploy.
+#
+# `cell_id_source_table` names the CAVE table whose row ids the
+# feature_tables' id_column references. Optional fallback — per-FT YAMLs
+# can override.
 #
 # feature_explorer:
 #   enabled: true
 #   cell_id_source_table: nucleus_detection_v0
-#   manifest_uri: "gs://my-bucket/my-prefix/feature-manifest.yaml"
 
 # ---- LTS marker (NOT in this file) ------------------------------------
 # Examples are filtered against `<ds>-longlived-versions.json` in the
