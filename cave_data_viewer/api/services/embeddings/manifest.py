@@ -65,6 +65,22 @@ logger = logging.getLogger(__name__)
 # top-level manifest. Older schema versions are not supported — migrate.
 SUPPORTED_SCHEMA_VERSIONS: frozenset[int] = frozenset({1})
 
+
+def resolve_manifest_uri(base_uri: str, datastack: str) -> str:
+    """Compute the feature-table catalog directory URI for ``datastack``.
+
+    The deployment-wide base URI (``CDV_FEATURE_TABLES_BASE_URI``,
+    read once at boot into ``app.config["FEATURE_TABLES_BASE_URI"]``)
+    is joined with the convention path ``feature_tables/<datastack>/``.
+
+    Defensive trailing-slash normalization: callers should pass a
+    URI already ending in ``/``, but we tolerate the missing slash
+    rather than producing a malformed URI downstream.
+    """
+    if not base_uri.endswith("/"):
+        base_uri = base_uri + "/"
+    return f"{base_uri}feature_tables/{datastack}/"
+
 # Filename basename allowlist for per-file feature-table YAMLs in a
 # directory. Same shape as the recipe-registry id pattern: lowercase
 # alphanumerics + underscore/dash, 3-64 chars, no leading hyphen.
