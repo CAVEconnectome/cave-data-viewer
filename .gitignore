@@ -146,3 +146,9 @@ scripts/dev/
 # Feature Explorer sample data at the repo root (~30MB parquet). Real
 # data lives in GCS; this file is for local dev only.
 microns_SomaData_AllCells_*.parquet
+
+# Safety exception: the committed Docker proving-ground sample parquet under
+# config/feature_tables/ must NOT be swept by any future broad *.parquet rule.
+# (There is no broad *.parquet rule in this file today, but if one is added
+# it MUST have this exception immediately after it.)
+!config/feature_tables/**/*.parquet
