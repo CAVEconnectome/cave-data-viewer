@@ -267,15 +267,17 @@ env-var snippet to copy into your shell.
 ```bash
 scripts/setup_local_cache_bucket.sh \
   --project my-gcp-project \
-  --bucket  cdv-dev-cache-myname \
-  --user    myname
+  --bucket  my-bucket \
+  --prefix  my-cache/
 ```
 
+`--prefix` defaults to `cache/` (matching the runtime
+`CDV_GCS_CACHE_PREFIX` default), so a single-tenant bucket can omit it.
 After it runs:
 
 ```bash
-export CDV_GCS_CACHE_BUCKET=cdv-dev-cache-myname
-export CDV_GCS_CACHE_PREFIX=dev-myname/cache/
+export CDV_GCS_CACHE_BUCKET=my-bucket
+export CDV_GCS_CACHE_PREFIX=my-cache/
 export CDV_GCS_CACHE_PROJECT=my-gcp-project
 gcloud auth application-default login   # one-time, ADC for runtime
 CDV_DEV_AUTH_BYPASS=1 CDV_PORT=5001 uv run python run_api.py
@@ -288,32 +290,68 @@ in a different project than the bucket. Service accounts whose home
 project matches the bucket can leave it unset — the client falls back
 to whatever the auth identity carries.
 
-Why a per-developer prefix:
+Why a free-form prefix:
 
-- **Multiple developers in one project** can share a single dev bucket
-  without cross-pollution — each writes under its own
-  `dev-<username>/cache/` path.
+- **Single-tenant buckets** can use the default `cache/` prefix; the
+  runtime already namespaces by datastack inside the prefix, so no
+  further partitioning is needed.
+- **Multiple developers sharing one bucket** can pick distinct prefixes
+  (e.g. `dev-alice/cache/`, `dev-bob/cache/`) so each developer's
+  lifecycle rules apply only to their own subtree.
 - **Sharing a real (non-dev) bucket from local** is also possible
-  (handy for testing against the same data prod is hitting). Set
-  `CDV_GCS_CACHE_PREFIX=dev-myname/cache/` so your dev objects are
-  namespaced; the lifecycle rule on the prod bucket can ignore the
-  `dev-*/` paths or sweep them faster than the production `cache/`
-  prefix.
+  (handy for testing against the same data prod is hitting). Pick a
+  prefix outside the production `cache/` namespace so your dev
+  objects are isolated.
 
-The script's lifecycle rule scopes to `dev-<username>/cache/` only, so
-re-running for one developer doesn't disturb another's prefix or any
+The script's lifecycle rule scopes to the supplied prefix only, so
+re-running for one prefix doesn't disturb another's subtree or any
 other top-level paths in a shared bucket.
 
 To wipe between sessions:
 
 ```bash
-gsutil -m rm -r gs://my-dev-bucket/dev-myname/cache/
+gsutil -m rm -r gs://my-bucket/my-cache/
 ```
 
 Costs for local dev are negligible — typical sessions touch a few
 neurons and a handful of decoration tables, so storage is in the MB
 range and the lifecycle rule sweeps overnight regardless. Pennies per
 month per developer.
+
+### First-time GCS setup
+
+Bringing up a fresh bucket is a two-step sequence. The bucket script
+handles infrastructure (creation + lifecycle); the marker file is
+populated separately by a deliberate operator action via `cdv-warm-cache`.
+
+```bash
+# 1. Bucket + lifecycle (one-time, bash + gcloud)
+scripts/dev/setup_local_cache_bucket.sh \
+  --project   em-270621 \
+  --bucket    dcv-csm-dev-test \
+  --prefix    dev-csm/cache/
+
+# 2. Mark a long-lived version (per datastack, per release)
+export CDV_GCS_CACHE_BUCKET=dcv-csm-dev-test
+export CDV_GCS_CACHE_PREFIX=dev-csm/cache/
+export CDV_GCS_CACHE_PROJECT=em-270621
+uv run cdv-warm-cache \
+  --datastack   minnie65_phase3_v1 \
+  --mat-version <mv> \
+  --no-warm \
+  --expires     2028-01-15
+```
+
+The bucket starts with no marker files. Until `cdv-warm-cache` writes
+one for a datastack, the `/examples` page shows the "no LTS published"
+empty state — that's expected and is the system asking for a positive
+operator action, not a misconfiguration. Marking a version is the
+declaration "this version is stable enough to back a public-facing
+example, and we want its cache entries to survive lifecycle sweeps."
+
+`--no-warm` writes only the marker file; drop the flag to also pre-warm
+the L2 cache for that version's proofread cells (a 20–30 min pass per
+datastack — see `tools/warm_cache.py:1-36`).
 
 ## Retention classes (default vs longlived)
 
@@ -408,12 +446,15 @@ arrive:
 CDV_GCS_CACHE_BUCKET=...                    \
 CDV_GCS_CACHE_PREFIX=cache/                 \
 CDV_GCS_CACHE_PROJECT=...                   \
-CDV_WARMUP_AUTH_TOKEN=...                   \
 uv run cdv-warm-cache                       \
     --datastack    minnie65_public          \
     --mat-version  1764                     \
     --expires      2028-01-15
 ```
+
+CAVE auth comes from `~/.cloudvolume/secrets/cave-secret.json` — mount
+or write a service-account credential there. `--no-warm` (marker-only
+mode) skips CAVE entirely and needs only GCS ADC.
 
 Two operations, default both run in sequence:
 

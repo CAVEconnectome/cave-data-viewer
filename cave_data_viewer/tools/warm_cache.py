@@ -26,7 +26,11 @@ Why a script (not in-service):
 
 Required env:
   CDV_GCS_CACHE_BUCKET, CDV_GCS_CACHE_PREFIX, CDV_GCS_CACHE_PROJECT,
-  CDV_WARMUP_AUTH_TOKEN, plus ADC for GCS access.
+  plus ADC for GCS access.
+
+CAVE auth comes from `~/.cloudvolume/secrets/cave-secret.json` (a mounted
+service-account credential in deployments). `--no-warm` skips CAVE entirely
+and only needs ADC for the GCS marker-file write.
 
 Example:
   uv run cdv-warm-cache \\
@@ -40,7 +44,6 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import logging
-import os
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -91,10 +94,6 @@ class WarmResults:
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     args = _parse_args(argv)
-
-    # Bypass datastack allowlist so the script can run against any
-    # configured ds without a deploy-config tweak.
-    os.environ.setdefault("CDV_DATASTACKS_ALLOWED", args.datastack)
 
     # Local imports — flask/cdv pull a lot of transitive deps that aren't
     # needed for `--help`.
@@ -154,15 +153,15 @@ def main(argv: list[str] | None = None) -> int:
             return 2
 
         # Build the warming client. Anonymous auth pattern — same as the
-        # in-service PeriodicWarmer. CDV_WARMUP_AUTH_TOKEN env var holds
-        # the operator's CAVE token so warmer activity is audit-trailed.
+        # in-service PeriodicWarmer. The token comes from the mounted
+        # cave-secret (a service-account credential in deployments);
+        # the audit log line records every fire.
         try:
             client = make_client_anonymous(
                 args.datastack,
                 app.config["GLOBAL_SERVER_ADDRESS"],
                 materialize_version=args.mat_version,
                 reason="dcv_warm_cache_script",
-                env_token_var="CDV_WARMUP_AUTH_TOKEN",
             )
         except Exception as exc:
             print(f"ERROR: failed to construct CAVE client: {exc}", file=sys.stderr)

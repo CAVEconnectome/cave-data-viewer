@@ -292,22 +292,18 @@ def _wire_feature_tables_base_uri(app: Flask) -> None:
     `(datastack,)` because the URI is a deterministic function of
     this value + the datastack name.
 
-    Default: the repo-root or wheel-bundled `config/` dir as a
-    file:// URI. In Docker images this resolves to /app/config/;
-    in a source install to <repo>/config/. Override at deploy time
-    for production (`gs://<bucket>/`) or for bind-mount layouts
-    (`file:///etc/cdv/`).
+    Default: `<_REPO_ROOT_CONFIG>/` as a file:// URI. In Docker
+    images this resolves to /app/config/ (the bind-mount target);
+    in a source install to <repo>/config/. The directory need not
+    exist at boot — an empty / missing dir produces an empty
+    manifest, which is the correct behavior under the "no bundled
+    defaults" policy. Override at deploy time for production
+    (`gs://<bucket>/`) or alternate bind-mount layouts.
     """
     base_uri = os.environ.get("CDV_FEATURE_TABLES_BASE_URI")
     if not base_uri:
-        # Use the bundled config dir (source install first, then wheel).
-        from .services.datastack_config import _REPO_ROOT_CONFIG, _PACKAGED_CONFIG
-        for candidate in (_REPO_ROOT_CONFIG, _PACKAGED_CONFIG):
-            if candidate.is_dir():
-                base_uri = f"file://{candidate}/"
-                break
-        else:
-            base_uri = f"file://{_REPO_ROOT_CONFIG}/"
+        from .services.datastack_config import _REPO_ROOT_CONFIG
+        base_uri = f"file://{_REPO_ROOT_CONFIG}/"
     if not base_uri.endswith("/"):
         base_uri += "/"
     app.config["FEATURE_TABLES_BASE_URI"] = base_uri

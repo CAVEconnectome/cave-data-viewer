@@ -5,21 +5,8 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 
 
 _DEFAULTS = {
-    "GLOBAL_SERVER_ADDRESS": "https://global.daf-apis.com",
+    "GLOBAL_SERVER_ADDRESS": None,
     "DEFAULT_DATASTACK": None,
-    # Allowlist of datastacks the SPA's picker offers. The list is also the
-    # only thing the listing endpoint returns — endpoints themselves don't
-    # gate on it (CAVE auth is the security boundary). Override per-deployment
-    # via `CDV_DATASTACKS_ALLOWED` (comma-separated). Default ships the three
-    # development datastacks: minnie65_public + minnie65_phase3_v1 (cortex,
-    # shared aligned_volume `minnie65_phase3`) and brain_and_nerve_cord
-    # (different aligned_volume, no spatial config — exercises the
-    # "no transform" branches of the bundle assembler and SPA).
-    "DATASTACKS_ALLOWED": [
-        "minnie65_public",
-        "minnie65_phase3_v1",
-        "brain_and_nerve_cord",
-    ],
     "CORS_ORIGINS": ["http://localhost:5173"],
     "SPELUNKER_URL": "https://spelunker.cave-explorer.org",
     "CACHE_QUERY_TTL_SECONDS": 15 * 60,
@@ -54,7 +41,7 @@ _DEFAULTS = {
     "DATASTACK_CONFIG_DIR": None,
     "ALIGNED_VOLUME_CONFIG_DIR": None,
     # GCS-backed L2 cache. Unset (None) → L2 disabled, every cache is
-    # in-process only (today's behavior). When set, decoration mat caches
+    # in-process only. When set, decoration mat caches
     # and the synapse-df cache also persist to GCS so cross-pod reads
     # warm a cold L1 in ~30ms instead of paying a multi-second CAVE
     # refetch. Only the bucket name is required; ADC supplies auth.

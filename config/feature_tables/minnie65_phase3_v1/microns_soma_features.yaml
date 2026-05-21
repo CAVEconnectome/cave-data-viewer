@@ -1,0 +1,71 @@
+schema_version: 1
+id: microns_soma_features
+title: Soma Features
+description: Perisomatic features from Elabbady et al. 2025
+source:
+  kind: parquet
+id_column: nucleus_id
+feature_columns:
+- soma_x
+- soma_y
+- soma_z
+- nucleus_volume_um
+- nucleus_area_um
+- nuclear_area_to_volume_ratio
+- nuclear_folding_area_um
+- fraction_nuclear_folding
+- nucleus_to_soma_ratio
+- soma_volume_um
+- soma_area_um
+- soma_to_nucleus_center_dist_um
+- soma_area_to_volume_ratio
+- soma_synapse_number
+- soma_synapse_density_um
+categorical_columns:
+- is_column
+- cortical_column_labels
+- predicted_class
+- predicted_subclass
+spatial_post_columns:
+- soma_x
+- soma_y
+- soma_z
+depth_columns:
+- soma_y
+categories:
+- id: nucleus
+  title: Nucleus
+  columns:
+  - nucleus_volume_um
+  - nucleus_area_um
+  - nuclear_area_to_volume_ratio
+  - nuclear_folding_area_um
+  - fraction_nuclear_folding
+  - nucleus_to_soma_ratio
+  description: Nuclear features
+- id: soma
+  title: Soma
+  columns:
+  - soma_volume_um
+  - soma_area_um
+  - soma_to_nucleus_center_dist_um
+  - soma_area_to_volume_ratio
+  - soma_synapse_number
+  - soma_synapse_density_um
+  description: Somatic features
+- id: classifications
+  title: Classifications
+  columns:
+  - cortical_column_labels
+  - predicted_class
+  - predicted_subclass
+  description: Human or model calls on cell type
+scaling: zscore
+clip_percentiles: null
+embeddings:
+- id: umap_embedding
+  title: Umap
+  axes:
+  - umap_embedding_x
+  - umap_embedding_y
+  default_color_by: predicted_class

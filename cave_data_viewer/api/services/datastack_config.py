@@ -5,7 +5,7 @@ from typing import Annotated, Any, Literal, Union
 
 import yaml
 from cachetools import LRUCache
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from flask import current_app
 
@@ -108,22 +108,14 @@ def _walk_annotation(annotation: Any, value: Any, source: Path) -> None:
         return
 
 
-# Bundled YAMLs live in the top-level `config/` directory at the repo root,
-# kept out of the Python package so config and code don't intermingle. For
-# wheel installs, hatch's `force-include` in pyproject.toml copies the same
-# tree to `<package>/_bundled_config/`. Both locations are searched (source
-# install first); missing directories are silently skipped, so a deployment
-# can ship with no bundled YAMLs at all and rely entirely on the
+# Repo-relative `config/` directory, used by the dev server and the
+# Docker image's /app/config bind-mount target. The package itself ships
+# no config — wheel installs and Docker images both rely on a deployment
+# supplying YAMLs at this path (via the bind-mount) or via the
 # `CDV_DATASTACK_CONFIG_DIR` / `CDV_ALIGNED_VOLUME_CONFIG_DIR` overrides.
+# Missing directories are silently skipped, so an empty deployment is
+# a valid state (the datastack picker just renders empty).
 _REPO_ROOT_CONFIG = Path(__file__).resolve().parents[3] / "config"
-_PACKAGED_CONFIG = Path(__file__).resolve().parents[2] / "_bundled_config"
-
-
-def _bundled_config_paths(subdir: str, filename: str) -> list[Path]:
-    return [
-        _REPO_ROOT_CONFIG / subdir / filename,
-        _PACKAGED_CONFIG / subdir / filename,
-    ]
 
 
 # Schema-level default for `SynapseConfig.columns`. Limited to fields that
@@ -313,10 +305,55 @@ class CellIdLookup(BaseModel):
     model-level validator. Omit the whole ``cell_id_lookup:`` block to
     disable cell-id lookup — the SPA hides the cell-id input when the
     config is absent.
+
+    ``cell_id_column`` names the column on the view/table whose values
+    feature-table parquets reference via their ``id_column``. Default
+    ``"id"`` matches the standard CAVE annotation-table convention;
+    override on datastacks whose lookup view uses a different PK name.
     """
 
     kind: Literal["view", "table"]
     name: str
+    cell_id_column: str = "id"
+
+
+class RootIdLookupTable(BaseModel):
+    """Primary reverse-lookup table (root_id → cell_id).
+
+    The resolver filters the table on ``pt_root_column`` and reads the
+    cell id from ``cell_id_column``. Defaults match the
+    long-standing CAVE annotation convention (``pt_root_id`` /
+    ``id``); override per-datastack when a table uses non-standard
+    column names.
+
+    The YAML field accepts either this block form or a bare string,
+    which is coerced to ``RootIdLookupTable(name=<string>)`` by the
+    field validator on :class:`DatastackConfig`. Bare-string YAMLs
+    already in production continue to work without edits.
+    """
+
+    name: str
+    cell_id_column: str = "id"
+    pt_root_column: str = "pt_root_id"
+
+
+class RootIdLookupAltTable(BaseModel):
+    """Fallback reverse-lookup table (root_id → cell_id), tried after
+    the main table for orphan / post-split root ids.
+
+    Defaults match the ``nucleus_alternative_points`` schema convention
+    (``pt_ref_root_id`` filter, ``target_id`` payload) which the
+    resolver historically expected. Operators with a custom alt-table
+    schema name the columns explicitly.
+
+    Same string-coercion treatment as :class:`RootIdLookupTable`:
+    list entries authored as bare strings are coerced to
+    ``RootIdLookupAltTable(name=<string>)``.
+    """
+
+    name: str
+    cell_id_column: str = "target_id"
+    pt_root_column: str = "pt_ref_root_id"
 
 
 class FeatureExplorerConfig(BaseModel):
@@ -585,8 +622,8 @@ class DatastackConfig(BaseModel):
     # Datastacks without these resources omit the `cell_id_lookup:` block; the
     # SPA hides the cell-id input when the config is absent.
     cell_id_lookup: CellIdLookup | None = None
-    root_id_lookup_main_table: str | None = None # primary table: pt_root_id → id
-    root_id_lookup_alt_tables: list[str] = Field(default_factory=list)
+    root_id_lookup_main_table: RootIdLookupTable | None = None
+    root_id_lookup_alt_tables: list[RootIdLookupAltTable] = Field(default_factory=list)
 
     # ---- feature explorer -----------------------------------------------------
     # Optional. When omitted (or `enabled: false`) the SPA hides the /explore
@@ -594,14 +631,47 @@ class DatastackConfig(BaseModel):
     # manifest referenced from this block — see FeatureExplorerConfig.
     feature_explorer: FeatureExplorerConfig | None = None
 
-    def cell_id_lookup_resource(self) -> tuple[str, Literal["view", "table"]] | None:
-        """Return ``(name, kind)`` for the configured cell-id forward
-        lookup, or ``None`` when the block is absent. Callers use ``kind``
-        to pick the right CAVE API path (``query_view`` vs ``query_table``).
+    @field_validator("root_id_lookup_main_table", mode="before")
+    @classmethod
+    def _coerce_main_table(cls, v):
+        """YAML bare-string → block form. Lets the pre-existing
+        ``root_id_lookup_main_table: nucleus_detection_v0`` shape keep
+        parsing after the field type changed from ``str`` to
+        ``RootIdLookupTable``. Defaults for ``cell_id_column`` /
+        ``pt_root_column`` apply.
+        """
+        if isinstance(v, str):
+            return {"name": v}
+        return v
+
+    @field_validator("root_id_lookup_alt_tables", mode="before")
+    @classmethod
+    def _coerce_alt_tables(cls, v):
+        """Same idea for the alt-tables list — each entry may be a bare
+        string (pre-existing YAMLs) or a block. Mixed lists are
+        supported.
+        """
+        if isinstance(v, list):
+            return [({"name": item} if isinstance(item, str) else item) for item in v]
+        return v
+
+    def cell_id_lookup_resource(
+        self,
+    ) -> tuple[str, Literal["view", "table"], str] | None:
+        """Return ``(name, kind, cell_id_column)`` for the configured
+        cell-id forward lookup, or ``None`` when the block is absent.
+
+        Callers use ``kind`` to pick the right CAVE API path
+        (``query_view`` vs ``query_table``) and ``cell_id_column`` to
+        filter and index on the right column of the view/table.
         """
         if self.cell_id_lookup is None:
             return None
-        return (self.cell_id_lookup.name, self.cell_id_lookup.kind)
+        return (
+            self.cell_id_lookup.name,
+            self.cell_id_lookup.kind,
+            self.cell_id_lookup.cell_id_column,
+        )
 
 
 
@@ -628,17 +698,19 @@ def _validate_tour_ids(cfg: DatastackConfig, datastack: str) -> None:
 
 
 def load_datastack_config(datastack: str) -> DatastackConfig:
-    """Resolve `<datastack>.yaml`. Bundled `config/datastacks/` is always
-    checked; `CDV_DATASTACK_CONFIG_DIR` is checked last and wins on conflict,
-    letting operators ship deployment-specific overrides without forking the
-    package. Datastacks with no YAML in any location fall back to schema
+    """Resolve `<datastack>.yaml`. `<_REPO_ROOT_CONFIG>/datastacks/` is
+    always checked (the dev source / the Docker bind-mount target);
+    `CDV_DATASTACK_CONFIG_DIR` is checked last and wins on conflict,
+    letting operators layer deployment-specific overrides on top.
+    Datastacks with no YAML in either location fall back to schema
     defaults.
 
-    Cached per `(bundled.yaml mtime, override.yaml mtime)`, so editing a YAML
-    in dev invalidates the entry on the next request — no server restart.
+    Cached per `(<source>.yaml mtime, override.yaml mtime)`, so editing a
+    YAML in dev invalidates the entry on the next request — no server
+    restart.
     """
     extra_dir = current_app.config.get("DATASTACK_CONFIG_DIR")
-    paths = _bundled_config_paths("datastacks", f"{datastack}.yaml")
+    paths = [_REPO_ROOT_CONFIG / "datastacks" / f"{datastack}.yaml"]
     if extra_dir:
         paths.append(Path(extra_dir) / f"{datastack}.yaml")
 
@@ -656,6 +728,34 @@ def load_datastack_config(datastack: str) -> DatastackConfig:
     _validate_tour_ids(cfg, datastack)
     _config_cache[datastack] = (cfg, signature)
     return cfg
+
+
+def list_configured_datastacks() -> list[str]:
+    """Names of every datastack that has a YAML in either of the two
+    config locations searched by :func:`load_datastack_config` —
+    `<_REPO_ROOT_CONFIG>/datastacks/` (the dev / bind-mount source) and
+    the operator override `CDV_DATASTACK_CONFIG_DIR`. The override dir
+    wins on conflict for *config content*; here it's strictly additive
+    — the union of stems across both locations is what the SPA's
+    picker offers.
+
+    Returns a sorted list of unique datastack names with no caching: the
+    operation is one `Path.iterdir()` per directory and runs at most once
+    per datastacks-list HTTP request, which the SPA fetches a handful of
+    times per session.
+    """
+    names: set[str] = set()
+    candidate_dirs: list[Path] = [_REPO_ROOT_CONFIG / "datastacks"]
+    extra_dir = current_app.config.get("DATASTACK_CONFIG_DIR")
+    if extra_dir:
+        candidate_dirs.append(Path(extra_dir))
+    for directory in candidate_dirs:
+        if not directory.is_dir():
+            continue
+        for entry in directory.iterdir():
+            if entry.is_file() and entry.suffix == ".yaml":
+                names.add(entry.stem)
+    return sorted(names)
 
 
 def clear_datastack_config_cache() -> None:
@@ -679,11 +779,12 @@ _aligned_volume_config_cache: LRUCache = LRUCache(maxsize=64)
 
 
 def load_aligned_volume_config(aligned_volume: str | None) -> AlignedVolumeConfig:
-    """Resolve `aligned_volumes/<aligned_volume>.yaml`. Same bundled+override
-    pattern as `load_datastack_config`: bundled `config/aligned_volumes/` is
-    checked first, `CDV_ALIGNED_VOLUME_CONFIG_DIR` last and wins on conflict.
+    """Resolve `aligned_volumes/<aligned_volume>.yaml`. Same lookup
+    pattern as `load_datastack_config`: `<_REPO_ROOT_CONFIG>/aligned_volumes/`
+    is checked first, `CDV_ALIGNED_VOLUME_CONFIG_DIR` last and wins on
+    conflict.
 
-    Aligned volumes with no YAML in any location fall back to schema
+    Aligned volumes with no YAML in either location fall back to schema
     defaults — i.e. no transform, no depth axis, no layer guides. That's the
     right behavior for any volume the deployment hasn't characterized yet
     (typical for non-cortex datasets), so callers don't have to special-case
@@ -693,7 +794,7 @@ def load_aligned_volume_config(aligned_volume: str | None) -> AlignedVolumeConfi
         return AlignedVolumeConfig()
 
     extra_dir = current_app.config.get("ALIGNED_VOLUME_CONFIG_DIR")
-    paths = _bundled_config_paths("aligned_volumes", f"{aligned_volume}.yaml")
+    paths = [_REPO_ROOT_CONFIG / "aligned_volumes" / f"{aligned_volume}.yaml"]
     if extra_dir:
         paths.append(Path(extra_dir) / f"{aligned_volume}.yaml")
 

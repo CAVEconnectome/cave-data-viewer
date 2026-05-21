@@ -1,29 +1,46 @@
-# Config for the minnie65_phase3 aligned volume. Shared by every datastack
-# mounted on this volume — currently `minnie65_public` (release) and
-# `minnie65_phase3_v1` (working). Any proofreading version of the same volume
-# inherits this and gets identical depth axes, layer boundaries, and synapse
-# conventions. Per-datastack YAMLs can still field-by-field override.
+# Aligned-volume config for minnie65_phase3.
+#
+# Carries the spatial transform (datastacks of the same volume share
+# the coordinate frame) and synapse defaults (segmentation-pipeline-
+# driven; shared across the volume's datastacks). Per-datastack YAMLs
+# can override the synapse block field-by-field; spatial config can
+# only be set here.
+#
+# This file is keyed by aligned_volume name (as reported by
+# `client.info.get_datastack_info()['aligned_volume']['name']`), NOT
+# by datastack. Every datastack mounted on the same volume reads the
+# same file.
 
-# `cortex` provider wraps standard_transform: input nm → oriented µm with
-# axis 1 as depth (pia → white matter) and axes 0/2 as the tangential plane.
-# Params are validated by CortexSpatialProvider:
-#   transform        — short name for the standard_transform constructor
-#   depth_range      — µm; fixes depth-axis range on depth-bound plots so
-#                      neurons share a coordinate system
-#   layer_boundaries — µm, top-to-bottom; drawn as guides on depth-axis plots
-#   layer_names      — parallel to layer_boundaries (Schneider-Mizell et al.)
+# ---- spatial transform ------------------------------------------------
+# Picks a registered SpatialProvider. `cortex` is the default and only
+# bundled provider (handles minnie/v1dd-style cortical sheets); `null`
+# emits no spatial columns at all (use for volumes you haven't
+# characterized yet); a dotted import path lets you plug an out-of-tree
+# provider that calls register_provider() at import time.
 spatial:
   provider: cortex
   params:
+    # transform: short name for a standard_transform constructor.
+    # Bundled names: minnie_nm, minnie_vx, v1dd_nm, v1dd_vx, identity.
+    # The `_nm` variants expect positions in nanometres (Neuroglancer
+    # native); `_vx` expects voxels. The transform maps input coords →
+    # an oriented cortex frame where axis 1 is depth (pia → WM) and
+    # axes 0/2 are tangential.
     transform: minnie_nm
-    depth_range: [0, 775]
-    layer_boundaries: [91.80615154, 261.21908419, 391.8631847, 537.04973966, 753.58049474]
-    layer_names: [L1, L2/3, L4, L5, L6]
 
-# Synapse-table conventions are driven by the segmentation pipeline, which
-# is the same across every datastack mounted on this aligned volume — so
-# they live here, not on each datastack YAML. Datastacks override
-# field-by-field via their own `synapse:` block when they need to.
+    # depth_range: [pia_y, white_matter_y] in µm, post-transform.
+    # The renderer uses this to set the default y-axis extent on
+    # depth-bound plots.
+    depth_range: [0, 775]
+
+    # layer_boundaries: list of y-values (µm, post-transform) where
+    # the renderer overlays cortical-layer guide lines. Order:
+    # pia → white matter.
+    layer_boundaries: [91.80615154, 261.21908419, 391.8631847, 537.04973966, 753.58049474]
+
+    # layer_names: one more name than boundaries (regions between).
+    layer_names: [L1, L2/3, L4, L5, L6, WM]
+
 synapse:
   position_prefix: ctr_pt
   columns:
@@ -39,3 +56,32 @@ synapse:
     net_size:
       column: size
       agg: sum
+
+# ---- synapse-table conventions ----------------------------------------
+# The default schema applies to every CAVE synapse table on this volume.
+# Per-datastack YAMLs can override individual fields without re-stating
+# this whole block. Always emitted commented — uncomment + edit when
+# the volume's synapse pipeline diverges from the defaults below.
+# synapse:
+#   # Column-name stem for synapse position. Most CAVE synapse tables
+#   # use ctr_pt. Some pipelines use anchor_pt or post-anchor.
+#   position_prefix: ctr_pt
+#
+#   # Projected columns. Setting to ~ (null) selects every column —
+#   # convenient for ad-hoc exploration, bloats the cache in production.
+#   columns:
+#     - id
+#     - pre_pt_root_id
+#     - post_pt_root_id
+#     - size
+#     - ctr_pt_position
+#
+#   # Per-partner summary stats. Each entry adds a column to the
+#   # partner table by grouping synapses on partner root_id.
+#   aggregation_rules:
+#     mean_size:
+#       column: size
+#       agg: mean
+#     net_size:
+#       column: size
+#       agg: sum

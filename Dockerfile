@@ -10,24 +10,36 @@
 #   3. final stage  — runtime image. Copies `.venv` from `backend` and
 #                     `frontend/dist` from `frontend`, plus the backend
 #                     source. Entry runs gunicorn with 1 worker (the
-#                     per-pod in-process caches require 1 worker until
-#                     a redis backing layer arrives — multiple workers
-#                     would each maintain a separate cache and fan out
-#                     CAVE fetches unpredictably).
+#                     SWR ticket/poll flow is per-process — a ticket
+#                     minted by one worker can't be polled by another,
+#                     since each gunicorn worker is its own process
+#                     with its own in-memory ticket map. The GCS L2
+#                     cache shares cached data across pods but does
+#                     not share ticket state).
+#
+# Configuration model: the image ships with NO bundled config. Every
+# deployment supplies its own datastack / aligned-volume / feature-table
+# YAMLs by mounting a directory at /app/config. The layout mirrors the
+# repo's config/ tree:
+#
+#   /app/config/
+#     datastacks/<datastack>.yaml
+#     aligned_volumes/<aligned_volume>.yaml
+#     feature_tables/<datastack>/<feature_table>.yaml
+#
+# Without a mount the SPA loads but the datastack picker is empty and the
+# /api/v1/datastacks endpoint returns []. That's by design — every deploy
+# is expected to supply its own set of YAMLs.
 #
 # Build:   docker build -t cdv .
 # Run:     docker run --rm -p 8000:8000 \
+#            -v /local/config:/app/config \
 #            -e GLOBAL_SERVER=global.daf-apis.com \
-#            -e CDV_DATASTACKS_ALLOWED=minnie65_public \
 #            cdv
 #
-# Datastack overrides: mount a directory of YAMLs at /etc/cdv/datastacks
-#   docker run ... -v /local/datastacks:/etc/cdv/datastacks cdv
-#
-# Feature-table catalog override: point at a bind-mount or GCS:
-#   docker run ... -v /local/ft:/etc/cdv/feature_tables \
-#     -e CDV_FEATURE_TABLES_BASE_URI=file:///etc/cdv/ cdv
-#   docker run ... -e CDV_FEATURE_TABLES_BASE_URI=gs://my-bucket/ cdv
+# Production feature-table catalog hosted in GCS instead of bind-mounted:
+#   docker run ... -v /local/config:/app/config \
+#     -e CDV_FEATURE_TABLES_BASE_URI=gs://my-bucket/ cdv
 #
 # Auth bypass for local testing only — never set in prod:
 #   docker run ... -e CDV_DEV_AUTH_BYPASS=1 cdv
@@ -78,11 +90,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-install-project --no-dev
 
 # Now bring in the source and install the project itself (fast — no deps
-# left to compile). `config/` is included so hatchling's force-include
-# (see pyproject.toml) bundles the YAMLs into the wheel as
-# `cave_data_viewer/_bundled_config/`.
+# left to compile). The repo's `config/` directory is NOT copied: bundled
+# YAMLs are dev-only convenience; the image ships empty and every
+# deployment supplies its own config via a /app/config bind-mount.
 COPY cave_data_viewer/ ./cave_data_viewer/
-COPY config/ ./config/
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev
 
@@ -104,37 +115,16 @@ WORKDIR /app
 COPY --from=backend /app/.venv /app/.venv
 COPY --from=backend /app/cave_data_viewer /app/cave_data_viewer
 
-# Bundled config (datastack + aligned-volume YAMLs). Lives at the repo
-# root (alongside `cave_data_viewer/`) so the loader's
-# `_REPO_ROOT_CONFIG` resolves to `/app/config`. The wheel also ships an
-# `_bundled_config/` copy via hatchling force-include, but that copy
-# inside the venv is shadowed at import time by the COPYed source tree
-# above — so the runtime relies on the explicit `/app/config/` copy.
-COPY --from=backend /app/config /app/config
-
 # Built SPA assets — Flask serves these via the catch-all route in
 # `api/__init__.py::_register_spa`. Path here matches the default
 # `CDV_SPA_DIR` (frontend/dist relative to WORKDIR).
 COPY --from=frontend /app/frontend/dist /app/frontend/dist
 
-# Mount point for external datastack YAMLs. Operators bind-mount their
-# private datastack configs here at runtime; bundled defaults from the
-# repo's `config/datastacks/` are already in the image at `/app/config/`.
-RUN mkdir -p /etc/cdv/datastacks
-ENV CDV_DATASTACK_CONFIG_DIR=/etc/cdv/datastacks
-
-# Mount point for an external feature-table catalog. By default the
-# image's bundled `/app/config/` is used (CDV_FEATURE_TABLES_BASE_URI
-# is intentionally unset). Override at run time to point at a bind-
-# mounted dir or a GCS prefix:
-#
-#   docker run ... -v /local/feature_tables:/etc/cdv/feature_tables \
-#     -e CDV_FEATURE_TABLES_BASE_URI=file:///etc/cdv/ cdv
-#
-# or for production:
-#
-#   docker run ... -e CDV_FEATURE_TABLES_BASE_URI=gs://my-bucket/ cdv
-RUN mkdir -p /etc/cdv/feature_tables
+# `/app/config` is the deployment-supplied configuration mount point.
+# Create it empty so the volume-mount target exists; without a mount,
+# the loaders see an empty directory and the datastack picker is empty
+# (intentional — every deploy supplies its own YAMLs).
+RUN mkdir -p /app/config
 
 # Run as a non-root user — defense in depth against container escape via
 # any Python deserialization bug. uid/gid 1000 matches the conventional

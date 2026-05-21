@@ -1,10 +1,9 @@
 """Tests for `RecipeRegistry` — the shared loader for operator recipes
 and examples.
 
-Tri-source layout (repo → wheel _bundled_config → env override) mirrors
+Two-source layout (repo → env override) mirrors
 `services/datastack_config.py`. Tests use a `tmp_path` dir as the repo
-source and skip the wheel-bundle / env-override branches (covered by
-integration tests).
+source and skip the env-override branch (covered by integration tests).
 """
 
 from __future__ import annotations

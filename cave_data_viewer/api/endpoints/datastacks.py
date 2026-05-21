@@ -11,6 +11,7 @@ from ..services.cache_lifecycle import cache_datastack
 from ..services.datastack_config import (
     cached_datastack_info,
     latest_valid_mat_version,
+    list_configured_datastacks,
     load_datastack_config,
 )
 from ..services.keys import is_live
@@ -22,16 +23,15 @@ bp = Blueprint("datastacks", __name__, url_prefix="/datastacks")
 @bp.route("/", methods=["GET"])
 @auth_required
 def list_datastacks():
-    """Allowlisted datastacks the SPA picker should offer.
+    """Datastacks the SPA picker should offer.
 
-    Returns the configured `DATASTACKS_ALLOWED` list verbatim; endpoints
-    themselves don't enforce it (CAVE auth is the security boundary), but
-    surfacing only this set in the picker keeps users from accidentally
-    pointing the SPA at something the operator hasn't characterized for
-    spatial / cell-id / synapse-table conventions.
+    Source of truth is the set of `<datastack>.yaml` files discoverable
+    via :func:`list_configured_datastacks` — the same locations the
+    per-datastack loader searches. Endpoints themselves don't enforce
+    membership (CAVE auth is the security boundary); the picker just
+    reflects what the deployment has configured.
     """
-    allowed = current_app.config.get("DATASTACKS_ALLOWED") or []
-    return jsonify({"datastacks": list(allowed)})
+    return jsonify({"datastacks": list_configured_datastacks()})
 
 
 def _client_for(ds: str) -> "object":

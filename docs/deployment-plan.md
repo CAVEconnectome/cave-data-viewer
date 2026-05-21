@@ -1,9 +1,14 @@
-# Deployment plan: dynamic datastack discovery + pluggable cache backend
+# Deployment plan: dynamic datastack discovery
 
 > Living document. Captures the architectural intent for moving this app
 > from "ships a curated registry of datastacks" to "thin shell over the
 > user's CAVE access," and the deployment shape that follows. Concrete
 > implementation lands in separate PRs against this plan.
+>
+> The L2 cache concern is no longer in this plan — it shipped as a
+> GCS-backed layer on the existing SwrCache (see `docs/cache-lifecycle.md`
+> and `services/object_store.py`). This doc tracks discovery + deployment
+> infrastructure only.
 
 ## Context
 
@@ -26,15 +31,15 @@ user's token. The YAML registry becomes an *optional override* layer
 for things CAVE doesn't know (spatial transforms, layer bounds, operator
 preferences).
 
-Two execution waves: **discovery + cache-backend swap together** (Phase
-1+2 in this plan), **Helm/Terragrunt deployment infrastructure** deferred
-to a follow-up once the application changes are exercised locally.
+Two execution waves: **discovery in the application layer** (Phase 1 in
+this plan), **Helm/Terragrunt deployment infrastructure** deferred to a
+follow-up once the application changes are exercised locally.
 
 ### Reference implementation
 
 `~/Work/Code/Guidebook/` (the Tourguide service) is a working Flask +
-middle-auth + flask_caching app on GKE that does exactly this dynamic-
-discovery pattern. Patterns to lift:
+middle-auth app on GKE that does exactly this dynamic-discovery
+pattern. Patterns to lift:
 
 - `auth_requires_permission("view", table_id=datastack_name,
   resource_namespace="datastack")` from middle-auth-client gates per-
@@ -42,8 +47,6 @@ discovery pattern. Patterns to lift:
 - `make_global_client(server_address, auth_token=flask.g.auth_token)`
   builds the discovery client with the user's token. **No service-side
   CAVE secret. The user's token IS the secret.**
-- `flask_caching.Cache(config={"CACHE_TYPE": "SimpleCache", ...})` with
-  `CACHE_TYPE` env override — already-validated swap path for Redis.
 - `caveclient.tools.caching.CachedClient` wraps info calls so we don't
   hand-roll a TTL cache around `get_datastack_info`. Centralizing the
   client wrapper means upstream caveclient improvements flow through
@@ -233,87 +236,8 @@ Reuses:
   specific use case).
 - The existing `useUrlParam`/`useSetUrlParams` hooks for state.
 
-## Phase 2: pluggable cache backend (flask_caching)
-
-### Wrap the existing cache instances
-
-`cave_data_viewer/api/caches.py` currently exposes three
-`_LazyTTLCache` instances. Replace with a single `flask_caching.Cache`
-configured per env:
-
-```python
-# api/__init__.py
-from flask_caching import Cache
-cache = Cache()
-
-def create_app(...):
-    app = Flask(...)
-    cache.init_app(app, config={
-        "CACHE_TYPE": app.config.get("CACHE_TYPE", "SimpleCache"),
-        "CACHE_REDIS_URL": app.config.get("CACHE_REDIS_URL"),
-        "CACHE_DEFAULT_TIMEOUT": 0,  # we set TTLs explicitly per call
-    })
-    ...
-```
-
-```python
-# api/caches.py
-from .. import cache
-
-def query_get(key): return cache.get(f"query:{key}")
-def query_set(key, value, ttl): cache.set(f"query:{key}", value, timeout=ttl)
-# ... mirroring for table_meta:, unique_values:
-```
-
-Each former `_LazyTTLCache` becomes a key-prefix discipline ("query:",
-"table_meta:", "unique_values:") in a single shared backend. Per-call
-TTL stays — we pass it on `cache.set`.
-
-`CACHE_TYPE` env vars:
-- Dev (single pod, fast iteration): `SimpleCache` (in-process dict). Same
-  as today.
-- Prod (multi-pod or pre-emption-resistant): `RedisCache` with
-  `CACHE_REDIS_URL` from a Secret.
-
-### SWR cache adaptation
-
-`services/swr.py` is more than a key/value store — it's a state
-machine over `(fetched_at, minted_at, value)` triples. Keep the
-state-machine logic, swap its storage primitive to flask_caching:
-
-```python
-class SwrCache:
-    def __init__(self, prefix: str): self.prefix = prefix
-    def _key(self, k): return f"{self.prefix}:{k}"
-    def get_entry(self, k): return cache.get(self._key(k))
-    def set_entry(self, k, entry, ttl): cache.set(self._key(k), entry, timeout=ttl)
-    # freshness, ticket logic stays unchanged
-```
-
-Sticky-session ingress remains the simple operational path; Redis is the
-"go horizontally" lever, opt-in via env. Both work without code change
-once the backend is pluggable.
-
-### Files (Phase 2)
-
-- `cave_data_viewer/api/__init__.py` (init `flask_caching.Cache`)
-- `cave_data_viewer/api/caches.py` (wrap as prefix-namespaced
-  helpers)
-- `cave_data_viewer/api/services/swr.py` (SWR storage swap)
-- `cave_data_viewer/api/config.py` (`CACHE_TYPE`,
-  `CACHE_REDIS_URL` defaults)
-- `pyproject.toml` (`flask-caching` dep; `redis` extra for prod)
-
-Reuses:
-- The TTL config keys already in `config.py` (`CACHE_*_TTL_SECONDS`) —
-  per-call TTLs continue to come from those.
-- All callers of the current cache instances; the public API of
-  `caches.py` stays mostly the same (just `get`/`set` methods on
-  prefix-namespaced facades).
-
 ## Verification
 
-### Phase 1
 1. Boot dev with `CDV_DEV_AUTH_BYPASS=1`. `GET /api/v1/datastacks` returns
    the public list.
 2. Drop a non-bundled YAML into `CDV_DATASTACK_CONFIG_DIR/<custom>.yaml`
@@ -328,16 +252,6 @@ Reuses:
    Deep-link `?ds=minnie65_public&root=...` works without sign-in
    (public datastack). Deep-link to a private datastack → CAVE 401 →
    Sign-in CTA in the neuron view.
-
-### Phase 2
-1. Default `CACHE_TYPE=SimpleCache` — behavior identical to today.
-2. Set `CACHE_TYPE=RedisCache` + `CACHE_REDIS_URL=redis://localhost:6379`
-   against a local Redis. Two pods (separate processes) share cached
-   data; observe second-request latency across pods.
-3. Restart one pod: cached data persists in Redis. Without Redis
-   (SimpleCache) the cache cold-starts as expected.
-4. Pre-emption simulation: `kill -9` the worker, verify the parent
-   respawns and serves immediately from Redis (when configured).
 
 ### Type check & smoke
 `cd frontend && npx tsc -b` clean. `uv run python -c "from
@@ -378,13 +292,16 @@ the Helm/Terragrunt manifests are elsewhere). Mirror that split.
   needs them).
 - ConfigMap mounted at `CDV_DATASTACK_CONFIG_DIR` for operator
   overrides (spatial + policy YAML).
-- **No Secret manifest for CAVE access.** Confirmed via Tourguide. The
-  user's token rides middle-auth-client's cookie, lands on
+- **No Secret manifest for end-user CAVE access.** Confirmed via Tourguide.
+  The user's token rides middle-auth-client's cookie, lands on
   `flask.g.auth_token`, gets passed to `CAVEclient(auth_token=...)`
-  per-request. The deployment never holds a CAVE token. The existing
-  `CDV_WARMUP_AUTH_TOKEN` env var becomes unused once the warmer
-  shifts to user-trigger-driven (the user's own token does the work).
-- ExternalSecret only for `CACHE_REDIS_URL` (when Redis is in play).
+  per-request. The deployment never holds a CAVE token for request-path
+  auth.
+- **Warmer CAVE access via mounted cave-secret.** The decoration warmer
+  and `cdv-warm-cache` CLI read
+  `~/.cloudvolume/secrets/cave-secret.json` — mount a service-account
+  CAVE credential there. Identity belongs in a mounted secret, not an
+  env var.
 - HPA disabled by default (vertical autoscaling preferred); VPA in
   recommendation mode initially. VPA reads kubelet stats directly —
   no Prometheus dependency.
@@ -393,10 +310,9 @@ the Helm/Terragrunt manifests are elsewhere). Mirror that split.
 
 ### Terragrunt module (separate repo)
 - GKE node-pool config (pre-emptible).
-- Workload Identity binding (only if Memorystore or other Google
-  resources are reached from the pod — for Redis cache scaling, yes;
-  for CAVE alone, no).
-- Optional Memorystore Redis instance.
+- Workload Identity binding for the GCS L2 cache bucket — the pod's
+  KSA maps to a GSA with `roles/storage.objectAdmin` on
+  `gs://<CDV_GCS_CACHE_BUCKET>`.
 - DNS + cert-manager wiring per environment.
 
 ### Periodic warmer — re-shape, don't remove

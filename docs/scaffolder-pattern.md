@@ -39,7 +39,8 @@ Every scaffolder MUST support all three modes:
 
 - For every prompt there is exactly one corresponding flag. A prompt with no flag breaks scriptability; a flag with no prompt breaks the interactive path.
 - `--non-interactive` is a *no-prompts switch*, not a separate code path. The same code reads from `args.<field>` first, falls back to a prompt only when interactive.
-- The naming arg (`--datastack`, `--name`, `--feature-table-id`) is NOT special — it follows the same rule as every other prompt. The current asymmetry in `scaffold_datastack.py` and `scaffold_aligned_volume.py` (the name is `required=True` on the argparse) is a violation and should be fixed.
+- The naming arg (`--datastack`, `--name`, `--feature-table-id`) is NOT special — it follows the same rule as every other prompt.
+- **Exception: filesystem-path inputs.** A flag whose value is *itself* a filesystem path the script must read (e.g., `scaffold_feature_explorer.py --parquet`) MAY stay `required=True` without a corresponding interactive prompt. Prompting for a free-text filesystem path inside `rich.Prompt` is bad UX — operators rely on shell tab-completion for paths, which a prompt doesn't provide. This exception covers actual paths only. Names that *participate in path construction* (e.g., `--datastack` feeding into `config/feature_tables/<datastack>/<id>.yaml`) are still names — they get an interactive prompt like any other.
 - Refusing to overwrite (`--force` to override) is mode-independent. Failing fast on an existing file is fine in any mode; never prompt "overwrite? [y/N]" — `--force` is the explicit opt-in.
 
 ---
@@ -58,7 +59,7 @@ The body of the commented and uncommented variants is the same template. The onl
 
 - A "major block" is one that an operator can choose to set or leave at the inherited default. Trivial knobs (a single field with a sensible default) are NOT major blocks — emit them uncommented with the default value, no prompt.
 - Each major block gets a `--<feature> / --no-<feature>` flag pair (Python's `argparse.BooleanOptionalAction`). The flag drives the prompt the same way the naming arg drives the name prompt.
-- A few prompts are radios rather than yes/no (e.g., the datastack scaffolder's visibility choice between `public` and `internal`). Treat them the same way: a `argparse.add_mutually_exclusive_group()` of flags maps to a `Prompt.ask(choices=[...])`. The comment-flip rule still applies — the chosen alternative renders, the others stay out of the file.
+- Two-state knobs that look like a radio (e.g., "public vs internal") should usually be modeled as a single boolean (`--live-enabled / --no-live-enabled`) rather than a mutually-exclusive flag pair. The boolean is half the surface area and stays compatible with the comment-flip pattern. Reserve `Prompt.ask(choices=[...])` + `add_mutually_exclusive_group()` for genuine N-way choices (N ≥ 3) where each option emits a different block body.
 - "Yes" placeholder values must be obviously-placeholder (`<TABLE NAME>` not `nucleus_detection_v0`). The operator should see the value is wrong; emitting a plausible-but-wrong default is worse than emitting a syntactic placeholder.
 - The leading prose comment ("what this does, when to turn it on") stays attached to the block in both forms. In the "yes" form it's still useful context for the next person editing the file.
 
@@ -87,11 +88,9 @@ scripts/scaffold_<thing>.py [name-arg] [feature flags] [--out PATH] [--force] [-
 
 | Script | Mode-contract | Feature toggles | Validation | Gaps |
 |---|---|---|---|---|
-| `scaffold_feature_explorer.py` | Conforms. Interactive by default; `--non-interactive` works; flags exist for the values that matter. | N/A — the output is parquet-driven, not block-toggled. | Pydantic `FeatureTableSpec` validation before write. | Reference implementation; nothing to do. |
-| `scaffold_datastack.py` | Violates contract: `--datastack` is `argparse.required=True`, so the script can't run without a flag. No `--non-interactive` (because there are no prompts to skip). | None — the entire output is hand-edited comments. | None — no Pydantic schema for `DatastackConfig` is wired in for validation here. | Needs interactive prompt for datastack name; needs the visibility radio + five block toggles (see §6). |
-| `scaffold_aligned_volume.py` | Violates contract: `--name` is `required=True`; same shape as the datastack scaffolder. | None. | None. | Needs interactive prompt for name; needs feature toggle for the spatial block (the synapse block is small enough to leave as comments-only). |
-
-When making any of these conform, treat the changes as one cohesive refactor per script — don't merge a half-converted scaffolder.
+| `scaffold_feature_explorer.py` | Conforms. Interactive by default; `--non-interactive` works; flags exist for the values that matter. | N/A — the output is parquet-driven, not block-toggled. | Pydantic `FeatureTableSpec` validation before write. | None. |
+| `scaffold_datastack.py` | Conforms. Three-mode contract; name prompted when not flagged; `--non-interactive` errors out on missing name. | Six yes/no toggles (`--live-enabled` + five block toggles); see §6. | None — no Pydantic schema for `DatastackConfig` wired in. | None. |
+| `scaffold_aligned_volume.py` | Conforms. Three-mode contract; name prompted when not flagged; `--non-interactive` errors out on missing name. | One yes/no toggle (`--spatial-transform`) with a `--provider` subprompt when on; see §6. | None. | None. |
 
 ---
 
@@ -101,10 +100,10 @@ This section names the blocks each scaffolder's "feature toggle" prompts should 
 
 ### `scaffold_datastack.py`
 
-Seven prompts total: the name, one radio, and five yes/no block toggles.
+Seven prompts total: the name plus six yes/no toggles.
 
 1. **Datastack name** (free-text; filename basename).
-2. **Visibility** — radio between `public` (renders `live_mode: false`) and `internal` (renders `live_mode: true`). The current `--public / --internal` mutually-exclusive group already captures this; keep that shape and add a prompt.
+2. **Live mode enabled** — `--live-enabled / --no-live-enabled` boolean. Yes renders `live_mode: true`; no renders `live_mode: false`. Default no (public/release behavior).
 3. **Cell-id lookup** — emits the `cell_id_lookup` + `root_id_lookup_main_table` + `root_id_lookup_alt_tables` triple.
 4. **Synapse-table overrides** — emits the `synapse:` block (position prefix, aggregation rules). Usually no.
 5. **Decoration warmup** — emits the `decoration_warmup:` block.
@@ -113,12 +112,14 @@ Seven prompts total: the name, one radio, and five yes/no block toggles.
 
 The `cache_alias` field is a single line and doesn't justify its own toggle; leave it as a commented one-liner regardless.
 
+In addition to the YAML, the datastack scaffolder seeds two empty convention-path subdirs the recipe registry reads from: `config/examples/<ds>/` and `config/recipes/<ds>/`. These are side effects of running the scaffolder, not toggles — `mkdir -p` is cheap and lets the operator drop a recipe/example YAML straight in without a follow-up step. The registry already tolerates missing dirs, so the seeding is purely operator-friendliness.
+
 ### `scaffold_aligned_volume.py`
 
-Two prompts total: the name and one block toggle.
+Two prompts total: the name and one block toggle, plus one conditional subprompt.
 
 1. **Aligned-volume name** (free-text; filename basename).
-2. **Spatial transform** — emits the `spatial:` block. When yes, additionally prompt for `provider` (default `cortex`); the operator still fills in `transform`, `depth_range`, `layer_boundaries`, `layer_names` by hand because those are domain knowledge. The script does NOT prompt for those values.
+2. **Spatial transform** (`--spatial-transform`) — emits the `spatial:` block. When yes, additionally prompts for `provider` (default `cortex`; accepts `null` or a dotted import path). The operator still fills in `transform`, `depth_range`, `layer_boundaries`, `layer_names` by hand because those are domain knowledge — the script emits `<PLACEHOLDER>` values for those fields when the block is on.
 
 The `synapse:` block at this level is usually inherited; leave it as a commented template either way (no toggle). The per-datastack scaffolder owns synapse overrides.
 
@@ -154,9 +155,4 @@ Things this convention deliberately does NOT cover:
 
 ## Open work
 
-Two follow-up plans are needed before any of this is implemented:
-
-1. **`scaffold_datastack.py` refactor** — make it three-mode, add feature toggles for the six blocks in §6, switch the rendered YAML to the yes-flip-uncommented form.
-2. **`scaffold_aligned_volume.py` refactor** — same, but smaller (one toggle).
-
-Each is its own implementation plan and PR; they don't share code beyond the conventions above.
+All three scaffolders conform to the convention. When extending — e.g., adding a new block toggle to `scaffold_datastack.py`, or a fourth scaffolder for a new YAML kind — update §5 and §6 in the same change.

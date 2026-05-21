@@ -161,9 +161,15 @@ def clear_caches() -> None:
 
 
 def _get_universe(
-    *, client, view: str, kind: str, datastack: str, mat_version: int
+    *,
+    client,
+    view: str,
+    kind: str,
+    datastack: str,
+    mat_version: int,
+    cell_id_column: str = "id",
 ) -> CellUniverse:
-    """Return the cached universe for ``(datastack, mat_version, view, kind)``,
+    """Return the cached universe for ``(datastack, mat_version, view, kind, cell_id_column)``,
     fetching it if necessary.
 
     Lookup order:
@@ -172,24 +178,25 @@ def _get_universe(
       2. Module-level TTLCache — fallback for tools/tests with no Flask
          app context.
 
-    First-miss path: queries the entire lookup view (no ``id=`` filter),
-    builds both directional dicts, caches them, opportunistically
-    populates the ``_root_to_cell`` per-cell cache so future root-side
-    lookups for these cells are free even if the universe entry ages
-    out.
+    First-miss path: queries the entire lookup view (no filter on the
+    cell_id column), builds both directional dicts indexed by
+    ``cell_id_column``, caches them, opportunistically populates the
+    ``_root_to_cell`` per-cell cache so future root-side lookups for
+    these cells are free even if the universe entry ages out.
     """
     # Cache key for the app cache. Includes `view` so different lookup
     # views (a future second namespace per datastack) get distinct
     # entries. Use `cache_datastack` so two datastacks pointing at the
-    # same underlying data share entries. The `v2` suffix bumps the
-    # key after we extended CellUniverse to include positions — old
-    # cache entries (which lack `cell_to_pos`) get a fresh fetch
-    # rather than partial data; old entries orphan and age out via
-    # GCS lifecycle.
+    # same underlying data share entries. The `v3` suffix invalidates
+    # the pre-configurable-column entries (which all indexed by `"id"`
+    # literally) so an operator who promotes their YAML to a
+    # non-default column doesn't read a stale `id`-keyed universe.
+    # `cell_id_column` is part of the key so two datastacks pointing at
+    # the same view but indexing different columns stay isolated.
     from .cache_lifecycle import cache_datastack
     cache_ds = cache_datastack(datastack)
     app_cache = _app_universe_cache()
-    app_key = (cache_ds, int(mat_version), view, kind, "v2")
+    app_key = (cache_ds, int(mat_version), view, kind, cell_id_column, "v3")
 
     if app_cache is not None:
         hit = app_cache.get(app_key)
@@ -198,7 +205,7 @@ def _get_universe(
             return value
 
     # Fallback: module-level cache, used when there's no Flask context.
-    fallback_key = (datastack, int(mat_version), view, kind, "v2")
+    fallback_key = (datastack, int(mat_version), view, kind, cell_id_column, "v3")
     if app_cache is None:
         with _lock:
             hit_local = _universe_mat.get(fallback_key)
@@ -222,7 +229,7 @@ def _get_universe(
     cell_to_root: dict[int, int | None] = {}
     root_counts: dict[int, int] = {}
     if not df.empty:
-        for cid, rid in zip(df["id"].astype("int64"), df["pt_root_id"].astype("int64")):
+        for cid, rid in zip(df[cell_id_column].astype("int64"), df["pt_root_id"].astype("int64")):
             cid_i = int(cid)
             rid_i = int(rid)
             cell_to_root[cid_i] = rid_i if rid_i != 0 else None
@@ -234,7 +241,7 @@ def _get_universe(
     # collision explicitly rather than getting one arbitrary cell_id.
     root_to_cell: dict[int, int | None] = {}
     if not df.empty:
-        for cid, rid in zip(df["id"].astype("int64"), df["pt_root_id"].astype("int64")):
+        for cid, rid in zip(df[cell_id_column].astype("int64"), df["pt_root_id"].astype("int64")):
             rid_i = int(rid)
             if rid_i == 0:
                 continue
@@ -249,7 +256,7 @@ def _get_universe(
     # from "we don't know this cell at all" (latter = key absent).
     cell_to_pos: dict[int, tuple[float, float, float] | None] = {}
     if not df.empty and "pt_position" in df.columns:
-        for cid, pos in zip(df["id"].astype("int64"), df["pt_position"]):
+        for cid, pos in zip(df[cell_id_column].astype("int64"), df["pt_position"]):
             cid_i = int(cid)
             if pos is None or not hasattr(pos, "__len__") or len(pos) < 3:
                 cell_to_pos[cid_i] = None
@@ -323,7 +330,7 @@ def cell_ids_to_root_ids(
             "This datastack has no cell_id forward lookup configured — set "
             "a `cell_id_lookup: {kind, name}` block in the datastack YAML."
         )
-    view, lookup_kind = resolved
+    view, lookup_kind, cell_id_column = resolved
     cell_ids = [int(x) for x in cell_ids]
     if not cell_ids:
         return {}
@@ -338,6 +345,7 @@ def cell_ids_to_root_ids(
             kind=lookup_kind,
             datastack=datastack,
             mat_version=int(mat_version),
+            cell_id_column=cell_id_column,
         )
         # Cells outside the universe simply weren't in the view —
         # represent as None to keep the wire shape uniform with the
@@ -358,7 +366,7 @@ def cell_ids_to_root_ids(
     if not misses:
         return out
 
-    qf = _lookup_query_factory(client, view, lookup_kind, id=misses)
+    qf = _lookup_query_factory(client, view, lookup_kind, **{cell_id_column: misses})
     df = qf.query(split_positions=False)
 
     if not df.empty:
@@ -371,7 +379,7 @@ def cell_ids_to_root_ids(
         roots = client.chunkedgraph.get_roots(sv_ids, timestamp=ts)
         df = df.assign(pt_root_id=roots)
 
-    indexed = df.set_index("id") if not df.empty else df
+    indexed = df.set_index(cell_id_column) if not df.empty else df
     fresh: dict[int, int | None] = {}
     for cid in misses:
         if not df.empty and cid in indexed.index:
@@ -413,7 +421,7 @@ def cell_ids_to_positions(
             "This datastack has no cell_id forward lookup configured — set "
             "a `cell_id_lookup: {kind, name}` block in the datastack YAML."
         )
-    view, lookup_kind = resolved
+    view, lookup_kind, cell_id_column = resolved
     cell_ids = [int(x) for x in cell_ids]
     if not cell_ids:
         return {}
@@ -425,6 +433,7 @@ def cell_ids_to_positions(
         kind=lookup_kind,
         datastack=datastack,
         mat_version=int(mat_version),
+        cell_id_column=cell_id_column,
     )
     return {cid: universe.cell_to_pos.get(cid) for cid in cell_ids}
 
@@ -455,8 +464,8 @@ def root_ids_to_cell_ids(
     because of this; even unmapped (None) results are cached to skip
     re-querying for orphan root ids.
     """
-    main = cfg.root_id_lookup_main_table
-    if not main:
+    main = cfg.root_id_lookup_main_table  # RootIdLookupTable | None
+    if main is None:
         raise ValueError("This datastack has no root_id_lookup_main_table configured.")
     root_ids = [int(x) for x in root_ids if int(x) != 0]
     if not root_ids:
@@ -503,31 +512,39 @@ def root_ids_to_cell_ids(
     fresh: dict[int, int | None] = {rid: None for rid in misses}
     pinned_ts = current_timestamp()
 
-    # Main table: pt_root_id → id. Drop rows where the same root appears
+    # Main table: pt_root_column → cell_id_column (both configurable;
+    # default to pt_root_id → id, matching the long-standing CAVE
+    # annotation convention). Drop rows where the same root appears
     # multiple times — that's an ambiguous mapping; leave None.
-    qf = client.materialize.tables[main](pt_root_id=misses)
+    qf = client.materialize.tables[main.name](**{main.pt_root_column: misses})
     df = run_query(qf, live=live, timestamp=pinned_ts, split_positions=False)
     if not df.empty:
-        df = df.drop_duplicates(subset="pt_root_id", keep=False)
+        df = df.drop_duplicates(subset=main.pt_root_column, keep=False)
         for _, row in df.iterrows():
-            rid = int(row["pt_root_id"])
+            rid = int(row[main.pt_root_column])
             if rid in fresh:
-                fresh[rid] = int(row["id"])
+                fresh[rid] = int(row[main.cell_id_column])
 
-    # Alt tables for any root ids still unmapped. Schema rename matches
-    # the upstream pattern (pt_ref_root_id → pt_root_id, target_id → id).
+    # Alt tables for any root ids still unmapped. Each alt names its
+    # own filter column (default `pt_ref_root_id`) and payload column
+    # (default `target_id`); we rename both to the internal
+    # `pt_root_id` / `id` convention so the downstream dedupe + read
+    # works uniformly across heterogeneous alt-table schemas.
     for alt in cfg.root_id_lookup_alt_tables:
         unmapped = [rid for rid, cid in fresh.items() if cid is None]
         if not unmapped:
             break
         try:
-            qf = client.materialize.tables[alt](pt_ref_root_id=unmapped)
+            qf = client.materialize.tables[alt.name](**{alt.pt_root_column: unmapped})
             df = run_query(qf, live=live, timestamp=pinned_ts, split_positions=False)
         except Exception:
             continue
         if df.empty:
             continue
-        df = df.rename(columns={"pt_ref_root_id": "pt_root_id", "target_id": "id"})
+        df = df.rename(columns={
+            alt.pt_root_column: "pt_root_id",
+            alt.cell_id_column: "id",
+        })
         if "pt_root_id" not in df.columns or "id" not in df.columns:
             continue
         df = df.drop_duplicates(subset="pt_root_id", keep=False)

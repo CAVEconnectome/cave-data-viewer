@@ -36,6 +36,17 @@ npm run build    # tsc -b && vite build
 environment doesn't need a CAVE token in cookies; production must run
 without it.
 
+## Configuration
+
+- [Environment variables reference](docs/environment-variables.md) — every
+  runtime knob, what it controls, and whether it's required or optional.
+- [Setting up a datastack](docs/setting-up-a-datastack.md) — how to add a
+  new dataset to a deployment.
+- [Datastack YAML reference](docs/datastack-config.md) — field-by-field
+  reference for `config/datastacks/<ds>.yaml`.
+- [Aligned-volume YAML reference](docs/aligned-volumes.md) — field-by-field
+  reference for `config/aligned_volumes/<av>.yaml`.
+
 ## License
 
 See `LICENSE.txt`.

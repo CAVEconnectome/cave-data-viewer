@@ -56,8 +56,9 @@ live_mode: false
 # block keeps them from drifting at edit time.
 #
 #   cell_id_lookup:
-#     kind: view   # or "table"
+#     kind: view              # or "table"
 #     name: <resource name>
+#     cell_id_column: id      # optional; defaults to "id"
 #
 # Reverse direction (root_id → cell_id):
 #   root_id_lookup_main_table  — primary annotation table
@@ -65,6 +66,12 @@ live_mode: false
 #                                when the main table doesn't have a
 #                                match (cells whose nucleus moved
 #                                across edits, etc.)
+#
+# Bare-string forms below expand to default-column blocks
+# (cell_id_column / pt_root_column = the standard CAVE conventions).
+# Use the block form to override columns when an annotation table
+# uses non-standard PK names — see docs/datastack-config.md for the
+# full reference.
 #
 # Omit the `cell_id_lookup:` block entirely if the datastack has no
 # cell-id concept; the SPA hides the cell-id input automatically.

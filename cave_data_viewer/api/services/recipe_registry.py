@@ -7,10 +7,9 @@ Two parallel directory layouts under `config/`:
   additional `title` + `summary` (required), `full_text` + `thumbnail`
   (optional), and `pinned: {mv, root?}` (kind-dependent) fields.
 
-Tri-source pattern matches `services/datastack_config.py`:
-  1. Repo-relative `config/` (source installs)
-  2. In-wheel `_bundled_config/` (wheel installs)
-  3. `CDV_RECIPES_CONFIG_DIR` / `CDV_EXAMPLES_CONFIG_DIR` (env override,
+Two-source pattern matches `services/datastack_config.py`:
+  1. Repo-relative `config/` (dev server / Docker bind-mount target)
+  2. `CDV_RECIPES_CONFIG_DIR` / `CDV_EXAMPLES_CONFIG_DIR` (env override,
      last-wins — used for ConfigMap injection in helm/k8s deployments)
 
 The registry is built once at app boot and held read-only. Edits require
@@ -52,16 +51,14 @@ _VALID_KINDS = frozenset({"connectivity", "explorer"})
 class RecipeRegistry:
     """In-memory cache of operator recipes + examples per datastack.
 
-    Constructed at app boot from the repo, wheel-bundled, and env-override
-    sources (last-wins). All datastacks discovered across all three sources
-    are merged; within a datastack, env-override wins over wheel which wins
-    over repo.
+    Constructed at app boot from the repo source and env-override
+    sources (last-wins). All datastacks discovered across both sources
+    are merged; within a datastack, env-override wins over repo.
     """
 
     def __init__(
         self,
         repo_root: Path | None = None,
-        bundled_root: Path | None = None,
         recipes_override_dir: Path | None = None,
         examples_override_dir: Path | None = None,
     ) -> None:
@@ -69,17 +66,11 @@ class RecipeRegistry:
         self._examples: dict[str, list[dict]] = {}
         self._example_assets_roots: dict[str, list[Path]] = {}
 
-        # Repo source (source installs)
+        # Repo source (dev server / Docker bind-mount target at /app/config)
         if repo_root is not None:
             self._ingest_dir(repo_root / "config" / "recipes", self._recipes, expect_example=False)
             self._ingest_dir(repo_root / "config" / "examples", self._examples, expect_example=True)
             self._register_assets_roots(repo_root / "config" / "examples")
-
-        # Wheel-bundled source
-        if bundled_root is not None:
-            self._ingest_dir(bundled_root / "recipes", self._recipes, expect_example=False)
-            self._ingest_dir(bundled_root / "examples", self._examples, expect_example=True)
-            self._register_assets_roots(bundled_root / "examples")
 
         # Env-override sources (last-wins — replace, not merge, per datastack)
         if recipes_override_dir is not None:
@@ -91,38 +82,22 @@ class RecipeRegistry:
     @classmethod
     def from_env(cls) -> "RecipeRegistry":
         """Build a registry from the standard env-var conventions:
-        - Repo `config/` is the cwd's `config/` if it exists.
-        - `_bundled_config/` is alongside the installed package.
+        - Repo `config/` is resolved relative to this file (NOT cwd), so
+          containers that `cd /app` at entrypoint still find /app/config.
         - `CDV_RECIPES_CONFIG_DIR`, `CDV_EXAMPLES_CONFIG_DIR` for env overrides.
         """
-        # Repo root, resolved relative to this file's location (NOT cwd) to
-        # avoid silent failure when the process working directory differs from
-        # the repo root (e.g. in a container that `cd`s to /app at entrypoint).
         # Path layout: this file at cave_data_viewer/api/services/recipe_registry.py
-        # → parents[3] is the repo root.
+        # → parents[3] is the repo root (or /app inside the container).
         repo_root: Path | None = None
         cand = Path(__file__).resolve().parents[3]
         if (cand / "config" / "recipes").exists() or (cand / "config" / "examples").exists():
             repo_root = cand
-
-        # The wheel installs `_bundled_config/` next to the package — find it
-        # by importing the package and resolving its parent.
-        bundled_root: Path | None = None
-        try:
-            import cave_data_viewer  # noqa: F401
-            pkg_dir = Path(cave_data_viewer.__file__).parent
-            cand = pkg_dir / "_bundled_config"
-            if cand.exists():
-                bundled_root = cand
-        except Exception:  # pragma: no cover — defensive
-            pass
 
         rec_override = os.environ.get("CDV_RECIPES_CONFIG_DIR")
         ex_override = os.environ.get("CDV_EXAMPLES_CONFIG_DIR")
 
         return cls(
             repo_root=repo_root,
-            bundled_root=bundled_root,
             recipes_override_dir=Path(rec_override) if rec_override else None,
             examples_override_dir=Path(ex_override) if ex_override else None,
         )

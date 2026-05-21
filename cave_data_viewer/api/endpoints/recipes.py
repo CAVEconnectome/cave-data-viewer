@@ -26,6 +26,7 @@ import yaml
 from ..auth import auth_required, current_user_id, is_dev_bypass
 from ..errors import ApiError
 from ..services import recipes as recipes_svc
+from ..services.datastack_config import list_configured_datastacks
 
 bp = Blueprint("recipes", __name__, url_prefix="/me/recipes")
 
@@ -66,9 +67,9 @@ def _resolve_store() -> "recipes_svc.GcsObjectStore":
 
 
 def _check_datastack(ds: str) -> None:
-    allowed = current_app.config.get("DATASTACKS_ALLOWED") or []
-    if ds not in allowed:
-        raise ApiError(400, "unknown_datastack", f"datastack {ds!r} is not in the allowlist")
+    if ds not in list_configured_datastacks():
+        raise ApiError(400, "unknown_datastack",
+                       f"datastack {ds!r} has no config YAML on this server")
 
 
 def _yaml_response(value: dict | list, status: int = 200) -> Response:

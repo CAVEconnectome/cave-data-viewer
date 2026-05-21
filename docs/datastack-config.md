@@ -19,10 +19,12 @@ top of that.
 
 ## Cluster scoping (which datastacks to include)
 
-The deployment's `CDV_DATASTACKS_ALLOWED` env var (or the
-`DATASTACKS_ALLOWED` config default) names the datastacks the SPA's
-picker offers. **Each deployment should list only datastacks that live
-on its own CAVE cluster.**
+The set of datastacks the SPA picker offers is exactly the set of
+`<datastack>.yaml` files the deployment ships in its config locations
+(bundled `config/datastacks/`, in-wheel `_bundled_config/datastacks/`,
+and any `CDV_DATASTACK_CONFIG_DIR` operator override — the union of
+stems across all three). **Each deployment should ship only YAMLs for
+datastacks that live on its own CAVE cluster.**
 
 Why: CAVE's per-datastack `local_server` field names which cluster
 holds the data. A datastack from a different cluster will authenticate
@@ -32,17 +34,17 @@ ingress — so partner queries land on the wrong cluster, and per-pod
 caches, periodic warmer, GCS L2, and per-origin recipe storage all
 become misaligned with the data the user actually sees.
 
-Example: a deployment at `cdv.minnie.daf-apis.com` should list
-`minnie65_public`, `minnie65_phase3_v1`, etc. — not `fanc_production`,
-even though the auth service knows about both. A separate
-`cdv.fanc.daf-apis.com` deployment handles the FANC datastacks with
-its own allowlist.
+Example: a deployment at `cdv.minnie.daf-apis.com` should ship YAMLs
+for `minnie65_public`, `minnie65_phase3_v1`, etc. — not
+`fanc_production`, even though the auth service knows about both. A
+separate `cdv.fanc.daf-apis.com` deployment ships its own set of
+YAMLs for the FANC datastacks.
 
-The allowlist is a deployment-time decision, not runtime. The app
-doesn't introspect `local_server` to filter at runtime; it trusts the
-operator's curation. If catching a mis-cluster'd allowlist entry at
+Inclusion is a deployment-time decision, not runtime. The app doesn't
+introspect `local_server` to filter at runtime; it trusts the
+operator's YAML curation. If catching a mis-cluster'd YAML entry at
 deploy time becomes a real concern, `cdv-check-config` could grow that
-check (fetch each allowed datastack's info, compare `local_server`
+check (fetch each configured datastack's info, compare `local_server`
 against an expected value, fail on mismatch).
 
 ## Where the YAML lives
@@ -78,9 +80,9 @@ landing page is empty and the cell-id input is hidden.
 | --- | --- | --- | --- | --- |
 | `live_mode` | `bool` | `true` | optional | Whether the SPA's version picker offers "live" alongside the integer mat versions. Set `false` for release datastacks where only the published versions are meaningful. |
 | `synapse` | `SynapseConfig?` | `null` (inherits) | optional | Field-level override on top of the aligned-volume's `synapse:` block. Omit entirely to inherit; set individual fields to override only those. |
-| `cell_id_lookup` | `CellIdLookup?` | `null` | optional | Discriminated block (`kind: view\|table`, `name: <resource>`) naming a CAVE resource that maps cell_id → root_id. Forward direction of the cell-id ↔ root_id lookup. |
-| `root_id_lookup_main_table` | `string?` | `null` | optional | Primary annotation table for the reverse direction (root_id → cell_id). |
-| `root_id_lookup_alt_tables` | `[string]` | `[]` | optional | Additional annotation tables walked after the main table for the reverse lookup, typically for cells whose primary annotation has been split or merged out. |
+| `cell_id_lookup` | `CellIdLookup?` | `null` | optional | Discriminated block (`kind: view\|table`, `name: <resource>`, `cell_id_column: <name>`) naming a CAVE resource that maps cell_id → root_id. Forward direction of the cell-id ↔ root_id lookup. |
+| `root_id_lookup_main_table` | `RootIdLookupTable?` (or bare string) | `null` | optional | Primary annotation table for the reverse direction (root_id → cell_id). Bare string accepted as shorthand for the default-column block. |
+| `root_id_lookup_alt_tables` | `[RootIdLookupAltTable]` (or `[string]`) | `[]` | optional | Additional annotation tables walked after the main table for the reverse lookup, typically for cells whose primary annotation has been split or merged out. Mix of bare strings and blocks is supported. |
 | `decoration_warmup` | `DecorationWarmup?` | `null` (off) | optional | Periodic background refresh of decoration tables. K8s/HPA users probably want this on; dev users almost never. |
 | `feature_explorer` | `FeatureExplorerConfig?` | `null` | optional | Enables /explore for this datastack. Block contains `enabled: bool` + optional `cell_id_source_table: string?`. The embedding catalog directory is computed from `CDV_FEATURE_TABLES_BASE_URI` + the datastack name — no per-datastack manifest URI to configure. |
 | `examples` | `[Example]` | `[]` | optional | Fully-specified workspace states for the landing page. Click *Open* to land on the configured workspace. |
@@ -286,15 +288,42 @@ tables (no view counterpart in this codebase).
 
 | Field | Type | Direction | Required for that direction |
 | --- | --- | --- | --- |
-| `cell_id_lookup` | `{kind: view\|table, name: string}?` | cell_id → root_id | Yes — names the CAVE resource that answers the forward direction. `kind` picks `query_view` vs `query_table` at the API layer. |
-| `root_id_lookup_main_table` | `string?` | root_id → cell_id (primary) | Yes — primary table for the reverse lookup. |
-| `root_id_lookup_alt_tables` | `[string]` | root_id → cell_id (fallback) | No — searched after the main table for cells whose primary annotation has been split or merged out. |
+| `cell_id_lookup` | `{kind: view\|table, name: string, cell_id_column: string = "id"}?` | cell_id → root_id | Yes — names the CAVE resource that answers the forward direction. `kind` picks `query_view` vs `query_table` at the API layer; `cell_id_column` is the column on the resource whose values the parquet's `id_column` references. |
+| `root_id_lookup_main_table` | `string` or `{name, cell_id_column = "id", pt_root_column = "pt_root_id"}?` | root_id → cell_id (primary) | Yes — primary table for the reverse lookup. Bare-string shorthand expands to `{name: <string>}` with default columns. |
+| `root_id_lookup_alt_tables` | `[string]` or `[{name, cell_id_column = "target_id", pt_root_column = "pt_ref_root_id"}]` | root_id → cell_id (fallback) | No — searched after the main table for cells whose primary annotation has been split or merged out. Mixed lists supported. |
+
+**Configurable join columns.** All three lookup blocks accept optional
+column-name fields whose defaults match the long-standing CAVE
+annotation convention (`id` for cell ids; `pt_root_id` for filtering by
+root id; `target_id`/`pt_ref_root_id` for alt-table schemas). Existing
+YAMLs work unchanged — `cell_id_column` defaults to `"id"` and bare
+strings on the reverse-lookup fields coerce to the default-column block.
+Override when an upcoming dataset uses non-standard PK names:
+
+```yaml
+cell_id_lookup:
+  kind: view
+  name: alt_lookup_v1
+  cell_id_column: nucleus_id        # parquet keys reference this column
+
+root_id_lookup_main_table:
+  name: nucleus_alt
+  cell_id_column: nucleus_id        # output: cell_id read from this column
+  pt_root_column: root_id_native    # input: filter rows by this column
+
+root_id_lookup_alt_tables:
+  - legacy_alt                      # bare-string → default schema
+  - name: post_split_alt            # block form with overrides
+    cell_id_column: alt_cell_id
+    pt_root_column: alt_root
+```
 
 **Why a block instead of two top-level fields.** Carrying `kind` and
-`name` as one block means Pydantic structurally enforces "both present
-or neither" — there's no way to set just one. The previous shape
-(separate `cell_id_lookup_view` / `cell_id_lookup_table` XOR fields)
-let copy-paste edits land in the wrong field and silently mis-dispatch.
+`name` (and now `cell_id_column`) as one block means Pydantic
+structurally enforces "all present or none" — there's no way to set
+only some. The previous shape (separate `cell_id_lookup_view` /
+`cell_id_lookup_table` XOR fields) let copy-paste edits land in the
+wrong field and silently mis-dispatch.
 
 **The view is not the same as the main table.** They typically share a
 prefix (`nucleus_detection_v0` and `nucleus_detection_lookup_v1`) but
@@ -367,11 +396,11 @@ fresh by the time anyone asks.
 | `interval_seconds` | `float` | `3600.0` | Refresh cadence. One hour is reasonable; shorter gets diminishing returns since CAVE materializations don't update that fast. |
 | `startup_delay_seconds` | `float` | `0.0` | Defer the first run after pod boot. Critical for HPA-scaled deployments — without it, a scale-up burst means N new pods all hit CAVE simultaneously the moment they come up. Set to a few minutes (jittered up to +60s automatically). |
 
-**Auth.** The warmer needs CAVE credentials to run. In production set
-`CDV_WARMUP_AUTH_TOKEN` to a CAVE service token; locally CAVEclient
-falls back to `~/.cloudvolume/secrets/cave-secret.json`. The warmer
-runs without a request context, so the per-request `flask.g.auth_token`
-isn't available.
+**Auth.** The warmer reads CAVE credentials from
+`~/.cloudvolume/secrets/cave-secret.json`. In production this is a
+mounted service-account credential; locally CAVEclient finds your own
+file at the same path. The warmer runs without a request context, so
+the per-request `flask.g.auth_token` isn't available.
 
 **Live-mode datastacks aren't warmed.** Live queries don't have a
 stable cache key (they're keyed on the request timestamp), so warming

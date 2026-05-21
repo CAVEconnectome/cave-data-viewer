@@ -1,45 +1,91 @@
-# minnie65_phase3_v1 is an internal working datastack — live mode is enabled
-# so operators can inspect in-progress proofreading state.
+# Datastack: minnie65_phase3_v1
+#
+# Aligned volume: `minnie65_phase3`. Spatial transform + synapse-table
+# defaults come from `config/aligned_volumes/minnie65_phase3.yaml`.
+#
+# Reference: docs/setting-up-a-datastack.md (Section 1)
+# Schema:    cave_data_viewer/api/services/datastack_config.py::DatastackConfig
+
+# true = the SPA exposes "live" mode (latest CAVE state). Internal
+# / pre-release datastacks usually want this; public/release datastacks
+# should set false so users don't see unstable data.
 live_mode: true
 
-# Cell-id lookup. Pattern lifted from ceesem/cortical-tools (microns_public.py):
-# the lookup view maps cell_id (== row id in the nucleus table) to a stable
-# supervoxel + root, and the main / alt tables answer the reverse direction
-# for every persistent id in the dataset, including ones broken across edits.
+# Cache namespace alias. Use when this datastack describes the same
+# underlying data as another datastack (e.g. a public release of an
+# internal volume). Cache reads/writes redirect to the alias target;
+# CAVE calls still use *this* datastack name.
+#
+# cache_alias: minnie65_phase3_v1
+
+# ---- cell-id lookup -----------------------------------------------------
+# Cell ids (typically nucleus ids) are persistent identifiers that
+# survive proofreading splits/merges; root ids are not. The forward
+# direction (cell_id → current root_id) uses a materialized view; the
+# reverse direction walks one or more annotation tables. Omit all three
+# keys if the datastack has no cell-id concept — the SPA hides the
+# cell-id input automatically.
+#
+# Forward direction: name a CAVE resource and its kind. CAVE distinguishes
+# views from tables at the API level (the consuming code dispatches on
+# `kind`).
 cell_id_lookup:
-  kind: view
+  kind: view                                          # or "table"
   name: nucleus_detection_lookup_v1
 root_id_lookup_main_table: nucleus_detection_v0
 root_id_lookup_alt_tables:
   - nucleus_alternative_points
 
-# Spatial config (transform, depth_range, layer_boundaries) AND synapse-table
-# conventions (column projection, aggregation rules) for this datastack live
-# in `config/aligned_volumes/minnie65_phase3.yaml` — keyed by aligned_volume
-# rather than datastack so every proofreading version of the same volume
-# (public release, internal v1, future versions) shares one coordinate system
-# and one set of synapse columns. To override a synapse field for this
-# specific datastack, drop a `synapse:` block here; field-level overrides
-# inherit unspecified fields from the aligned_volume defaults.
+# ---- synapse-table override -------------------------------------------
+# Override individual fields of the aligned-volume's `synapse:` config.
+# Omitted fields inherit. Omit the whole block to inherit everything.
+# synapse:
+#   position_prefix: <ctr_pt|anchor_pt>     # aligned-volume default is usually ctr_pt
+#   aggregation_rules:
+#     median_size:
+#       column: size
+#       agg: median
 
-# Periodic decoration-cache warming. Off by default (`enabled: false`).
-# Each fire resolves "latest valid mat_version" against CAVE and writes the
-# refreshed table into the SwrCache keyed by that version.
-#
-# In production set CDV_WARMUP_AUTH_TOKEN to a CAVE service token; locally
-# CAVEclient falls back to ~/.cloudvolume/secrets/cave-secret.json.
-#
-# `startup_delay_seconds` matters in autoscaling deployments: when K8s spins
-# up new pods the warmer should NOT immediately hit CAVE — wait a few minutes
-# so a scaling burst doesn't multiplex into a thundering herd.
-decoration_warmup:
-  enabled: false
-  tables:
-    - aibs_metamodel_celltypes_v661
-  warm_soma_table: true
-  interval_seconds: 3600       # one hour
-  startup_delay_seconds: 180   # three minutes
+# ---- decoration warmup ------------------------------------------------
+# Periodic refresh of whole-decoration-table caches at the latest valid
+# mat version. Set `startup_delay_seconds` to a few minutes in
+# autoscaling deployments so pod scale-up doesn't thunder into CAVE.
+# decoration_warmup:
+#   enabled: true
+#   tables:
+#     - <CAVE CELL TYPE TABLE>
+#   warm_soma_table: true
+#   interval_seconds: 3600
+#   startup_delay_seconds: 180
 
+# ---- synapse warmup ----------------------------------------------------
+# Warm synapse caches for cells named by a proofreading-status table.
+# synapse_warmup:
+#   source:
+#     table: <PROOFREADING STATUS TABLE>
+#     root_id_column: pt_root_id
+#     filters: {status_axon: "eq:true"}
+#   max_cells: 2000
+#   parallel_workers: 8
+
+# ---- feature explorer -------------------------------------------------
+# Enable /explore for this datastack. The embedding catalog lives at
+# <CDV_FEATURE_TABLES_BASE_URI>/feature_tables/<datastack>/ — new
+# feature tables are added by dropping a (parquet, yaml) pair under that
+# subdir; no datastack YAML edit and no service redeploy.
+#
+# `cell_id_source_table` names the CAVE table whose row ids the
+# feature_tables' id_column references. Optional fallback — per-FT YAMLs
+# can override.
 feature_explorer:
   enabled: true
   cell_id_source_table: nucleus_detection_v0
+
+# ---- LTS marker (NOT in this file) ------------------------------------
+# Examples are filtered against `<ds>-longlived-versions.json` in the
+# GCS cache bucket:
+#     gs://<CDV_GCS_CACHE_BUCKET>/<CDV_GCS_CACHE_PREFIX>info/minnie65_phase3_v1-longlived-versions.json
+# Minimal shape:
+#     {"longlived_versions": [<mv-int>, ...]}
+# Without this file, all examples for this datastack are hidden behind
+# the "no LTS published" empty state.

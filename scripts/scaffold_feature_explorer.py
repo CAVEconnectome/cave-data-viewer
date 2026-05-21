@@ -316,7 +316,7 @@ def _build_feature_table_dict(
     feature_table_id: str,
     title: str,
     description: str | None,
-    parquet_uri: str,
+    parquet_uri: str | None,
     id_column: str,
     cell_id_source_table: str | None,
     classification: dict[str, set[str]],
@@ -327,7 +327,14 @@ def _build_feature_table_dict(
 ) -> dict[str, Any]:
     """Build the per-file FeatureTableSpec dict (schema v1) ready for
     yaml.safe_dump. One file = one feature table at the top level — no
-    `feature_tables: [...]` wrapper, no manifest-level `knn:` block."""
+    `feature_tables: [...]` wrapper, no manifest-level `knn:` block.
+
+    When ``parquet_uri`` is None, ``source.uri`` is omitted from the
+    output so the loader's same-directory convention applies
+    (``<yaml-prefix>/<id>.parquet``). When set, it wins. Defaulting to
+    None keeps committed YAMLs portable — they don't bake in the
+    scaffolder host's absolute path.
+    """
     feature_columns = [c for c, tags in classification.items() if "feature" in tags]
     categorical_columns = [c for c, tags in classification.items() if "categorical" in tags]
     spatial_pre_columns = [c for c, tags in classification.items() if "spatial_pre" in tags]
@@ -337,7 +344,10 @@ def _build_feature_table_dict(
     ft: dict[str, Any] = {"schema_version": 1, "id": feature_table_id, "title": title}
     if description:
         ft["description"] = description
-    ft["source"] = {"kind": "parquet", "uri": parquet_uri}
+    source: dict[str, Any] = {"kind": "parquet"}
+    if parquet_uri is not None:
+        source["uri"] = parquet_uri
+    ft["source"] = source
     ft["id_column"] = id_column
     if cell_id_source_table:
         ft["cell_id_source_table"] = cell_id_source_table
@@ -544,7 +554,7 @@ def _interactive_pick_id_column(
     default_idx = str(candidates.index(initial) + 1) if initial in candidates else "1"
     while True:
         ans = Prompt.ask(
-            "Pick id column [number or name]", default=default_idx, console=console
+            "Pick id column (number or name)", default=default_idx, console=console
         )
         try:
             n = int(ans)
@@ -577,7 +587,7 @@ def _interactive_classification_review(
     name_to_idx = {c: i + 1 for i, c in enumerate(df.columns)}
     while True:
         ans = Prompt.ask(
-            "Column to reassign [number, name, or 'done']",
+            "Column to reassign (number, name, or 'done')",
             default="done",
             console=console,
         )
@@ -674,7 +684,7 @@ def _interactive_feature_table_identity(
         console=console,
     )
     description = Prompt.ask(
-        "description  [empty to skip]",
+        "description (empty to skip)",
         default="",
         console=console,
     )
@@ -686,7 +696,7 @@ def _interactive_feature_table_identity(
         "(feature_explorer.cell_id_source_table in the datastack YAML).[/]"
     )
     cell_id_source_table = Prompt.ask(
-        "cell_id_source_table  [empty = use datastack fallback]",
+        "cell_id_source_table (empty = use datastack fallback)",
         default="",
         console=console,
     )
@@ -732,7 +742,7 @@ def _interactive_embeddings(
                 + ("…" if len(color_options) > 8 else "")
             )
             cb = Prompt.ask(
-                "  default_color_by [name or empty to leave unset]",
+                "  default_color_by (name or empty to leave unset)",
                 default=default_cb or "",
                 console=console,
             )
@@ -752,7 +762,7 @@ def _interactive_embeddings(
             console.print(f"  [yellow]skipping: {x!r} or {y!r} not in parquet[/]")
             continue
         cb = Prompt.ask(
-            "  default_color_by [empty to leave unset]",
+            "  default_color_by (empty to leave unset)",
             default="",
             console=console,
         )
@@ -809,9 +819,9 @@ def _interactive_categories(
         if not cid:
             continue
         title = Prompt.ask("  title", default=cid.title(), console=console)
-        desc = Prompt.ask("  description [empty to skip]", default="", console=console)
+        desc = Prompt.ask("  description (empty to skip)", default="", console=console)
         text = Prompt.ask(
-            "  columns [numbers + ranges, names, or 'all']",
+            "  columns (numbers + ranges, names, or 'all')",
             console=console,
         )
         indices = _parse_multi_select(text, total=len(df.columns), all_columns=list(df.columns))
@@ -839,7 +849,7 @@ def _interactive_knn(console: Console) -> dict[str, Any]:
         console=console,
     )
     clip_text = Prompt.ask(
-        "clip_percentiles [comma 'low,high', or 'none' to disable]",
+        "clip_percentiles (comma 'low,high', or 'none' to disable)",
         default="0.1,99.9",
         console=console,
     )
@@ -953,7 +963,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--parquet-uri",
         default=None,
-        help="URI to embed in manifest's source.uri (default: file://<absolute parquet path>)",
+        help=(
+            "URI to embed in source.uri. By default this field is OMITTED so "
+            "the loader fills it in from the YAML's own location "
+            "(<prefix>/<id>.parquet) — keeps committed YAMLs portable. "
+            "Pass this only when the parquet lives somewhere other than next "
+            "to its YAML (e.g. a shared GCS bucket)."
+        ),
     )
     parser.add_argument("--id-column", default=None, help="override cell_id column detection (skips the prompt)")
     parser.add_argument(
@@ -972,7 +988,10 @@ def main(argv: list[str] | None = None) -> int:
     # The existence check on the final path moved down to after we know
     # feature_table_id (the filename is derived from it).
 
-    parquet_uri = args.parquet_uri or f"file://{args.parquet.resolve()}"
+    # Only embed source.uri when the operator explicitly supplied one.
+    # Otherwise rely on the loader's same-directory convention
+    # (<yaml-prefix>/<id>.parquet) so committed YAMLs stay portable.
+    parquet_uri = args.parquet_uri
 
     # Read full parquet for the head display. For very large parquets
     # this is wasteful, but feature parquets are typically << 100MB so
@@ -986,6 +1005,19 @@ def main(argv: list[str] | None = None) -> int:
     id_like_set: set[str] = set()  # filled after id_column is finalized
     audit = _detect_audit(df)
     embeddings, axis_cols = _detect_embeddings(df)
+
+    # ── Datastack prompt (interactive only) ──
+    # `--datastack` participates in the convention output path
+    # config/feature_tables/<datastack>/<id>.yaml. Prompt for it up here
+    # so the operator isn't put through the full classification review
+    # only to discover at write-time that they need to supply one. Skip
+    # if `--out` was given (no convention path needed) or in
+    # non-interactive mode (the error fires later at path resolution).
+    if not args.non_interactive and args.out is None and args.datastack is None:
+        args.datastack = Prompt.ask("Datastack name (for output path)", console=console).strip()
+        if not args.datastack:
+            console.print("[red]datastack name cannot be empty[/]")
+            return 2
 
     # ── Interactive (or skip) ──
     if args.non_interactive:
@@ -1099,10 +1131,11 @@ def main(argv: list[str] | None = None) -> int:
                 )
     else:
         if args.datastack is None:
-            raise SystemExit(
-                "--datastack is required when --out is not given "
+            console.print(
+                "[red]--datastack is required when --out is not given[/] "
                 "(needed to compute the convention output path)"
             )
+            return 2
         # Find the repo root by walking up from this script.
         repo_root = Path(__file__).resolve().parents[1]
         out_path = (
@@ -1120,7 +1153,6 @@ def main(argv: list[str] | None = None) -> int:
     out_path.write_text(_format_yaml(feature_table))
     console.print()
     console.print(f"[bold green]wrote[/] {out_path}")
-    print(f"wrote: {out_path}")
 
     # ── Datastack snippet ──
     _print_datastack_snippet(console, out_path, feature_table_id)

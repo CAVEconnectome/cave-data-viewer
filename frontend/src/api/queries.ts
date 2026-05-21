@@ -30,9 +30,10 @@ const META_RETRY = 2;
 const META_RETRY_DELAY = (attempt: number) => Math.min(500 * 2 ** attempt, 4000);
 
 export function useDatastacks() {
-  // Allowlist served by the backend (`CDV_DATASTACKS_ALLOWED`). Drives the
-  // sidebar's datastack picker. Cached aggressively — this list only changes
-  // with a deployment-config change, so a short staleTime would just create
+  // List served by the backend, sourced from the per-datastack YAML
+  // files the deployment ships. Drives the sidebar's datastack picker.
+  // Cached aggressively — this list only changes when an operator
+  // adds/removes a YAML, so a short staleTime would just create
   // unnecessary refetches every time the sidebar mounts.
   return useQuery<DatastacksListResponse>({
     queryKey: ["datastacks"],

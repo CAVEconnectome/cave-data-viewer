@@ -239,9 +239,10 @@ def _register_warmup_jobs(app, service: "DecorationService") -> None:
     versions land upstream.
 
     Warmup is one of two sanctioned anonymous-auth code paths (the other is
-    dev bypass). It uses `make_client_anonymous(env_token_var=...)` so audit
-    trails record every fire, and the env-var-supplied token is preferred over
-    the local cave-secret fallback.
+    dev bypass). It uses `make_client_anonymous()` so audit trails record
+    every fire; the underlying token comes from the mounted
+    `~/.cloudvolume/secrets/cave-secret.json` (a service-account credential
+    in deployments).
     """
     from pathlib import Path
 
@@ -285,7 +286,7 @@ def _register_warmup_jobs(app, service: "DecorationService") -> None:
             def cf():
                 return make_client_anonymous(
                     ds, server_address, materialize_version=None,
-                    reason="warmup", env_token_var="CDV_WARMUP_AUTH_TOKEN",
+                    reason="warmup",
                 )
             return cf
 

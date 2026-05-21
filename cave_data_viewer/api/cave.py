@@ -7,7 +7,6 @@ middle-auth token would silently elevate to whatever cave-secret holds (often a
 service account in production). All anonymous calls log a reason for audit.
 """
 
-import os
 from urllib.parse import urlparse
 
 from caveclient import CAVEclient
@@ -53,23 +52,16 @@ def make_client_anonymous(
     materialize_version: int | str | None = None,
     *,
     reason: str,
-    env_token_var: str | None = None,
 ) -> CAVEclient:
-    """Build a CAVEclient that *may* fall back to the local cave-secret.
+    """Build a CAVEclient backed by the local cave-secret fallback.
 
     Use ONLY for paths where this is intended (dev bypass, scheduled warmup).
-    Always logs `reason` and the resolved token source so audit trails reveal
+    In deployments, `~/.cloudvolume/secrets/cave-secret.json` is a mounted
+    service-account credential. Always logs `reason` so audit trails reveal
     every privileged code path that bypasses the per-request user token.
     """
-    token: str | None = None
-    source = "cave-secret"
-    if env_token_var:
-        env_value = os.environ.get(env_token_var) or None
-        if env_value:
-            token = env_value
-            source = env_token_var
-    print(f"[anon-cave] reason={reason} datastack={datastack_name} token_source={source}", flush=True)
-    return _build(datastack_name, server_address, token, materialize_version)
+    print(f"[anon-cave] reason={reason} datastack={datastack_name} token_source=cave-secret", flush=True)
+    return _build(datastack_name, server_address, None, materialize_version)
 
 
 def make_global_client_with_token(server_address: str, auth_token: str) -> CAVEclient:
