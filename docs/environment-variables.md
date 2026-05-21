@@ -76,7 +76,7 @@ YAMLs on top.
 | `CDV_FEATURE_TABLES_BASE_URI` | URI (`file://`, `gs://`) | `file://<repo>/config/` | Base for the feature-table catalog. The loader joins this with `feature_tables/<datastack>/` to find per-datastack feature-table YAMLs. Default points at the repo's `config/`; override with `gs://my-bucket/` to host the catalog in GCS. Trailing slash optional. |
 | `CDV_DATASTACK_CONFIG_DIR` | dir path | unset | Extra datastack YAMLs. Each `<ds>.yaml` here wins over the same-named file under `<repo>/config/datastacks/`. Useful for ConfigMap injection. |
 | `CDV_ALIGNED_VOLUME_CONFIG_DIR` | dir path | unset | Same pattern, for `aligned_volumes/<av>.yaml`. |
-| `CDV_RECIPES_CONFIG_DIR` | dir path | unset | Operator recipes override. Replaces (not merges) the per-datastack list under `<repo>/config/recipes/<ds>/`. |
+| `CDV_RECIPES_CONFIG_DIR` | dir path | unset | Built-in recipes override. Replaces (not merges) the per-datastack list under `<repo>/config/recipes/<ds>/`. |
 | `CDV_EXAMPLES_CONFIG_DIR` | dir path | unset | Operator examples override. Same replace-not-merge semantics as recipes. |
 | `CDV_LINK_TEMPLATE_DIR` | dir path | unset | Extra `templates/links/*.yaml` (Neuroglancer link templates). Searched after the built-in templates. |
 | `CDV_PLOT_TEMPLATE_DIR` | dir path | unset | Extra `templates/plots/*.yaml` (PlotSpec definitions). Searched after the built-in templates. |

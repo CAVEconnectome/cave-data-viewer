@@ -79,12 +79,12 @@ def make_link(ds: str):
     return jsonify(result)
 
 
-# Cap on the number of segments we'll pin in one Neuroglancer link. Big tables
-# (cell-type lookups across the whole volume) easily run into 100k+ rows; a
-# pinned-segment list that long would crash the viewer and isn't useful as a
-# survey anyway. The SPA already gates "open in NGL" behind a filtered or
-# selected scope for big tables, so this is a defense-in-depth ceiling.
-_SEGMENTS_LINK_MAX_IDS = 1000
+# Cap on the number of segments we'll pin in one Neuroglancer link. With
+# split visible/hidden segments (see `visible_root_ids` below), most ids end
+# up loaded-but-not-rendered, so the viewer cost is dominated by the visible
+# subset — a 10k loaded set with 500 visible renders fine. The cap is a
+# defense-in-depth ceiling on the state-file size, not a viewer-perf limit.
+_SEGMENTS_LINK_MAX_IDS = 10000
 
 
 @bp.route("/<ds>/links/segments", methods=["POST"])
@@ -104,6 +104,15 @@ def make_segments_link(ds: str):
     raw_ids = body.get("root_ids") if body.get("root_ids") is not None else []
     if not isinstance(raw_ids, list):
         raise ApiError(422, "invalid_root_ids", "root_ids must be a list")
+    # Optional subset of root_ids that should be rendered (visible) on
+    # arrival. Everything in root_ids that isn't here loads into the
+    # segmentation layer's state but is hidden — the user can toggle it
+    # on inside NG without re-fetching. Caller convention: pass the full
+    # set in root_ids and a sampled subset in visible_root_ids; omit to
+    # render everything (backward compat).
+    raw_visible = body.get("visible_root_ids")
+    if raw_visible is not None and not isinstance(raw_visible, list):
+        raise ApiError(422, "invalid_visible_root_ids", "visible_root_ids must be a list")
 
     # Optional view position. The frontend pulls these from the first
     # `*_pt_position` triple in the row scope and the table metadata's
@@ -142,6 +151,21 @@ def make_segments_link(ds: str):
             hint="Filter or select a smaller subset before opening in Neuroglancer.",
         )
 
+    visible_ids: set[int] | None = None
+    if raw_visible is not None:
+        visible_ids = set()
+        for raw in raw_visible:
+            try:
+                rid = int(raw)
+            except (TypeError, ValueError):
+                raise ApiError(422, "invalid_visible_root_id", f"visible root_id is not an integer: {raw!r}")
+            if rid > 0:
+                visible_ids.add(rid)
+        # Silently intersect with segment_ids — a visible id not in the
+        # root_ids set would be a no-op anyway; rejecting would just
+        # punish race conditions between the SPA's sample and submit.
+        visible_ids &= seen
+
     mat_version = request.args.get("mat_version") or None
     try:
         check_live_allowed(ds, mat_version)
@@ -161,7 +185,7 @@ def make_segments_link(ds: str):
 
     try:
         viewer = ngl.new_viewer_state(client)
-        ngl.pin_segments(viewer, segment_ids)
+        ngl.pin_segments(viewer, segment_ids, visible=visible_ids)
         if position is not None:
             ngl.set_view_position(viewer, position=position, dimensions=voxel_resolution)
         url, shortened = ngl.render_url(

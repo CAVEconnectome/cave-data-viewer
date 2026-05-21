@@ -1,7 +1,7 @@
-"""Loader for operator recipes + examples.
+"""Loader for built-in recipes + examples.
 
 Two parallel directory layouts under `config/`:
-- `config/recipes/<datastack>/<id>.yaml` — operator recipes (the older
+- `config/recipes/<datastack>/<id>.yaml` — built-in recipes (the older
   inline `recipes:` block in `config/datastacks/<ds>.yaml` moved here).
 - `config/examples/<datastack>/<id>.yaml` — operator examples, with the
   additional `title` + `summary` (required), `full_text` + `thumbnail`
@@ -49,7 +49,7 @@ _VALID_KINDS = frozenset({"connectivity", "explorer"})
 
 
 class RecipeRegistry:
-    """In-memory cache of operator recipes + examples per datastack.
+    """In-memory cache of built-in recipes + examples per datastack.
 
     Constructed at app boot from the repo source and env-override
     sources (last-wins). All datastacks discovered across both sources
@@ -209,7 +209,7 @@ class RecipeRegistry:
                 return None
         else:
             if "pinned" in data:
-                logger.warning("%s: operator recipes must not carry a `pinned:` block", fpath)
+                logger.warning("%s: built-in recipes must not carry a `pinned:` block", fpath)
                 return None
 
         return data

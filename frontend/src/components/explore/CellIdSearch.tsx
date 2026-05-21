@@ -1,11 +1,13 @@
 import {
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
   type FormEvent,
   type KeyboardEvent,
 } from "react";
+import { createPortal } from "react-dom";
 import { useFindCellsMutation } from "../../api/embeddings";
 import type { FindCellResult, FindCellStatus } from "../../api/types";
 
@@ -157,6 +159,15 @@ export function CellIdSearch({
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const popoverRef = useRef<HTMLDivElement | null>(null);
+  // Popover position in viewport coords. Recomputed via useLayoutEffect
+  // when `open` flips, and on scroll/resize so the popover stays glued
+  // to the trigger. Portaled to <body> to escape `.explore-rail`'s
+  // overflow:auto clipping (CSS spec forces overflow-x to non-visible
+  // when overflow-y is non-visible — absolute-positioned children of
+  // the rail get clipped horizontally even though we only asked for y).
+  const [popoverPos, setPopoverPos] = useState<{ top: number; left: number; right: number | null } | null>(null);
   const findCells = useFindCellsMutation();
 
   // Disable conditions surfaced as a single string so the title attr
@@ -310,7 +321,13 @@ export function CellIdSearch({
       textareaRef.current?.select();
     });
     const onMouseDown = (e: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+      const target = e.target as Node;
+      // Popover is portaled to <body>, so check both the in-tree menu
+      // (trigger) and the portaled popover. Without this, clicking
+      // inside the popover would register as outside-click and close it.
+      const inMenu = !!(menuRef.current && menuRef.current.contains(target));
+      const inPopover = !!(popoverRef.current && popoverRef.current.contains(target));
+      if (!inMenu && !inPopover) {
         setOpen(false);
       }
     };
@@ -326,9 +343,40 @@ export function CellIdSearch({
     };
   }, [open]);
 
+  // Reposition the portaled popover when it opens, and re-measure on
+  // window resize / scroll so it stays anchored to the trigger as the
+  // rail re-flows. Width estimate (~380px) is used to decide whether to
+  // right-anchor (popover would overflow viewport edge if left-anchored
+  // close to the right side).
+  useLayoutEffect(() => {
+    if (!open) return;
+    const measure = () => {
+      const rect = triggerRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const popoverWidth = 360 + 24;  // CSS width + a bit of margin
+      const wouldOverflowRight =
+        rect.left + popoverWidth > window.innerWidth - 8;
+      setPopoverPos({
+        top: rect.bottom + 4,
+        left: wouldOverflowRight ? Math.max(8, window.innerWidth - popoverWidth - 8) : rect.left,
+        right: null,
+      });
+    };
+    measure();
+    window.addEventListener("resize", measure);
+    // Scroll listener uses capture so we react to scroll on any ancestor
+    // (the rail itself, the page, the workspace) — not just the window.
+    window.addEventListener("scroll", measure, true);
+    return () => {
+      window.removeEventListener("resize", measure);
+      window.removeEventListener("scroll", measure, true);
+    };
+  }, [open]);
+
   return (
     <div ref={menuRef} className="cell-id-search-menu">
       <button
+        ref={triggerRef}
         type="button"
         className="cell-id-search-trigger"
         aria-expanded={open}
@@ -338,12 +386,18 @@ export function CellIdSearch({
         <span aria-hidden>⌕</span>
         <span>Find cells…</span>
       </button>
-      {open && (
+      {open && popoverPos && createPortal(
         <div
+          ref={popoverRef}
           className="cell-id-search-popover"
           role="dialog"
           aria-label="Find cells"
           onClick={(e) => e.stopPropagation()}
+          style={{
+            position: "fixed",
+            top: popoverPos.top,
+            left: popoverPos.left,
+          }}
         >
           <form
             onSubmit={(e) => onSubmit(e, false)}
@@ -504,7 +558,8 @@ export function CellIdSearch({
               )}
             </div>
           )}
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );

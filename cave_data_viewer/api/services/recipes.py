@@ -17,14 +17,14 @@ the SPA surfaces as a banner; get_recipe raises LegacyRecipeError; PUT
 without `kind` raises RecipeValidationError → 400. There is no in-app
 migration; users re-create or re-upload via the YAML route.
 
-The on-disk format mirrors operator recipes in
+The on-disk format mirrors built-in recipes in
 `config/datastacks/<ds>.yaml`'s `recipes:` section exactly — same
 schema, same parser, exportable to operator config without
 transformation.
 
 The store is the single writer to its prefix, so we don't validate body
 shape against a Pydantic schema in this layer (the YAML uploader and
-the operator-recipe loader do that — see datastack_config.py's Recipe
+the built-in-recipe loader do that — see datastack_config.py's Recipe
 union). Bounds checks here (size, count, field length) defend against
 DoS / quota abuse, not against malformed input.
 
@@ -83,7 +83,7 @@ logger = logging.getLogger("cdv.recipes")
 # URL-path safety: bound the recipe-id shape so it can't escape the
 # user/ds prefix or blow the filename length. The `personal-` prefix
 # matches the SPA's `newPersonalId()` convention; rejecting anything else
-# keeps the user's namespace from colliding with operator-recipe ids.
+# keeps the user's namespace from colliding with built-in-recipe ids.
 _RECIPE_ID_PATTERN = re.compile(r"^personal-[a-z0-9-]{4,64}$")
 
 # Per-user-per-datastack count cap. A recipe is a few KB, so 100 is
@@ -314,7 +314,7 @@ def put_recipe(
     stored["saved_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
     # Reorder so the on-disk YAML leads with version/id/title/description
-    # — matches operator-recipe convention and reads better in `gsutil cat`.
+    # — matches built-in-recipe convention and reads better in `gsutil cat`.
     stored = _ordered_for_disk(stored)
 
     if enforce_count_cap:

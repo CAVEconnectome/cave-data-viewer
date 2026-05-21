@@ -100,10 +100,19 @@ export function PlotPanel({
   const bindingsKey = bindings ? `${bindings.x ?? ""}|${bindings.y ?? ""}|${bindings.hue ?? ""}|${bindings.size ?? ""}|${bindings.scope ?? ""}` : "";
   const layout = useMemo(() => {
     if (!themed) return null;
+    const themedLayout = themed.layout as { yaxis?: object };
     return {
-      ...(themed.layout as object),
+      ...themedLayout,
       autosize: true,
-      margin: { l: 50, r: 16, t: hasHeader ? 16 : 36, b: 40 },
+      // Fixed left margin (with yaxis.automargin disabled below) so
+      // sibling panels with different y-tick widths (e.g. "100k" vs
+      // "60k") have bars at the same x-pixel — visual comparison
+      // across panels was the original point of stable axes.
+      margin: { l: 60, r: 16, t: hasHeader ? 16 : 36, b: 40 },
+      // Disable yaxis automargin globally so the explicit margin.l
+      // wins. 60px accommodates the rotated yaxis title (~14px) +
+      // SI-formatted ticks up to ~6 chars ("999.9M") + padding.
+      yaxis: { ...(themedLayout.yaxis ?? {}), automargin: false },
       // Box / lasso are the conventional selection tools. Showing
       // them in the modebar lets the user choose; either fires
       // `onSelected` with the same payload shape.

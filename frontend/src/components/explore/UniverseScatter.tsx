@@ -118,6 +118,11 @@ interface Props {
    *  fetching and substitutes the synthesized block here. */
   distanceColorMap?: Map<string, number> | null;
   distanceSizeMap?: Map<string, number> | null;
+  /** Uniform fill color (hex `#rrggbb`) for the "no color binding"
+   *  case — i.e. when the user explicitly picked `color=__none__` from
+   *  the channel picker. Falls back to the project's default base hue
+   *  when omitted. Ignored when a color binding is active. */
+  baseColor?: string | null;
 }
 
 /** Imperative handle exposed via `forwardRef`. Lets parents trigger the
@@ -244,6 +249,7 @@ export const UniverseScatter = forwardRef<UniverseScatterHandle, Props>(function
     height,
     distanceColorMap,
     distanceSizeMap,
+    baseColor,
   },
   ref,
 ) {
@@ -369,6 +375,7 @@ export const UniverseScatter = forwardRef<UniverseScatterHandle, Props>(function
         colormap,
         colorCenter: colorCenter ?? null,
         scopeMode,
+        baseColor: baseColor ?? null,
       }),
     [
       dataWithSynthetic,
@@ -384,6 +391,7 @@ export const UniverseScatter = forwardRef<UniverseScatterHandle, Props>(function
       colormap,
       colorCenter,
       scopeMode,
+      baseColor,
     ],
   );
 
@@ -395,11 +403,17 @@ export const UniverseScatter = forwardRef<UniverseScatterHandle, Props>(function
   // user's pan/zoom — only the initial fit (and explicit "fit view"
   // requests) re-compute zoom from height.
   const [measuredHeight, setMeasuredHeight] = useState(0);
+  // Container width — used by the hover tooltip to decide whether to
+  // anchor right-of-cursor (when near the right edge) instead of the
+  // default left-of-cursor. Without this, tooltips on cells near the
+  // canvas's right edge get clipped by the panel's overflow:hidden.
+  const [measuredWidth, setMeasuredWidth] = useState(0);
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
     const ro = new ResizeObserver((entries) => {
       setMeasuredHeight(entries[0].contentRect.height);
+      setMeasuredWidth(entries[0].contentRect.width);
     });
     ro.observe(el);
     return () => ro.disconnect();
@@ -999,22 +1013,29 @@ export const UniverseScatter = forwardRef<UniverseScatterHandle, Props>(function
         </button>
       </div>
       {/* Hover tooltip. Anchored to the canvas position deck.gl reports
-          (info.x/y), offset so the cursor doesn't sit under it. */}
-      {tooltip && (
-        <div
-          className="universe-tooltip"
-          style={{
-            position: "absolute",
-            left: tooltip.px + 12,
-            top: tooltip.py + 12,
-            pointerEvents: "none",
-          }}
-        >
-          {tooltip.lines.map((line, i) => (
-            <div key={i}>{line}</div>
-          ))}
-        </div>
-      )}
+          (info.x/y), offset so the cursor doesn't sit under it.
+          Flip-right when the cursor is past 60% of canvas width so the
+          tooltip extends LEFT instead and doesn't get clipped by the
+          panel's overflow:hidden right edge. */}
+      {tooltip && (() => {
+        const flipRight = measuredWidth > 0 && tooltip.px > measuredWidth * 0.6;
+        return (
+          <div
+            className="universe-tooltip"
+            style={{
+              position: "absolute",
+              left: flipRight ? "auto" : tooltip.px + 12,
+              right: flipRight ? Math.max(0, measuredWidth - tooltip.px + 12) : "auto",
+              top: tooltip.py + 12,
+              pointerEvents: "none",
+            }}
+          >
+            {tooltip.lines.map((line, i) => (
+              <div key={i}>{line}</div>
+            ))}
+          </div>
+        );
+      })()}
       </>
       )}
     </div>
@@ -1094,6 +1115,9 @@ function buildPartition(
     /** "ghost" keeps out-of-scope cells visible as background context;
      *  "hide" omits them entirely. */
     scopeMode: "ghost" | "hide";
+    /** User-picked uniform fill (hex "#rrggbb") for unbound color.
+     *  Null = use the project's default BASE_RGBA_NO_HIGHLIGHT. */
+    baseColor: string | null;
   },
 ): Partition | null {
   if (!data || !extent) return null;
@@ -1196,9 +1220,18 @@ function buildPartition(
       );
     } else {
       // No color binding: base layer uses one of the project's solid
-      // hexes; partition decides which.
-      const fallback = hasHighlight ? BASE_RGBA_WITH_HIGHLIGHT : BASE_RGBA_NO_HIGHLIGHT;
-      rgb = [fallback[0], fallback[1], fallback[2]];
+      // hexes; partition decides which. When the user picked
+      // color=__none__ AND chose a specific color (?cv=), use that
+      // instead of the default base hue. The highlight-recede case
+      // always uses the project's recede color regardless — recede is
+      // a structural signal, not a user-pickable hue.
+      if (hasHighlight) {
+        rgb = [BASE_RGBA_WITH_HIGHLIGHT[0], BASE_RGBA_WITH_HIGHLIGHT[1], BASE_RGBA_WITH_HIGHLIGHT[2]];
+      } else if (opts.baseColor) {
+        rgb = hexToRgb(opts.baseColor);
+      } else {
+        rgb = [BASE_RGBA_NO_HIGHLIGHT[0], BASE_RGBA_NO_HIGHLIGHT[1], BASE_RGBA_NO_HIGHLIGHT[2]];
+      }
     }
     // Highlight alpha is full; base alpha varies by mode.
     let alpha: number;
@@ -1286,7 +1319,7 @@ function buildPartition(
   // the GPU buffers. Including the binding identity + scope/selection
   // tokens here is enough; the per-point arrays are immutable for a
   // given binding set.
-  const colorRevision = `${colorBlock?.column ?? ""}|${colorBlock?.kind ?? ""}|${opts.colormap.id}|${opts.colorMin ?? ""}|${opts.colorMax ?? ""}|${isDiverging ? opts.colorCenter ?? "" : ""}|${hasHighlight ? "sel" : "no-sel"}|${hasScope ? `scope-${opts.scopeMode}` : "no-scope"}`;
+  const colorRevision = `${colorBlock?.column ?? ""}|${colorBlock?.kind ?? ""}|${opts.colormap.id}|${opts.colorMin ?? ""}|${opts.colorMax ?? ""}|${isDiverging ? opts.colorCenter ?? "" : ""}|${hasHighlight ? "sel" : "no-sel"}|${hasScope ? `scope-${opts.scopeMode}` : "no-scope"}|${opts.baseColor ?? ""}`;
   const sizeRevision = `${sizeBlock?.column ?? ""}|${opts.sizeMinPx}|${opts.sizeMaxPx}|${opts.sizeDataMin ?? ""}|${opts.sizeDataMax ?? ""}|${selectedRows.length}|${hasHighlight ? "sel" : "no-sel"}|${hasScope ? `scope-${opts.scopeMode}` : "no-scope"}`;
   return {
     outOfScope,

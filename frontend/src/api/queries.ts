@@ -508,6 +508,13 @@ export interface MakeSegmentsLinkArgs {
   ds: string;
   matVersion: number | "live";
   rootIds: string[];
+  /** Optional subset of rootIds to render visible on arrival. The rest of
+   *  rootIds load into the segmentation layer's state but are hidden — the
+   *  user can toggle them on inside NG without re-fetching. Use this when
+   *  shipping a large set ("here are 5000 cells from your lasso") but only
+   *  rendering a few so the viewer doesn't choke on geometry. Omit to
+   *  render every id (backward compatible). */
+  visibleRootIds?: string[];
   /** Optional view position to open the viewer at, in raw voxel coordinates
    *  (typically pulled from a row's `<prefix>_pt_position_x/y/z` triple). */
   position?: [number, number, number];
@@ -537,6 +544,7 @@ export function useMakeSegmentsLinkMutation() {
         query: { mat_version: args.matVersion === "live" ? undefined : args.matVersion ?? undefined },
         body: {
           root_ids: args.rootIds,
+          visible_root_ids: args.visibleRootIds,
           position: args.position,
           voxel_resolution: args.voxelResolution,
         },

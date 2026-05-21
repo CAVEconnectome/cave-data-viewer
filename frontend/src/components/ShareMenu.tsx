@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useSearchParams } from "react-router-dom";
+import { connectivityAdapter } from "../tours/adapters/connectivityAdapter";
 import { parseRecipeFromUrl, urlHasRecipeContent } from "../tours/recipeFromUrl";
 import { newPersonalId, save as savePersonal } from "../tours/personalRecipes";
 import {
@@ -9,6 +10,7 @@ import {
   CONNECTIVITY_RECIPE_STRIP_PREFIXES,
 } from "../tours/shareLinks";
 import { useApplicableRecipeKinds } from "../tours/useApplicableRecipeKinds";
+import { YamlActionsRow } from "./YamlActionsRow";
 
 /**
  * Sidebar disclosure for sharing the current view (as a query link or a
@@ -85,6 +87,29 @@ export function ShareMenu({ ds }: { ds: string }) {
     window.setTimeout(() => setSavedFlash(false), 1500);
   };
 
+  const onDownload = () => {
+    if (!hasContent) return;
+    const recipe = parseRecipeFromUrl(searchParams, {
+      id: newPersonalId(),
+      title: title.trim() || "Untitled connectivity view",
+      description: description.trim() || undefined,
+    });
+    const yaml = connectivityAdapter.toYaml(recipe);
+    const blob = new Blob([yaml], { type: "application/x-yaml;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    const slug = recipe.title
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/(^-|-$)/g, "");
+    a.download = `${slug || recipe.id}.recipe.yaml`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <details className="sidebar-share" open>
       <summary>Share / Save</summary>
@@ -99,6 +124,7 @@ export function ShareMenu({ ds }: { ds: string }) {
           type="button"
           onClick={() => setShowSaveForm((s) => !s)}
           disabled={!hasContent}
+          className={savedFlash ? "is-saved-flash" : undefined}
           title={
             hasContent
               ? "Save the current decorations, plots, and filters as a personal recipe"
@@ -132,6 +158,20 @@ export function ShareMenu({ ds }: { ds: string }) {
             <button type="submit" disabled={!title.trim()}>Save</button>
           </form>
         )}
+        <YamlActionsRow
+          ds={ds}
+          onDownload={onDownload}
+          downloadDisabled={!hasContent}
+          downloadTitle={
+            hasContent
+              ? "Download the current connectivity view as YAML"
+              : "Configure decorations or plots before downloading"
+          }
+          onUploaded={() => {
+            setSavedFlash(true);
+            window.setTimeout(() => setSavedFlash(false), 1500);
+          }}
+        />
       </div>
     </details>
   );

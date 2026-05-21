@@ -7,6 +7,7 @@ import {
   type FeatureTableListItem,
 } from "../../api/types";
 import { DistanceCdf } from "./DistanceCdf";
+import { RangeSlider } from "./RangeSlider";
 
 export type GrowthSpace = "raw" | "pca" | "mahalanobis";
 export type GrowthReduction = "centroid" | "nearest" | "mean";
@@ -447,36 +448,31 @@ export function GrowSelectionPanel({
       <div className="explore-grow-help">{SPACE_HELP[space]}</div>
 
       {space === "pca" && (
-        <div className="explore-grow-row">
-          <label htmlFor="explore-grow-variance">variance retained</label>
-          <input
-            id="explore-grow-variance"
-            type="range"
-            min={0.5}
+        <>
+          <RangeSlider
+            label="variance"
+            mode="single"
+            min={variance}
             max={1.0}
+            bound={{ lo: 0.5, hi: 1.0 }}
             step={0.05}
-            value={variance}
-            onChange={(e) => {
-              const v = parseFloat(e.target.value);
-              if (!Number.isFinite(v)) return;
+            formatValue={(v) => `${(v * 100).toFixed(0)}%`}
+            onChange={({ min: v }) => {
+              if (v === undefined || !Number.isFinite(v)) return;
               // Default 0.9 → null in URL (clean shareable link); any
               // other value persists.
               setVarianceRaw(Math.abs(v - 0.9) < 1e-6 ? null : v.toFixed(2));
             }}
-            className="explore-grow-variance-slider"
           />
-          <span className="explore-grow-stats">
-            {(variance * 100).toFixed(0)}%
-            {distanceProbe?.kPca != null &&
-              distanceProbe.varianceExplained != null && (
-                <>
-                  {" "}— {distanceProbe.kPca} of{" "}
-                  {distanceProbe.featureColumns.length} components (
-                  {(distanceProbe.varianceExplained * 100).toFixed(1)}% actual)
-                </>
-              )}
-          </span>
-        </div>
+          {distanceProbe?.kPca != null &&
+            distanceProbe.varianceExplained != null && (
+              <div className="explore-grow-pca-info">
+                {distanceProbe.kPca} of{" "}
+                {distanceProbe.featureColumns.length} components (
+                {(distanceProbe.varianceExplained * 100).toFixed(1)}% actual)
+              </div>
+            )}
+        </>
       )}
 
       <div

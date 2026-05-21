@@ -947,7 +947,7 @@ requires-dist = [
     { name = "google-cloud-storage", specifier = ">=2.14,<4" },
     { name = "gunicorn", specifier = ">=21.2" },
     { name = "middle-auth-client", specifier = ">=3.18,<4" },
-    { name = "nglui", specifier = ">=4.7.3,<5" },
+    { name = "nglui", specifier = ">=4.7.4,<5" },
     { name = "numpy", specifier = "<3" },
     { name = "pandas", specifier = "<4" },
     { name = "plotly", specifier = ">=5,<7" },
@@ -2004,7 +2004,7 @@ wheels = [
 
 [[package]]
 name = "nglui"
-version = "4.7.3"
+version = "4.7.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "attrs" },
@@ -2024,9 +2024,9 @@ dependencies = [
     { name = "typing-extensions", marker = "python_full_version < '3.11'" },
     { name = "webcolors" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/81/87/5fb09ae17fe0d96e4c9959f206081c4c40a7dbf438ab1f906313591bddf4/nglui-4.7.3.tar.gz", hash = "sha256:d0f21e28f2ec7a9be784e52790606a096a8d5fd8001cc8eb29de22e0eb80da6a", size = 1175048, upload-time = "2026-04-27T21:46:21.61Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/13/bf/8a9306473544cf41b06610830fd3642bd9e7c88ba7d9dde754cf8445380e/nglui-4.7.4.tar.gz", hash = "sha256:d4e05ce35024d7ceaaf4422526a2e7e9072bc9513444f5191c922405ce21f541", size = 1175400, upload-time = "2026-05-21T18:23:28.682Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/51/1e/1580f83129228cebda15ebb318313a3705db9daa8699fe2ec0aee3848c09/nglui-4.7.3-py3-none-any.whl", hash = "sha256:e3d836ed523e7337f78aa4e0b5982934b6f4aea652e6fefa8900cc69cc8bc3af", size = 58672, upload-time = "2026-04-27T21:46:22.978Z" },
+    { url = "https://files.pythonhosted.org/packages/34/cb/e49c0f5151a6d320f03af18f06792e198c468ba044f274cb008627739b9f/nglui-4.7.4-py3-none-any.whl", hash = "sha256:fed70cb7f349642409f0eaab2a7b64591bc6280a61748f534fe1034ada802890", size = 58673, upload-time = "2026-05-21T18:23:25.616Z" },
 ]
 
 [[package]]

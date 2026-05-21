@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useEffect, useMemo } from "react";
 import type { ColumnGroup, FeatureTableListItem } from "../../api/types";
 import { columnDisplayName } from "../tableColumns";
 import { getColormap } from "./colormaps";
@@ -70,6 +70,16 @@ interface Props {
   defaultXLabel?: string; // shown when x is null (the embedding's declared axis)
   defaultYLabel?: string;
   defaultColorLabel?: string | null; // embedding's default_color_by
+  /** Uniform fill color (hex `#rrggbb`) for the explicit no-color
+   *  state (colorBy === "__none__"). When unset, falls back to the
+   *  project's default base hue. Surfaced as a swatch picker inline
+   *  next to the color select. */
+  colorValue?: string | null;
+  /** When provided, renders a "Restore defaults" link at the bottom of
+   *  the picker. Caller clears all channel URL keys (x, y, color, cv,
+   *  size, size_min/max, size_data_min/max, color_min/max, cmap,
+   *  color_center) so the scatter falls back to manifest defaults. */
+  onRestoreDefaults?: () => void;
   onChange: (next: {
     x?: string | null;
     y?: string | null;
@@ -83,8 +93,14 @@ interface Props {
     colorMax?: number | null;
     colormapId?: string | null;
     colorCenter?: number | null;
+    colorValue?: string | null;
   }) => void;
 }
+
+/** Default uniform color for color=__none__. Matches BASE_RGBA_NO_HIGHLIGHT
+ *  in UniverseScatter so the swatch picker's initial value matches what
+ *  the scatter already paints. */
+const DEFAULT_UNIFORM_COLOR = "#5b8bd1";
 
 /**
  * Seaborn-style x/y/color/size channel pickers.
@@ -123,6 +139,8 @@ export function ChannelPicker({
   defaultXLabel,
   defaultYLabel,
   defaultColorLabel,
+  colorValue,
+  onRestoreDefaults,
   onChange,
 }: Props) {
   const { axisOptions, colorOptions, sizeOptions } = useMemo(() => {
@@ -221,11 +239,34 @@ export function ChannelPicker({
     const all = [...parquetOptions, ...decorationOptions];
     const allWithDistance = distanceOption ? [distanceOption, ...all] : all;
     return {
-      axisOptions: all, // any real column can be on an axis; distance excluded
+      // x/y axes are scatter-only (no bar/strip path yet), so categorical
+      // columns aren't a valid binding — filter them out. `isNumeric !==
+      // false` keeps numeric AND unknown columns (decoration columns
+      // we haven't sampled); the backend rejects non-numeric at fetch
+      // time. Distance is excluded — it's color/size only.
+      axisOptions: all.filter((o) => o.isNumeric !== false),
       colorOptions: allWithDistance,
       sizeOptions: allWithDistance.filter((o) => o.isNumeric !== false),
     };
   }, [featureTable, cellsColumnGroups, hasDistanceProbe]);
+
+  // Auto-clear stale axis bindings. If x or y is set to a column that
+  // isn't in the (filtered) axisOptions — typically a categorical
+  // column from an older URL or recipe back when categoricals were
+  // allowed — null it out so the dropdown stops showing "default" for
+  // a value the user can't pick from the menu anymore. Gated on
+  // featureTable being loaded so we don't clobber during the load tick
+  // when axisOptions is transiently empty.
+  useEffect(() => {
+    if (!featureTable) return;
+    const valid = new Set(axisOptions.map((o) => o.value));
+    const updates: { x?: null; y?: null } = {};
+    if (x && !valid.has(x)) updates.x = null;
+    if (y && !valid.has(y)) updates.y = null;
+    if (updates.x !== undefined || updates.y !== undefined) {
+      onChange(updates);
+    }
+  }, [featureTable, axisOptions, x, y, onChange]);
 
   return (
     <div className="explore-channels">
@@ -234,14 +275,14 @@ export function ChannelPicker({
       <ChannelSelect
         label="x"
         value={x}
-        defaultLabel={defaultXLabel}
+        emptyOptionLabel={defaultXLabel ? "Embedding (x)" : undefined}
         options={axisOptions}
         onChange={(v) => onChange({ x: v })}
       />
       <ChannelSelect
         label="y"
         value={y}
-        defaultLabel={defaultYLabel}
+        emptyOptionLabel={defaultYLabel ? "Embedding (y)" : undefined}
         options={axisOptions}
         onChange={(v) => onChange({ y: v })}
       />
@@ -251,6 +292,7 @@ export function ChannelPicker({
         defaultLabel={defaultColorLabel ?? "—"}
         options={colorOptions}
         allowNone
+        explicitNoneLabel="(no color)"
         onChange={(v) =>
           onChange({
             colorBy: v,
@@ -261,7 +303,22 @@ export function ChannelPicker({
           })
         }
       />
-      {colorBy && colorIsNumeric && colorBound && (() => {
+      {colorBy === "__none__" && (
+        /* Uniform color picker — analog of the size slider for sizeBy=null.
+           When the user explicitly picks "(no color)", the channel is
+           uninformative; they pick the literal fill instead. */
+        <label className="explore-channel">
+          <span className="explore-channel-label">fill</span>
+          <input
+            type="color"
+            className="explore-color-swatch"
+            value={colorValue ?? DEFAULT_UNIFORM_COLOR}
+            onChange={(e) => onChange({ colorValue: e.target.value })}
+            title="Uniform color for all points (no channel)"
+          />
+        </label>
+      )}
+      {colorBy && colorBy !== "__none__" && colorIsNumeric && colorBound && (() => {
         const isDiverging = getColormap(colormapId).category === "diverging";
         const lo = colorMin ?? colorBound.lo;
         const hi = colorMax ?? colorBound.hi;
@@ -371,6 +428,16 @@ export function ChannelPicker({
           })
         }
       />
+      {onRestoreDefaults && (
+        <button
+          type="button"
+          className="explore-channels-restore"
+          onClick={onRestoreDefaults}
+          title="Reset all channel bindings, clipping, and the colormap to manifest defaults"
+        >
+          Restore defaults
+        </button>
+      )}
     </div>
   );
 }
@@ -387,15 +454,30 @@ function ChannelSelect({
   label,
   value,
   defaultLabel,
+  emptyOptionLabel,
   options,
   allowNone,
+  explicitNoneLabel,
   onChange,
 }: {
   label: string;
   value: string | null;
   defaultLabel?: string;
+  /** When set, completely replaces the empty option's rendered text
+   *  (no "default (...)" wrap). Used by x/y where "Embedding (x)" is
+   *  more readable than the verbose "default (umap_embedding_x)" —
+   *  the channel name already signals what the default is. Color
+   *  doesn't pass this because the user can't predict the default
+   *  column name without seeing it. */
+  emptyOptionLabel?: string;
   options: ChannelOption[];
   allowNone?: boolean;
+  /** When set, renders an explicit option that writes the literal
+   *  string `__none__` to the binding. Distinct from clearing to the
+   *  empty option (which means "fall back to default"). Used on the
+   *  color channel so the user can pick "no color" even when a
+   *  default_color_by is defined. */
+  explicitNoneLabel?: string;
   onChange: (next: string | null) => void;
 }) {
   // Group options by source for an optgroup-style render.
@@ -415,14 +497,19 @@ function ChannelSelect({
         }}
       >
         <option value="">
-          {allowNone
-            ? defaultLabel && defaultLabel !== "—"
-              ? `default (${defaultLabel})`
-              : "none"
-            : defaultLabel
-              ? `default (${defaultLabel})`
-              : "—"}
+          {emptyOptionLabel
+            ? emptyOptionLabel
+            : allowNone
+              ? defaultLabel && defaultLabel !== "—"
+                ? `default (${defaultLabel})`
+                : "none"
+              : defaultLabel
+                ? `default (${defaultLabel})`
+                : "—"}
         </option>
+        {explicitNoneLabel && (
+          <option value="__none__">{explicitNoneLabel}</option>
+        )}
         {Object.entries(grouped).map(([source, opts]) => (
           <optgroup key={source} label={source}>
             {opts.map((o) => (

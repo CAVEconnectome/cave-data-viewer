@@ -7,7 +7,7 @@ import { useApplyRecipe } from "../tours/useApplyRecipe";
 import {
   getInvalidCount,
   listForDs as listPersonalRecipes,
-  remove as removePersonalRecipe,
+  softRemove as softRemovePersonalRecipe,
   save as savePersonalRecipe,
   subscribe as subscribePersonalRecipes,
 } from "../tours/personalRecipes";
@@ -149,9 +149,9 @@ function DatastackTours({ ds }: { ds: string }) {
   // previously-saved items aren't visible.
   const invalidCount = getInvalidCount(ds);
 
-  const operatorRecipes = data?.recipes ?? [];
+  const builtinRecipes = data?.recipes ?? [];
   const empty =
-    data && operatorRecipes.length === 0 && personalRecipes.length === 0;
+    data && builtinRecipes.length === 0 && personalRecipes.length === 0;
 
   return (
     <section className="landing-datastack">
@@ -175,7 +175,7 @@ function DatastackTours({ ds }: { ds: string }) {
           YAML file below, or pick this datastack in the sidebar to start fresh.
         </p>
       )}
-      {(operatorRecipes.length > 0 || personalRecipes.length > 0) && (
+      {(builtinRecipes.length > 0 || personalRecipes.length > 0) && (
         <div className="tour-section">
           <h4>Recipes</h4>
           {personalRecipes.length > 0 && (
@@ -188,13 +188,13 @@ function DatastackTours({ ds }: { ds: string }) {
               </div>
             </>
           )}
-          {operatorRecipes.length > 0 && (
+          {builtinRecipes.length > 0 && (
             <>
               {personalRecipes.length > 0 && (
-                <h5 className="tour-subgroup">Operator recipes</h5>
+                <h5 className="tour-subgroup">Built-in recipes</h5>
               )}
               <div className="tour-grid">
-                {operatorRecipes.map((r) => (
+                {builtinRecipes.map((r) => (
                   <RecipeCard key={r.id} ds={ds} recipe={r} />
                 ))}
               </div>
@@ -421,8 +421,7 @@ function RecipeCard({ ds, recipe, personal }: { ds: string; recipe: Recipe; pers
     URL.revokeObjectURL(url);
   };
   const onDelete = () => {
-    if (!window.confirm(`Delete personal recipe "${recipe.title}"?`)) return;
-    removePersonalRecipe(ds, recipe.id);
+    softRemovePersonalRecipe(ds, recipe.id);
   };
   return (
     <div className={`tour-card${personal ? " is-personal" : ""}`}>

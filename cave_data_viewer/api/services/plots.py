@@ -894,6 +894,59 @@ def _maybe_flip_depth(fig: go.Figure, spec: PlotSpec) -> None:
         fig.update_yaxes(autorange="reversed")
 
 
+# Bare-name allowlist of non-depth spatial columns. Mirrors the column
+# families emitted by spatial providers (see services/spatial/cortex.py).
+# Depth-shaped columns are matched separately via `_is_depth_column`.
+# Everything here is in µm, same unit as depth — so a scaleratio of 1
+# across any pair (tangential × depth, radial × tangential, etc.) is
+# dimensionally honest.
+_SPATIAL_BARE_NAMES = frozenset({
+    "soma_x", "soma_z",
+    "radial_dist_root_soma",
+})
+
+
+def _is_spatial_column(name: str | None) -> bool:
+    """Classify a column reference as spatial (µm-valued).
+
+    True for depth-shaped columns (`soma_depth`, `median_syn_depth_*`),
+    tangential columns (`soma_x`, `soma_z`), and radial-distance columns
+    (`radial_dist_root_soma`). Decoration-table prefixes (`<table>.<col>`)
+    are stripped before classification — same convention as
+    `_is_depth_column`.
+    """
+    if not name:
+        return False
+    bare = name.rsplit(".", 1)[-1]
+    if _is_depth_column(bare):
+        return True
+    return bare in _SPATIAL_BARE_NAMES
+
+
+def _apply_equal_axes_if_spatial(fig: go.Figure, spec: PlotSpec) -> None:
+    """Force 1:1 pixel-aspect when both axes plot µm-valued quantities.
+
+    Without this, Plotly fits the figure box and stretches differently
+    per panel, so a `soma_x × soma_z` scatter looks oval in a wide panel
+    and elongated in a tall one — visually misleading for any
+    morphology / topography reading. With scaleanchor + scaleratio=1,
+    one micron on x reads as one micron on y, so the data's actual
+    shape is preserved.
+
+    Only applied to scatter (where aspect ratio carries spatial
+    meaning). Bar / histogram / stripplot have categorical or count
+    axes where aspect ratio is irrelevant. Cross-family pairs
+    (e.g. tangential × depth) are honored too — cortex is wider than
+    deep, and showing that honestly is the point. Users have the
+    panel-expand button when they need more room.
+    """
+    if spec.kind != "scatter":
+        return
+    if not (_is_spatial_column(spec.x) and _is_spatial_column(spec.y)):
+        return
+    fig.update_yaxes(scaleanchor="x", scaleratio=1)
+
+
 # Depth-guide styling. Subtle gray lines + slightly stronger labels so the
 # guides read as background context — the data points should remain the
 # visual focus. `dash="dot"` distinguishes layer boundaries from a chart's
@@ -1670,6 +1723,7 @@ def resolve_plot(
         _apply_layout(fig, spec.layout)
         _apply_auto_titles(fig, spec)
         _maybe_flip_depth(fig, spec)
+        _apply_equal_axes_if_spatial(fig, spec)
         # Depth-axis decorations live in `provider.meta()` for cortex; null
         # provider returns an empty meta and the guides become no-ops.
         provider_meta = spatial_provider.meta() if spatial_provider is not None else {}

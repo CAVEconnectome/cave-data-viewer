@@ -33,6 +33,7 @@ def pin_segments(
     segments: Iterable[int],
     *,
     colors: dict[int, str] | None = None,
+    visible: Iterable[int] | None = None,
 ) -> ViewerState:
     """Add segments to the segmentation layer, optionally with per-id colors.
 
@@ -42,9 +43,24 @@ def pin_segments(
     `colors` is a `{segment_id: css_color}` map fed straight into nglui's
     `add_segment_colors` — useful for distinguishing the focal neuron from
     partners (e.g. `{root_id: "white"}` to mark the queried cell).
+
+    `visible` is an optional subset of `segments` that should be visible (i.e.
+    rendered in 3D). All other ids are still loaded into the segmentation
+    layer's state but hidden — the user can toggle them on inside Neuroglancer
+    without re-fetching. Used by callers that want to ship a large set ("here
+    are 5000 cells from your lasso") but only render a small subset at first
+    ("show these 500 so the viewer doesn't choke on geometry"). When omitted,
+    every segment is visible — backward compatible with all prior callers.
     """
     seg_layer = viewer.layers[1]
-    seg_layer.add_segments(segments=list(segments))
+    segments_list = list(segments)
+    if visible is None:
+        seg_layer.add_segments(segments=segments_list)
+    else:
+        visible_set = {int(v) for v in visible}
+        # nglui's dict form: {id: bool_visible}. Hidden ids end up in the
+        # state's segments list with visibility false → loaded, not rendered.
+        seg_layer.add_segments(segments={s: s in visible_set for s in segments_list})
     if colors:
         seg_layer.add_segment_colors(colors)
     return viewer

@@ -575,7 +575,7 @@ class ExplorerRecipe(BaseModel):
 # Discriminated union. Pydantic picks the arm by the value of `kind`;
 # anything missing/unknown raises a validation error at model_validate
 # time — which is exactly the "hard cutover on missing kind" behavior
-# the design calls for. Operator-recipe entries in datastack YAMLs and
+# the design calls for. Built-in-recipe entries in datastack YAMLs and
 # personal recipes loaded via services/recipes.py both flow through this.
 Recipe = Annotated[
     Union[ConnectivityRecipe, ExplorerRecipe],
@@ -690,7 +690,7 @@ def _yaml_signature(paths: list[Path]) -> tuple:
 
 def _validate_tour_ids(cfg: DatastackConfig, datastack: str) -> None:
     """No-op placeholder: inline examples/recipes fields were removed from
-    DatastackConfig in Task 2.3. Operator recipes are now loaded via
+    DatastackConfig in Task 2.3. Built-in recipes are now loaded via
     RecipeRegistry from per-file YAMLs under config/recipes/<ds>/; examples
     live under config/examples/<ds>/. The RecipeRegistry performs its own
     id validation at load time.

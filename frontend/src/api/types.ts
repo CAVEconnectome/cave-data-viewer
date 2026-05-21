@@ -298,7 +298,7 @@ export interface TourBase {
   id: string;
   title: string;
   description?: string | null;
-  // Array fields are OPTIONAL because operator recipes loaded from the
+  // Array fields are OPTIONAL because built-in recipes loaded from the
   // RecipeRegistry are raw YAML dicts — a YAML that simply omits
   // `hide:` / `show:` / `coll:` / `plots:` / `decoration_tables:` arrives
   // with the keys absent rather than as empty arrays. Consumers must

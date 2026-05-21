@@ -1,4 +1,4 @@
-"""Tests for `RecipeRegistry` — the shared loader for operator recipes
+"""Tests for `RecipeRegistry` — the shared loader for built-in recipes
 and examples.
 
 Two-source layout (repo → env override) mirrors
@@ -28,7 +28,7 @@ def _write_yaml(p: Path, content: dict) -> None:
     p.write_text(yaml.safe_dump(content, sort_keys=False))
 
 
-def test_loads_operator_recipe(repo_root: Path) -> None:
+def test_loads_builtin_recipe(repo_root: Path) -> None:
     _write_yaml(
         repo_root / "config" / "recipes" / "ds_x" / "show-soma.yaml",
         {

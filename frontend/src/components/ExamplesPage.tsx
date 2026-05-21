@@ -28,7 +28,7 @@ export function ExamplesPage() {
   if (!ds) {
     return (
       <section className="examples-page">
-        <h2>Examples</h2>
+        <h2>Quickstart Examples</h2>
         <p className="muted">Pick a datastack from the sidebar to see examples.</p>
       </section>
     );
@@ -36,7 +36,7 @@ export function ExamplesPage() {
 
   return (
     <section className="examples-page">
-      <h2>Examples</h2>
+      <h2>Quickstart Examples</h2>
       <div className="examples-filters">
         <button
           type="button"

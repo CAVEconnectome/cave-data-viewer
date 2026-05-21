@@ -21,7 +21,16 @@ import type { PartnerRecord } from "../../api/types";
  *  user rarely needs more for a "look at this group" workflow. Sets
  *  above the cap get randomly sub-sampled — `Open in NGL` on a 50k
  *  filter result is meaningful as a sample, not as a full enumeration. */
-const NGL_LINK_CAP = 500;
+/** Cells visible (rendered) by default when the user opens a large set
+ *  in Neuroglancer. The rest of the set still loads into the
+ *  segmentation layer's state — they're toggleable inside NG without
+ *  re-fetching — but the viewer doesn't try to render geometry for
+ *  thousands of cells on arrival. */
+const NGL_VISIBLE_CAP = 20;
+/** Total cells loaded into the NG state. Matches the backend cap on
+ *  `_SEGMENTS_LINK_MAX_IDS`; anything past this gets uniformly
+ *  subsampled before the request leaves the SPA. */
+const NGL_LOADED_CAP = 10000;
 
 interface ClearPillProps {
   label: string;
@@ -66,6 +75,10 @@ interface NglActionPillProps {
   disabled: boolean;
   liveDisabled: boolean;
   onOpen: () => void;
+  /** Visual accent. "warm" tints the pill terracotta to mark it as a
+   *  personal-action affordance (the Selected pill — acts on the user's
+   *  curated bag); default leaves the pill in its neutral palette. */
+  accent?: "warm";
 }
 
 /** Pill-shaped NGL action button used in the drawer header. Lives
@@ -85,29 +98,35 @@ function NglActionPill({
   disabled,
   liveDisabled,
   onOpen,
+  accent,
 }: NglActionPillProps) {
   const hasOutOfScope = bagTotal !== undefined && bagTotal > count;
-  const willSample = count > NGL_LINK_CAP;
-  // Tooltip carries the sampling detail so the pill label doesn't
-  // need the "(500/1942)" cruft. The pill shows the true count; the
-  // sample-cap is an implementation detail the user only sees on hover.
+  const loaded = Math.min(count, NGL_LOADED_CAP);
+  const visible = Math.min(loaded, NGL_VISIBLE_CAP);
+  const truncating = count > NGL_LOADED_CAP;
+  const hidingSome = loaded > NGL_VISIBLE_CAP;
+  // Tooltip explains the visible/hidden split + any truncation cap.
+  // The pill shows the true count; the load/visible split is an
+  // implementation detail surfaced only on hover.
   const title = liveDisabled
     ? "Switch to a materialized version to open in Neuroglancer"
     : count === 0
       ? hasOutOfScope
         ? `Your selection has ${bagTotal!.toLocaleString()} cells but none are in scope — widen the Scope to open them`
         : `No ${label} cells to open`
-      : willSample
-        ? `Open a random sample of ${NGL_LINK_CAP} cells from the ${count.toLocaleString()} in-scope ${label}${
-            hasOutOfScope ? ` (${bagTotal!.toLocaleString()} total in selection, ${(bagTotal! - count).toLocaleString()} out of scope)` : ""
-          }`
-        : hasOutOfScope
-          ? `Open ${count.toLocaleString()} in-scope ${label} cells in Neuroglancer (${(bagTotal! - count).toLocaleString()} more in selection but out of scope)`
-          : `Open ${count.toLocaleString()} ${label} cells in Neuroglancer`;
+      : truncating
+        ? `Open ${loaded.toLocaleString()} of ${count.toLocaleString()} cells in Neuroglancer (random sample; ${visible.toLocaleString()} shown by default, toggle the rest inside NG)`
+        : hidingSome
+          ? `Open ${loaded.toLocaleString()} cells in Neuroglancer (${visible.toLocaleString()} shown by default, toggle the rest inside NG)${
+              hasOutOfScope ? ` — ${(bagTotal! - count).toLocaleString()} more in selection but out of scope` : ""
+            }`
+          : hasOutOfScope
+            ? `Open ${count.toLocaleString()} in-scope ${label} cells in Neuroglancer (${(bagTotal! - count).toLocaleString()} more in selection but out of scope)`
+            : `Open ${count.toLocaleString()} ${label} cells in Neuroglancer`;
   return (
     <span
       role="button"
-      className={`explore-ngl-pill${disabled ? " disabled" : ""}`}
+      className={`explore-ngl-pill${disabled ? " disabled" : ""}${accent === "warm" ? " is-warm" : ""}`}
       aria-disabled={disabled}
       title={title}
       onClick={(e) => {
@@ -135,8 +154,8 @@ import { ChannelPicker } from "./ChannelPicker";
 import { CollapsibleSection } from "./CollapsibleSection";
 import { DecorationPicker } from "./DecorationPicker";
 import { EmbeddingPicker } from "./EmbeddingPicker";
-import { ExplorerShareMenu } from "./ExplorerShareMenu";
 import { FeatureTablePicker } from "./FeatureTablePicker";
+import { useExplorerSelection } from "../../tours/explorerSelection";
 import { useSessionRecipe } from "../../tours/sessionRecipe";
 import { consumePendingApplyExtras } from "../../tours/useApplyRecipe";
 import {
@@ -200,7 +219,7 @@ export function FeatureExplorer() {
   // the user opted out of URL persistence here. The rest of the view
   // config — ?cells, ?dec, ?ft, ?emb, channel bindings — stays in
   // URL state for shareability.
-  const [selectionBag, setSelectionBag] = useState<string[]>([]);
+  const [selectionBag, setSelectionBag] = useExplorerSelection();
   // Per-(ds, kind) session-recipe save/restore for /explore. Mirrors
   // /neuron's call. The Selection bag itself is NOT in session state
   // — only URL-shaped overlay. Cross-session restore of a curated
@@ -315,6 +334,10 @@ export function FeatureExplorer() {
   const [colorMaxRaw] = useUrlParam("color_max");
   const [colormapId] = useUrlParam("cmap");
   const [colorCenterRaw] = useUrlParam("color_center");
+  // Uniform fill color for the explicit no-color state (?color=__none__).
+  // Ignored when a real color column is bound or when color falls back
+  // to the manifest default.
+  const [colorValue] = useUrlParam("cv");
   // Drawer state for the cell-list table. Closed by default so the
   // scatter owns the full canvas on first arrival; user clicks the
   // drawer handle to pull up the table.
@@ -462,12 +485,27 @@ export function FeatureExplorer() {
   // Resolve the channel bindings that actually go to /scatter. The
   // synthetic ``__distance`` channel is computed client-side from the
   // active distance probe, so it never reaches the server — strip it
-  // and let UniverseScatter inject its own color/size block. No other
-  // resolution happens here: a missing color binding means "no color"
-  // (every dot in the base hue), not "fall back to some manifest
-  // default."
+  // and let UniverseScatter inject its own color/size block.
+  //
+  // Color resolution has three states:
+  //   - ?color=__none__   → explicit user "no color" → uniform user-
+  //                         picked baseColor (?cv=). Doesn't fall
+  //                         back to default.
+  //   - ?color=<column>   → that column.
+  //   - (key absent)      → fall back to embedding manifest's
+  //                         `default_color_by` so the YAML default
+  //                         actually paints the scatter on first view.
+  // The picker's empty option reads "default (<col>)" so the user
+  // knows the implicit fallback; a separate "(no color)" option
+  // explicitly writes __none__ for users who want to opt out.
+  const defaultColorBy =
+    currentEmb?.default_color_by && ft
+      ? `${ft}.${currentEmb.default_color_by}`
+      : null;
   const effectiveColorBinding =
-    colorBinding === "__distance" ? null : colorBinding;
+    colorBinding === "__distance" || colorBinding === "__none__"
+      ? null
+      : (colorBinding ?? defaultColorBy);
   const effectiveSizeBinding =
     sizeBinding === "__distance" ? null : sizeBinding;
 
@@ -672,8 +710,23 @@ export function FeatureExplorer() {
     if (matVersion === "live" || !ds) return;
     const roots = resolveRoots(cellIds);
     if (roots.length === 0) return;
-    const sampled = randomSubsample(roots, NGL_LINK_CAP);
-    await ngl.open({ kind: "segments", ds, matVersion, rootIds: sampled });
+    // Two-stage cap: load up to NGL_LOADED_CAP into the NG state, of
+    // which NGL_VISIBLE_CAP render on arrival. The user gets all the
+    // ids in one click (toggle the rest inside NG) without the viewer
+    // choking on geometry. When the visible cap covers the loaded set,
+    // omit visibleRootIds so everything renders by default.
+    const loaded = randomSubsample(roots, NGL_LOADED_CAP);
+    const visible =
+      loaded.length > NGL_VISIBLE_CAP
+        ? randomSubsample(loaded, NGL_VISIBLE_CAP)
+        : undefined;
+    await ngl.open({
+      kind: "segments",
+      ds,
+      matVersion,
+      rootIds: loaded,
+      visibleRootIds: visible,
+    });
   };
   // Per-row NGL action — opens a single cell as a segment. Wraps the
   // bulk handler with a one-id list; reuses the same mutation +
@@ -789,9 +842,6 @@ export function FeatureExplorer() {
       style={{ gridTemplateColumns: `${railWidth}px 6px 1fr` }}
     >
       <aside className="explore-rail">
-        {ds && (
-          <ExplorerShareMenu ds={ds} selection={selectionBag} />
-        )}
         <CollapsibleSection
           title="Configuration"
           enabled
@@ -799,16 +849,16 @@ export function FeatureExplorer() {
           badge={ds ?? undefined}
           summary={
             <>
-              <code>{currentFt?.title ?? ft ?? "(no feature table)"}</code>
-              {" · "}
-              <code>{currentEmb?.title ?? emb ?? "(no embedding)"}</code>
-              {decorationTables.length > 0 && (
-                <>
-                  {" · "}
-                  {decorationTables.length} decoration
-                  {decorationTables.length === 1 ? "" : "s"}
-                </>
-              )}
+              <div>
+                <code>{currentFt?.title ?? ft ?? "(no feature table)"}</code>
+                {" · "}
+                <code>{currentEmb?.title ?? emb ?? "(no embedding)"}</code>
+              </div>
+              {decorationTables.map((name) => (
+                <div key={name}>
+                  <code>+ {name}</code>
+                </div>
+              ))}
             </>
           }
         >
@@ -907,7 +957,25 @@ export function FeatureExplorer() {
           colorCenter={colorCenter}
           defaultXLabel={currentEmb?.axes?.[0]}
           defaultYLabel={currentEmb?.axes?.[1]}
-          defaultColorLabel={null}
+          defaultColorLabel={currentEmb?.default_color_by ?? null}
+          colorValue={colorValue}
+          onRestoreDefaults={() =>
+            setUrl({
+              x: null,
+              y: null,
+              color: null,
+              cv: null,
+              size: null,
+              size_min: null,
+              size_max: null,
+              size_data_min: null,
+              size_data_max: null,
+              color_min: null,
+              color_max: null,
+              cmap: null,
+              color_center: null,
+            })
+          }
           onChange={(next) =>
             setUrl({
               ...(next.x !== undefined ? { x: next.x } : {}),
@@ -939,6 +1007,7 @@ export function FeatureExplorer() {
                       next.colorCenter === null ? null : String(next.colorCenter),
                   }
                 : {}),
+              ...(next.colorValue !== undefined ? { cv: next.colorValue } : {}),
             })
           }
         />
@@ -1001,18 +1070,15 @@ export function FeatureExplorer() {
         {ds && ft && (
           <CollapsibleSection
             title="Grow selection"
-            // Enabled when there's an active bag or a sticky probe.
-            // Only Compute needs a populated bag; inspecting the
-            // result of a prior round works either way.
-            enabled={selectionBag.length > 0 || distanceProbe != null}
-            disabledHint="Select cells first (lasso, row checkboxes, or Cell ID Search)"
-            badge={
-              selectionBag.length > 0
-                ? `${selectionBag.length.toLocaleString()} seed${
-                    selectionBag.length === 1 ? "" : "s"
-                  }`
-                : undefined
-            }
+            // Always enabled — the user can tune options (space, K, PCA
+            // variance, feature checklist) without having a selection
+            // yet. Only "Compute distances" needs a populated bag, and
+            // that button gates itself via `computeDisabled` inside
+            // GrowSelectionPanel.
+            enabled
+            badge={`${selectionBag.length.toLocaleString()} seed${
+              selectionBag.length === 1 ? "" : "s"
+            }`}
           >
             <GrowSelectionPanel
               ds={ds}
@@ -1050,6 +1116,7 @@ export function FeatureExplorer() {
             y={yBinding}
             colorBy={effectiveColorBinding}
             sizeBy={effectiveSizeBinding}
+            baseColor={colorBinding === "__none__" ? colorValue : null}
             distanceColorMap={
               colorBinding === "__distance" && distanceProbe
                 ? distanceProbe.byCellId
@@ -1232,6 +1299,7 @@ export function FeatureExplorer() {
                 }
                 liveDisabled={matVersion === "live"}
                 onOpen={() => openInNgl(effectiveSelectionList)}
+                accent="warm"
               />
             </span>
             {/* Selection group — clear + save + sets. Kept together

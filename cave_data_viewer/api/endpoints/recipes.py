@@ -1,6 +1,6 @@
 """Per-user recipe storage endpoints.
 
-YAML on the wire AND on disk (matches operator recipe storage in
+YAML on the wire AND on disk (matches built-in recipe storage in
 `config/datastacks/<ds>.yaml`'s `recipes:` section). Errors are JSON via
 the standard `ApiError` machinery — uniform across the API.
 

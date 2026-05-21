@@ -23,7 +23,7 @@ classifiers = [
 dependencies = [
     # Core CAVE stack — bumped for TableManager (8.x) and the modern nglui helpers (4.x).
     "caveclient>=8.0.1,<9",
-    "nglui>=4.7.3,<5",
+    "nglui>=4.7.4,<5",
     "standard-transform>=1,<2",
     # New API backend
     "flask>=3.0,<4",

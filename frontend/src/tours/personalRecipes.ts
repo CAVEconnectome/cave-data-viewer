@@ -166,6 +166,114 @@ export function subscribe(listener: () => void): () => void {
 // Re-export the empty constant for callers that want a stable reference.
 export const EMPTY_STORE: Readonly<StoredRecipes> = EMPTY;
 
+// ---------- Soft-delete with undo window ----------------------------------
+
+/**
+ * Soft-delete model: `softRemove` performs the optimistic delete (same as
+ * `remove` — localStorage + server DELETE) AND stashes the Recipe in an
+ * in-memory pending map for `UNDO_WINDOW_MS`. While pending, the UndoToast
+ * surfaces a Restore button; clicking it calls `restorePending`, which
+ * re-`save()`s the recipe (localStorage + server PUT) and clears the
+ * timer. If the timer fires first, the entry is purged from the pending
+ * map (deletion already committed on disk; nothing else to do).
+ *
+ * The pending map is in-memory only — a tab close during the undo window
+ * loses the undo affordance, matching the Gmail "undo send" expectation:
+ * undo is best-effort within the session.
+ */
+
+/** Duration of the undo window. ~6s is the Material/Gmail convention —
+ *  long enough to read + react, short enough that the toast doesn't
+ *  linger uncomfortably. */
+export const UNDO_WINDOW_MS = 6000;
+
+export interface PendingDeletion {
+  ds: string;
+  recipe: Recipe;
+  /** ms-since-epoch when the timer fires and the toast self-dismisses.
+   *  Consumers use this to render a countdown bar. */
+  expiresAt: number;
+}
+
+const PENDING_EVENT = "cdv:pending-deletions-changed";
+
+interface PendingEntry extends PendingDeletion {
+  timer: ReturnType<typeof setTimeout>;
+}
+
+const _pending: Map<string, PendingEntry> = new Map();
+
+function pendingKey(ds: string, id: string): string {
+  // U+0000 as separator — neither valid in a datastack name nor in a
+  // recipe id, so collision-free.
+  return `${ds} ${id}`;
+}
+
+function notifyPending(): void {
+  window.dispatchEvent(new CustomEvent(PENDING_EVENT));
+}
+
+/** Optimistic delete + stash for undo. No-op if the recipe doesn't
+ *  exist locally. The toast UI subscribes to `subscribePendingDeletions`
+ *  to surface a Restore button during the window. */
+export function softRemove(ds: string, id: string): void {
+  const all = readAll();
+  const list = all.byDs[ds] ?? [];
+  const target = list.find((r) => r.id === id);
+  if (!target) return;
+
+  // Cancel any prior pending for the same key. Shouldn't happen
+  // post-remove (the recipe would be gone from localStorage), but the
+  // map's timer would otherwise leak.
+  const key = pendingKey(ds, id);
+  const prev = _pending.get(key);
+  if (prev) clearTimeout(prev.timer);
+
+  // Optimistic delete via the existing path so server-sync and the
+  // change-event dispatch stay consistent with the non-undo case.
+  remove(ds, id);
+
+  const expiresAt = Date.now() + UNDO_WINDOW_MS;
+  const timer = setTimeout(() => {
+    _pending.delete(key);
+    notifyPending();
+  }, UNDO_WINDOW_MS);
+  _pending.set(key, { ds, recipe: target, expiresAt, timer });
+  notifyPending();
+}
+
+/** Restore a recipe currently in the pending-deletion map. No-op if the
+ *  timer already fired or the user clicked undo on a stale toast. */
+export function restorePending(ds: string, id: string): void {
+  const key = pendingKey(ds, id);
+  const entry = _pending.get(key);
+  if (!entry) return;
+  clearTimeout(entry.timer);
+  _pending.delete(key);
+  // Re-save through the same path. `save` is upsert-by-id so a
+  // collision with a concurrently-saved recipe of the same id (extremely
+  // unlikely — personal ids are timestamp-randomized) resolves
+  // last-write-wins, which is the desired behavior anyway.
+  save(ds, entry.recipe);
+  notifyPending();
+}
+
+/** Snapshot of the current pending stack. Returned without the internal
+ *  timer handle so callers can't accidentally clear it. */
+export function getPendingDeletions(): PendingDeletion[] {
+  return Array.from(_pending.values()).map(({ ds, recipe, expiresAt }) => ({
+    ds,
+    recipe,
+    expiresAt,
+  }));
+}
+
+/** Subscribe to pending-deletion add/restore/expire events. */
+export function subscribePendingDeletions(listener: () => void): () => void {
+  window.addEventListener(PENDING_EVENT, listener);
+  return () => window.removeEventListener(PENDING_EVENT, listener);
+}
+
 // ---------- Server sync ---------------------------------------------------
 
 type ServerMode = "pending" | "enabled" | "disabled";

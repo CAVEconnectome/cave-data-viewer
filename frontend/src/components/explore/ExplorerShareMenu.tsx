@@ -4,43 +4,46 @@
  * but routes through the explorer adapter and — crucially — captures
  * the Selection bag at save time.
  *
- * Mount this inside FeatureExplorer (not the global Sidebar) because
- * the Selection bag lives in FeatureExplorer's component state and
- * isn't reachable from the Sidebar without lifting it into a global
- * store. The global Sidebar's ShareMenu detects /explore via
- * useApplicableRecipeKinds and renders nothing, so this is the sole
- * share affordance on the route.
+ * Mounted in the global Sidebar (not the explorer rail) for layout
+ * parity with /neuron's ShareMenu. The Selection bag is read from the
+ * `explorerSelection` module-level singleton, which FeatureExplorer
+ * writes to via `useExplorerSelection`. Gated by route via
+ * `useApplicableRecipeKinds` — renders nothing outside /explore.
  */
-import { useRef, useState } from "react";
+import { useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import { explorerAdapter } from "../../tours/adapters/explorerAdapter";
+import { useExplorerSelection } from "../../tours/explorerSelection";
 import { newPersonalId, save as savePersonal } from "../../tours/personalRecipes";
-import { parseRecipesFromYaml } from "../../tours/recipeFromYaml";
 import {
   buildQueryLink,
   buildRecipeLink,
   EXPLORER_RECIPE_STRIP_KEYS,
   EXPLORER_RECIPE_STRIP_PREFIXES,
 } from "../../tours/shareLinks";
+import { useApplicableRecipeKinds } from "../../tours/useApplicableRecipeKinds";
+import { YamlActionsRow } from "../YamlActionsRow";
 
 interface Props {
   ds: string;
-  /** The current Selection bag (cell_ids). Captured into the saved
-   *  recipe verbatim — recipes preserve user intent, NOT the
-   *  filter-scope intersection. See [[feature-explorer-scope-vs-selection-model]]. */
-  selection: string[];
 }
 
-export function ExplorerShareMenu({ ds, selection }: Props) {
+export function ExplorerShareMenu({ ds }: Props) {
   const [searchParams] = useSearchParams();
   const [showSaveForm, setShowSaveForm] = useState(false);
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [copied, setCopied] = useState<"query" | "recipe" | null>(null);
   const [savedFlash, setSavedFlash] = useState(false);
-  const [uploadMessage, setUploadMessage] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const applicableKinds = useApplicableRecipeKinds();
+  const [selection] = useExplorerSelection();
+
+  // Explorer-only. Mirrors ShareMenu's route gate: ShareMenu shows on
+  // /neuron, ExplorerShareMenu shows on /explore, neither shows on /.
+  if (!applicableKinds.has("explorer") || applicableKinds.size !== 1) {
+    return null;
+  }
 
   // "Has content" considers both URL-shape state (scatter bindings,
   // growth params, decorations, cells filter) and the Selection bag.
@@ -113,30 +116,6 @@ export function ExplorerShareMenu({ ds, selection }: Props) {
     URL.revokeObjectURL(url);
   };
 
-  const onUploadClick = () => fileInputRef.current?.click();
-
-  const onFileChosen = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const text = await file.text();
-    const parsed = parseRecipesFromYaml(text);
-    for (const recipe of parsed.recipes) savePersonal(ds, recipe);
-    e.target.value = "";
-
-    if (parsed.recipes.length > 0) {
-      setUploadMessage({
-        kind: "ok",
-        text: `Loaded ${parsed.recipes.length} recipe${parsed.recipes.length === 1 ? "" : "s"}.`,
-      });
-      setSavedFlash(true);
-      window.setTimeout(() => setSavedFlash(false), 1500);
-    } else {
-      const errText = parsed.errors[0] ?? "No recipes found in file.";
-      setUploadMessage({ kind: "err", text: errText });
-    }
-    window.setTimeout(() => setUploadMessage(null), 4000);
-  };
-
   const selectionHint =
     selection.length > 0
       ? ` (incl. ${selection.length.toLocaleString()} selected cell${
@@ -158,6 +137,7 @@ export function ExplorerShareMenu({ ds, selection }: Props) {
           type="button"
           onClick={() => setShowSaveForm((s) => !s)}
           disabled={!hasContent}
+          className={savedFlash ? "is-saved-flash" : undefined}
           title={
             hasContent
               ? `Save the current explorer view${selectionHint}`
@@ -197,34 +177,20 @@ export function ExplorerShareMenu({ ds, selection }: Props) {
             <button type="submit" disabled={!title.trim()}>Save</button>
           </form>
         )}
-        <button
-          type="button"
-          onClick={onDownload}
-          disabled={!hasContent}
-          title={
+        <YamlActionsRow
+          ds={ds}
+          onDownload={onDownload}
+          downloadDisabled={!hasContent}
+          downloadTitle={
             hasContent
               ? "Download the current explorer view as YAML"
               : "Configure the view before downloading"
           }
-        >
-          Download YAML
-        </button>
-        <button type="button" onClick={onUploadClick}>Upload YAML</button>
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept=".yaml,.yml,application/x-yaml,text/yaml"
-          onChange={onFileChosen}
-          style={{ display: "none" }}
+          onUploaded={() => {
+            setSavedFlash(true);
+            window.setTimeout(() => setSavedFlash(false), 1500);
+          }}
         />
-        {uploadMessage && (
-          <p
-            className={uploadMessage.kind === "err" ? "error" : "muted"}
-            style={{ margin: "0.25rem 0 0", fontSize: "0.85rem" }}
-          >
-            {uploadMessage.text}
-          </p>
-        )}
       </div>
     </details>
   );

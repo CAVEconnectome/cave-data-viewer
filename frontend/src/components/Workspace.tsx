@@ -5,6 +5,7 @@ import { migrateStorageKey } from "../hooks/storageMigration";
 import { useSetUrlParams, useUrlParam } from "../hooks/useUrlState";
 import { readViewSnapshot, useViewSnapshot } from "../hooks/useViewSnapshot";
 import { Sidebar } from "./Sidebar";
+import { UndoToast } from "./UndoToast";
 
 const SIDEBAR_COLLAPSED_KEY = "cdv:v1:sidebar_collapsed";
 
@@ -77,6 +78,7 @@ export function Workspace() {
         {from && <Breadcrumb from={from} ds={ds} mv={mv} />}
         <Outlet />
       </main>
+      <UndoToast />
     </div>
   );
 }

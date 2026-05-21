@@ -14,13 +14,14 @@ import { applyTourConfigToParams } from "../tours/urlMint";
 import { useApplyRecipe } from "../tours/useApplyRecipe";
 import {
   listForDsAndKind,
-  remove as removePersonalRecipe,
+  softRemove as softRemovePersonalRecipe,
   subscribe as subscribePersonalRecipes,
 } from "../tours/personalRecipes";
 import { urlHasRecipeContent } from "../tours/recipeFromUrl";
 import { adapterForRecipe } from "../tours/adapters/registry";
 import { useApplicableRecipeKinds } from "../tours/useApplicableRecipeKinds";
 import { saveSessionRecipe } from "../tours/sessionRecipe";
+import { ExplorerShareMenu } from "./explore/ExplorerShareMenu";
 import { ShareMenu } from "./ShareMenu";
 
 interface SidebarProps {
@@ -171,9 +172,9 @@ export function Sidebar({ navigateToView, collapsed, onToggleCollapsed }: Sideba
           <nav className="nav">
             <button
               onClick={() => navigate(`/${ds ? `?ds=${ds}${mv ? `&mv=${mv}` : ""}` : ""}`)}
-              title="Operator-curated examples and recipes"
+              title="Curated recipes for this datastack"
             >
-              Examples and Recipes
+              Recipes
             </button>
             <button
               onClick={() => navigateToView("neuron")}
@@ -198,6 +199,7 @@ export function Sidebar({ navigateToView, collapsed, onToggleCollapsed }: Sideba
             </button>
           </nav>
           {ds && <ShareMenu ds={ds} />}
+          {ds && <ExplorerShareMenu ds={ds} />}
           {ds && <SidebarResetView ds={ds} />}
           {ds && <SidebarRecipes ds={ds} mv={mv} />}
         </>
@@ -212,7 +214,7 @@ function ExamplesLink() {
   const to = ds ? `/examples?ds=${encodeURIComponent(ds)}` : "/examples";
   return (
     <div className="sidebar-examples-link">
-      <Link to={to}>Examples →</Link>
+      <Link to={to}>Quickstart Examples →</Link>
     </div>
   );
 }
@@ -247,7 +249,7 @@ function NeutralNeuroglancerLink({ ds, mv }: NeutralNeuroglancerLinkProps) {
         }
         disabled={ngl.isPending}
       >
-        {ngl.isPending ? "opening…" : "Open in Neuroglancer ↗"}
+        {ngl.isPending ? "opening…" : "Open Datastack in Neuroglancer ↗"}
       </button>
       {ngl.isError && ngl.error && (
         <span className="error">{ngl.error.message}</span>
@@ -361,7 +363,7 @@ function SidebarRecipes({ ds, mv }: { ds: string; mv: string | null }) {
   // the inapplicable ones keeps the rail focused on actions the user
   // can take from where they are.
   const personalRecipes: Recipe[] = listForDsAndKind(ds, applicableKinds);
-  const operatorRecipes: Recipe[] = (tours.data?.recipes ?? []).filter((r) =>
+  const builtinRecipes: Recipe[] = (tours.data?.recipes ?? []).filter((r) =>
     applicableKinds.has(r.kind),
   );
 
@@ -369,7 +371,7 @@ function SidebarRecipes({ ds, mv }: { ds: string; mv: string | null }) {
   // state is tracked separately so the user sees "loading…" rather than
   // a missing section while tours.data is in flight.
   const toursLoading = tours.isLoading;
-  if (personalRecipes.length === 0 && operatorRecipes.length === 0 && !toursLoading) {
+  if (personalRecipes.length === 0 && builtinRecipes.length === 0 && !toursLoading) {
     return null;
   }
 
@@ -386,9 +388,9 @@ function SidebarRecipes({ ds, mv }: { ds: string; mv: string | null }) {
   // future kind-specific routing decisions.
   void mv;
   void navigate;
-  const total = personalRecipes.length + operatorRecipes.length;
+  const total = personalRecipes.length + builtinRecipes.length;
   const summaryText =
-    toursLoading && operatorRecipes.length === 0
+    toursLoading && builtinRecipes.length === 0
       ? `Recipes (${personalRecipes.length}+…)`
       : `Recipes (${total})`;
 
@@ -413,10 +415,10 @@ function SidebarRecipes({ ds, mv }: { ds: string; mv: string | null }) {
         </div>
       ) : null}
       <div className="recipes-group">
-        <h4 className="sidebar-recipes-group">Operator recipes</h4>
-        {operatorRecipes.length > 0 ? (
+        <h4 className="sidebar-recipes-group">Built-in recipes</h4>
+        {builtinRecipes.length > 0 ? (
           <ul>
-            {operatorRecipes.map((r) => (
+            {builtinRecipes.map((r) => (
               <li key={r.id}>
                 <button
                   type="button"
@@ -439,7 +441,7 @@ function SidebarRecipes({ ds, mv }: { ds: string; mv: string | null }) {
           <p className="muted">Loading…</p>
         ) : (
           <p className="muted sidebar-recipes-empty">
-            No operator recipes for this datastack. Visit{" "}
+            No built-in recipes for this datastack. Visit{" "}
             <button
               type="button"
               className="link-button"
@@ -447,7 +449,7 @@ function SidebarRecipes({ ds, mv }: { ds: string; mv: string | null }) {
                 navigate(`/${ds ? `?ds=${ds}${mv ? `&mv=${mv}` : ""}` : ""}`)
               }
             >
-              Examples and Recipes
+              Recipes
             </button>{" "}
             to load one from a YAML file.
           </p>
@@ -489,8 +491,7 @@ function PersonalRecipeRow({
     URL.revokeObjectURL(url);
   };
   const onDelete = () => {
-    if (!window.confirm(`Delete personal recipe "${recipe.title}"?`)) return;
-    removePersonalRecipe(ds, recipe.id);
+    softRemovePersonalRecipe(ds, recipe.id);
   };
   return (
     <li className="sidebar-recipes-personal">

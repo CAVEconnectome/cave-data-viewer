@@ -10,7 +10,7 @@ This guide walks you through everything needed to add a new CAVE datastack to th
 │      │   (CDV_FEATURE_TABLES_BASE_URI)/feature_tables/<ds>/         │
 │      │       <id>.yaml + <id>.parquet  embedding catalog (2)        │
 │      └── (no inline tours; per-file YAMLs below)                    │
-│  config/recipes/<ds>/<id>.yaml         operator recipes (3)         │
+│  config/recipes/<ds>/<id>.yaml         built-in recipes (3)         │
 │  config/examples/<ds>/<id>.yaml        operator examples (4)        │
 └─────────────────────────────────────────────────────────────────────┘
 ```
@@ -233,7 +233,7 @@ Each per-FT YAML belongs to one datastack — the one whose subdir it lives in. 
 **Directory:** `config/recipes/<datastack-name>/<recipe-id>.yaml` (one file per recipe)
 **Schema:** loaded by `services/recipe_registry.py`; same body shape that personal recipes use in storage.
 
-Operator recipes are configuration overlays — applied onto the user's currently-loaded cell to give it a specific decoration / plot / filter profile. Unlike examples, they don't pin a materialization version or a root id.
+Built-in recipes are configuration overlays — applied onto the user's currently-loaded cell to give it a specific decoration / plot / filter profile. Unlike examples, they don't pin a materialization version or a root id.
 
 ### Connectivity recipe
 
@@ -294,7 +294,7 @@ scope:
 
 ### Explorer recipe
 
-Explorer recipes use a nested `explorer:` block instead of the top-level connectivity fields. Personal explorer recipes use this shape; operator-published explorer recipes are rare (most reusable explorer workflows are better as examples).
+Explorer recipes use a nested `explorer:` block instead of the top-level connectivity fields. Personal explorer recipes use this shape; built-in explorer recipes are rare (most reusable explorer workflows are better as examples).
 
 ```yaml
 version: 1
@@ -325,7 +325,7 @@ scope:
 - `id` must match `^[a-z0-9][a-z0-9_-]{2,63}$` AND equal the filename basename.
 - `kind` must be `connectivity` or `explorer`.
 - `version` must be in `SUPPORTED_SCHEMA_VERSIONS` (currently `{1}`).
-- An operator recipe must NOT carry a `pinned:` block — `pinned:` is the example marker.
+- A built-in recipe must NOT carry a `pinned:` block — `pinned:` is the example marker.
 
 A file that fails any of these is logged as a warning at boot and skipped; the rest of the directory loads normally.
 
@@ -421,7 +421,7 @@ explorer:
 
 ### Validation rules (registry-side)
 
-In addition to the operator-recipe rules above:
+In addition to the built-in-recipe rules above:
 
 - `title` and `summary` are required non-empty strings (bounded 200 / 500 chars).
 - `full_text` is optional (≤ 5000 chars).

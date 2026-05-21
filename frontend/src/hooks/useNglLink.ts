@@ -17,6 +17,12 @@ export interface NglSegmentsRequest {
   ds: string;
   matVersion: number | "live";
   rootIds: string[];
+  /** Optional subset of rootIds rendered visible on arrival. Others
+   *  load into the segmentation layer's state but stay hidden — the
+   *  user toggles them on inside NG without re-fetching. Use to ship
+   *  a large set with only a sample visible so the viewer stays fast.
+   *  Omit to render every id (backward compatible). */
+  visibleRootIds?: string[];
   /** Center the viewer on this voxel coordinate (typically pulled from
    *  a row's `<prefix>_pt_position_x/y/z` triple). */
   position?: [number, number, number];
@@ -104,6 +110,7 @@ export function useNglLink(): UseNglLinkResult {
             ds: request.ds,
             matVersion: request.matVersion,
             rootIds: request.rootIds,
+            visibleRootIds: request.visibleRootIds,
             position: request.position,
             voxelResolution: request.voxelResolution,
           });

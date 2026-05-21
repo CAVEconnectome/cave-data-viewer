@@ -186,7 +186,11 @@ export function SummaryPanel({
       color: "#21908d",
     });
   }
-  if (scatter.size) {
+  // Skip the size histogram when it would duplicate the color
+  // histogram — same column bound to both channels means same
+  // distribution, twice. Color "wins" since it's first; size adds
+  // nothing visually.
+  if (scatter.size && scatter.size.column !== scatter.color?.column) {
     numericChannels.push({
       key: "size",
       column: scatter.size.column,

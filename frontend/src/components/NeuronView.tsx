@@ -239,7 +239,7 @@ export function NeuronView() {
           >
             {decorationsLabel} <span className="chevron">{decorationsOpen ? "▾" : "▸"}</span>
           </button>
-          <button type="submit">Load</button>
+          <button type="submit" className="neuron-load-btn">Load Cell</button>
           {connectivity.data && (
             <SummaryInline bundle={connectivity.data} decorationTables={decorationTables} />
           )}
