@@ -2260,6 +2260,21 @@ h1, h2, h3, h4, h5, h6 {
 
 .actions .page { color: var(--muted); margin-left: auto; font-size: 12px; }
 
+/* Show-only-selected pill. Active state uses the soft accent tint
+   (background + accent border) rather than the solid accent fill so
+   it reads as "filter applied" without screaming for attention —
+   matches the sidebar's nav-link active treatment. */
+.actions button.show-only-selected.active {
+  background: var(--accent-bg);
+  color: var(--accent-strong);
+  border-color: var(--accent);
+}
+
+.actions button.show-only-selected.active:hover {
+  background: var(--accent-bg);
+  border-color: var(--accent-strong);
+}
+
 /* Pagination cluster — `‹ N/M ›` lives in its own flex group with a tight
    gap so the chevrons don't end up at opposite ends of the action bar.
    Without this, the inner `.page` would inherit the action bar's
@@ -5262,13 +5277,14 @@ details.tour-section > summary > h4 {
 .summary-row-count {
   font-family: var(--font-mono, ui-monospace, monospace);
   font-size: 10px;
-  color: var(--muted, #6b7280);
+  color: var(--accent, #2a3f6b);
   text-align: right;
   white-space: nowrap;
 }
 .summary-row-count-of {
   margin: 0 2px;
-  color: rgba(0, 0, 0, 0.3);
+  color: var(--accent, #2a3f6b);
+  opacity: 0.5;
 }
 .summary-panel-numeric {
   font-size: 11px;
@@ -5576,10 +5592,11 @@ details.tour-section > summary > h4 {
    inline-flex strips whitespace between flex items, which butted
    the suffix span up against the preceding word ("FilterScope"
    instead of "Filter Scope"). */
-/* Shared pill base for tertiary action pills. The Scope trigger
-   (.cell-filter-menu-trigger) was previously in this list but now uses
-   its own larger-button styling — see the .cell-filter-menu rules
-   earlier in the file. */
+/* Shared pill base for the drawer-toolbar action pills. Size + font
+   match the Scope trigger (.cell-filter-menu-trigger) exactly — every
+   button in the data-drawer header reads as one uniform size. The
+   taller hit target also keeps clicks off the surrounding drawer
+   handle, which toggles the drawer open/closed. */
 .saved-sets-menu-trigger,
 .explore-ngl-pill,
 .explore-clear-pill,
@@ -5588,9 +5605,9 @@ details.tour-section > summary > h4 {
   vertical-align: middle;
   box-sizing: border-box;
   font-family: inherit;
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.2;
-  padding: 3px 10px;
+  padding: 5px 14px;
   border-radius: 4px;
   cursor: pointer;
   white-space: nowrap;
@@ -5935,5 +5952,226 @@ details.tour-section > summary > h4 {
   color: var(--accent, #2a3f6b);
   text-decoration: none;
   font-weight: 500;
+}
+
+/* Seed-view filter toggle on the explorer's cell-list PartnersTable */
+.seed-view-toggle {
+  padding: 3px 8px;
+  font-size: 12px;
+  border: 1px solid rgba(0, 0, 0, 0.15);
+  background: var(--surface, #f6f7f8);
+  border-radius: 3px;
+  cursor: pointer;
+}
+.seed-view-toggle:hover {
+  background: var(--surface-hover, #ebedef);
+}
+.seed-view-toggle.active {
+  background: var(--accent, #2a3f6b);
+  color: #fff;
+  border-color: var(--accent, #2a3f6b);
+}
+
+/* Open in Explorer cross-nav button (PartnersTable action bar, /neuron only) */
+.open-in-explorer {
+  padding: 3px 8px;
+  font-size: 12px;
+  border: 1px solid rgba(0, 0, 0, 0.15);
+  background: var(--surface, #f6f7f8);
+  cursor: pointer;
+  border-radius: 3px;
+}
+.open-in-explorer:hover:not(:disabled) {
+  background: var(--surface-hover, #ebedef);
+}
+.open-in-explorer:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.open-in-explorer-warning {
+  margin-left: 4px;
+  color: #92400e;
+  cursor: help;
+}
+
+/* Copy IDs split-button — sits in the PartnersTable action bar */
+.copy-ids-menu {
+  position: relative;
+  display: inline-flex;
+  align-items: stretch;
+}
+.copy-ids-main,
+.copy-ids-caret {
+  padding: 3px 6px;
+  font-size: 12px;
+  border: 1px solid rgba(0, 0, 0, 0.15);
+  background: var(--surface, #f6f7f8);
+  cursor: pointer;
+  border-radius: 3px;
+}
+.copy-ids-main { border-right-width: 0; border-radius: 3px 0 0 3px; }
+.copy-ids-caret { border-radius: 0 3px 3px 0; padding: 3px 4px; }
+.copy-ids-main:hover:not(:disabled),
+.copy-ids-caret:hover {
+  background: var(--surface-hover, #ebedef);
+}
+.copy-ids-main:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.copy-ids-popover {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 2px;
+  z-index: 30;
+  background: var(--bg, #fff);
+  border: 1px solid rgba(0, 0, 0, 0.15);
+  border-radius: 4px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.1);
+  min-width: 220px;
+  padding: 6px 0;
+}
+.copy-ids-scope {
+  padding: 4px 10px 6px 10px;
+  font-size: 11px;
+  color: var(--muted, #6b7280);
+  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+}
+.copy-ids-option {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 5px 10px;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  font-size: 12px;
+}
+.copy-ids-option:hover:not(:disabled) {
+  background: rgba(0, 0, 0, 0.04);
+}
+.copy-ids-option.active {
+  background: rgba(0, 0, 0, 0.04);
+  font-weight: 500;
+}
+.copy-ids-option:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.copy-ids-option-label {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 12px;
+}
+.copy-ids-option-hint {
+  font-size: 11px;
+  color: var(--muted, #6b7280);
+  margin-top: 1px;
+}
+
+/* Connectivity Seed widget (left rail, explorer) */
+.seed-widget { display: flex; flex-direction: column; gap: 8px; }
+.seed-widget-form {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.seed-widget-form input[type="text"] {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 6px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 12px;
+  border: 1px solid rgba(0, 0, 0, 0.15);
+  border-radius: 3px;
+  background: var(--bg, #fff);
+}
+.seed-widget-form button {
+  padding: 4px 8px;
+  font-size: 12px;
+  border-radius: 3px;
+  border: 1px solid rgba(0, 0, 0, 0.15);
+  background: var(--surface, #f6f7f8);
+  cursor: pointer;
+}
+.seed-widget-form button:hover:not(:disabled) {
+  background: var(--surface-hover, #ebedef);
+}
+.seed-widget-form button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.seed-widget-error {
+  color: #b91c1c;
+  font-size: 12px;
+}
+.seed-widget-warning {
+  color: #92400e;
+  font-size: 12px;
+}
+.seed-widget-active {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 8px;
+  background: rgba(0, 0, 0, 0.03);
+  border-radius: 3px;
+  font-size: 12px;
+}
+.seed-widget-label {
+  color: var(--muted, #6b7280);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.seed-widget-sub {
+  color: var(--muted, #6b7280);
+  font-size: 11px;
+}
+.seed-widget-hint {
+  color: var(--muted, #6b7280);
+  font-size: 11px;
+  line-height: 1.4;
+}
+.seed-widget-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.seed-widget-toggle input {
+  margin: 0;
+}
+.seed-widget-status {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  line-height: 1.4;
+}
+.seed-widget-status.loading {
+  color: var(--muted, #6b7280);
+}
+.seed-widget-status.ready {
+  color: var(--accent, #2a3f6b);
+  font-weight: 500;
+}
+.seed-widget-status.error {
+  color: #92400e;
+}
+.seed-widget-spinner {
+  width: 9px;
+  height: 9px;
+  border: 1.5px solid rgba(0, 0, 0, 0.15);
+  border-top-color: var(--accent, #2a3f6b);
+  border-radius: 50%;
+  display: inline-block;
+  animation: seed-widget-spin 0.7s linear infinite;
+  flex-shrink: 0;
+}
+@keyframes seed-widget-spin {
+  to { transform: rotate(360deg); }
 }
 .sidebar-examples-link a:hover { text-decoration: underline; }

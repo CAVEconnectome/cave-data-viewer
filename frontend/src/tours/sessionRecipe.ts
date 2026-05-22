@@ -1,22 +1,29 @@
 /**
  * Per-(datastack, kind) "current view" persistence. The URL is the source
  * of truth for an active workspace; this module mirrors the overlay
- * portion of that URL into localStorage so the user's configured view
- * survives:
+ * portion of that URL into **sessionStorage** so the user's configured
+ * view survives:
  *
  *   - Cross-navigation that drops overlay — most notably, table-row
  *     clicks into /neuron land at `?ds=&mv=&root=` with no overlay
  *     params. Without this, the user's decorations and plots are lost
  *     on every cross-nav.
- *   - Cross-session reloads — closing the browser and reopening picks
- *     up where the user left off.
+ *   - In-tab reloads — refreshing the page keeps the configured view.
  *   - Per-datastack switches — each datastack carries its own baseline,
  *     because recipes reference datastack-bound table names.
  *
- * Now per-kind too: the connectivity view (/neuron) and the explorer
- * view (/explore) can each have an independent baseline for the same
- * datastack. A user who narrows scope on /explore, hops to /neuron to
- * add decorations, then comes back to /explore expects to find the
+ * Storage is **sessionStorage**, not localStorage: persistence is scoped
+ * to the browser tab. A NEW tab starts fresh — it does not inherit the
+ * previous tab's (or window's) configured view. This is deliberate:
+ * localStorage made every new tab resurrect the last session's overlay,
+ * which users found too sticky. sessionStorage keeps the within-tab
+ * cross-nav restore that's genuinely useful while letting a new tab be
+ * a clean slate.
+ *
+ * Per-kind: the connectivity view (/neuron) and the explorer view
+ * (/explore) each have an independent baseline for the same datastack.
+ * A user who narrows scope on /explore, hops to /neuron to add
+ * decorations, then comes back to /explore (same tab) finds the
  * explorer state intact. Per-(ds, kind) keys make that work cleanly.
  *
  * Storage shape (per-(ds, kind) key, JSON-encoded):
@@ -24,14 +31,7 @@
  *     cdv:v1:session_recipe:<datastack>:<kind>  →  { version: 1, recipe: Recipe | null }
  *
  * `recipe: null` is an explicit "user cleared everything" signal —
- * distinct from "no entry yet". Per-key shape (rather than a single
- * byDsByKind map) keeps each save atomic and avoids read-merge-write
- * contention with other tabs.
- *
- * Legacy keys: items at the pre-discriminator key
- * `cdv:v1:session_recipe:<ds>` are read once at module load and
- * migrated to `:<ds>:connectivity`. After migration the legacy key is
- * removed.
+ * distinct from "no entry yet". Per-key shape keeps each save atomic.
  */
 import { useEffect, useRef } from "react";
 import { useSearchParams } from "react-router-dom";
@@ -49,39 +49,30 @@ function storageKey(ds: string, kind: RecipeKind): string {
   return `${KEY_PREFIX}${ds}:${kind}`;
 }
 
-// One-shot migration of legacy unkinded keys into their connectivity
-// equivalents. Runs at module load (idempotent — only fires when the
-// legacy key still exists). Future-kind keys aren't reachable through
-// the legacy path, so the migration is safe to always target
-// `:connectivity`.
-function migrateLegacyKeys(): void {
+// One-shot housekeeping. Session recipes used to live in localStorage,
+// which made every new tab resurrect the previous session's overlay.
+// They now live in sessionStorage (per-tab). Sweep any dead
+// `cdv:v1:session_recipe:*` entries — current-shape and the older
+// pre-discriminator `:<ds>` shape alike — out of localStorage so they
+// don't linger. Not migrated into sessionStorage: carrying the old
+// blob forward would defeat the "new tab is fresh" intent. Idempotent.
+function purgeStaleLocalStorage(): void {
   if (typeof localStorage === "undefined") return;
-  const legacy: { key: string; ds: string }[] = [];
+  const dead: string[] = [];
   for (let i = 0; i < localStorage.length; i++) {
     const k = localStorage.key(i);
-    if (!k || !k.startsWith(KEY_PREFIX)) continue;
-    const tail = k.slice(KEY_PREFIX.length);
-    // Legacy shape has exactly one segment (no second `:<kind>`).
-    if (!tail.includes(":")) legacy.push({ key: k, ds: tail });
+    if (k && k.startsWith(KEY_PREFIX)) dead.push(k);
   }
-  for (const { key, ds } of legacy) {
+  for (const k of dead) {
     try {
-      const raw = localStorage.getItem(key);
-      if (raw) {
-        localStorage.setItem(storageKey(ds, "connectivity"), raw);
-      }
+      localStorage.removeItem(k);
     } catch {
-      // ignore — best-effort migration
-    }
-    try {
-      localStorage.removeItem(key);
-    } catch {
-      // ignore
+      // ignore — best-effort cleanup
     }
   }
 }
 
-migrateLegacyKeys();
+purgeStaleLocalStorage();
 
 /**
  * Read the saved session recipe for a (datastack, kind). Null when
@@ -92,7 +83,7 @@ migrateLegacyKeys();
 export function loadSessionRecipe(ds: string, kind: RecipeKind): Recipe | null {
   if (!ds) return null;
   try {
-    const raw = localStorage.getItem(storageKey(ds, kind));
+    const raw = sessionStorage.getItem(storageKey(ds, kind));
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Partial<StoredEntry>;
     if (
@@ -129,7 +120,7 @@ export function saveSessionRecipe(
   if (!ds) return;
   try {
     const entry: StoredEntry = { version: 1, recipe };
-    localStorage.setItem(storageKey(ds, kind), JSON.stringify(entry));
+    sessionStorage.setItem(storageKey(ds, kind), JSON.stringify(entry));
   } catch {
     // Storage failure is non-fatal — the URL is still authoritative
     // for the current view; only cross-navigation persistence degrades.

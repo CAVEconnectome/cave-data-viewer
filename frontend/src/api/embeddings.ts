@@ -8,7 +8,12 @@
 // covers plotting and a new `/feature_tables/<ft>/rows` endpoint will
 // cover the table.
 
-import { useMutation, useQuery, type QueryKey } from "@tanstack/react-query";
+import {
+  keepPreviousData,
+  useMutation,
+  useQuery,
+  type QueryKey,
+} from "@tanstack/react-query";
 import { apiFetch } from "./client";
 import type {
   ColumnHistogramResponse,
@@ -42,6 +47,8 @@ const PATHS = {
     `/api/v1/datastacks/${ds}/feature_tables/${ftId}/resolve_roots`,
   findCells: (ds: string, ftId: string) =>
     `/api/v1/datastacks/${ds}/feature_tables/${ftId}/find_cells`,
+  seedSummary: (ds: string, ftId: string) =>
+    `/api/v1/datastacks/${ds}/feature_tables/${ftId}/seed_summary`,
 };
 
 // ---- /embeddings (catalog) -------------------------------------------------
@@ -82,11 +89,28 @@ export interface EmbeddingScatterArgs {
   /** mat_version — required when any channel references a decoration
    *  column (drives the cell_id → root_id resolver). */
   matVersion?: number | "live" | null;
+  /** Connectivity seed root_id (string; int64-safe). When set and any
+   *  channel references a `seed_*` column, the server joins per-cell
+   *  seed-derived columns onto the universe frame. */
+  seedRootId?: string | null;
 }
 
 /** Universe payload for the scatter component. Parquet-pinned + cached
  *  immutably; channel bindings cut a new cache entry per binding set. */
 export function useEmbeddingScatter(args: EmbeddingScatterArgs | null) {
+  // The seed only changes the /scatter response when a channel actually
+  // references a `seed_*` column — the backend joins seed data only in
+  // that case. So fold the seed into the cache key (and send the param)
+  // ONLY when it matters. Otherwise setting / clearing the seed would
+  // pointlessly invalidate the cache and force a "Loading universe
+  // scatter…" reload of an identical picture.
+  const seedAffectsScatter =
+    !!args &&
+    !!args.seedRootId &&
+    [args.x, args.y, args.colorBy, args.sizeBy].some(
+      (c) => typeof c === "string" && c.startsWith("seed_"),
+    );
+  const effectiveSeed = seedAffectsScatter ? args!.seedRootId! : "";
   return useQuery<EmbeddingScatterResponse>({
     queryKey: args
       ? [
@@ -100,6 +124,7 @@ export function useEmbeddingScatter(args: EmbeddingScatterArgs | null) {
           args.sizeBy ?? "",
           (args.decorationTables ?? []).join(","),
           args.matVersion ?? "",
+          effectiveSeed,
         ]
       : ["embedding_scatter", "disabled"],
     queryFn: () =>
@@ -120,6 +145,7 @@ export function useEmbeddingScatter(args: EmbeddingScatterArgs | null) {
                 : args!.matVersion === null || args!.matVersion === undefined
                   ? undefined
                   : String(args!.matVersion),
+            seed: effectiveSeed || undefined,
           },
         },
       ),
@@ -127,6 +153,11 @@ export function useEmbeddingScatter(args: EmbeddingScatterArgs | null) {
     // Parquet content is pinned by URI; channel projections derived
     // from it are pinned by params; once fetched, no need to refetch.
     staleTime: Infinity,
+    // Keep the previous scatter on screen while a new channel / axis /
+    // seed binding fetches, instead of flashing to the "Loading…"
+    // placeholder. The stale colors show briefly until the new data
+    // lands — a smoother channel-switch than a hard reload.
+    placeholderData: keepPreviousData,
   });
 }
 
@@ -143,6 +174,12 @@ export interface CellListArgs {
    *  empty means no lasso constraint. */
   cellIds?: string[] | null;
   limit?: number;
+  /** Connectivity seed root_id — when set, the response includes a
+   *  ``seed`` column group (`seed_is_partner`, `seed_partner_dir`,
+   *  `seed_n_syn_in/out`, etc.) projected from the seed's cached
+   *  partners bundle. Drives the "Seed view" filter toggle on the
+   *  explorer's PartnersTable. */
+  seedRootId?: string | null;
 }
 
 /** Rows + column_groups for the explorer's cell-list table. Filter
@@ -159,6 +196,7 @@ export function useCellList(args: CellListArgs | null) {
           args.cells ?? "",
           (args.cellIds ?? []).join(","),
           args.limit ?? null,
+          args.seedRootId ?? "",
         ]
       : ["feature_cells", "disabled"],
     queryFn: () =>
@@ -179,6 +217,7 @@ export function useCellList(args: CellListArgs | null) {
           cells: args!.cells || undefined,
           cell_ids: args!.cellIds?.length ? args!.cellIds : undefined,
           limit: args!.limit,
+          seed: args!.seedRootId || undefined,
         },
       }),
     enabled: !!args && !!args.ds && !!args.featureTableId,
@@ -206,6 +245,10 @@ export interface EmbeddingColumnArgs {
   /** Required when the column lives in a decoration table or in
    *  synthetic nucleus space (those go through the resolver). */
   matVersion?: number | "live" | null;
+  /** Connectivity seed root_id. Required when `column` is a `seed_*`
+   *  column — the server joins the seed projection only when this is
+   *  set. Ignored for non-seed columns. */
+  seedRootId?: string | null;
 }
 
 /** Universe-aligned values for one column. Cached with `staleTime:
@@ -223,6 +266,7 @@ export function useEmbeddingColumn(args: EmbeddingColumnArgs | null) {
           args.column,
           (args.decorationTables ?? []).join(","),
           args.matVersion ?? "",
+          args.seedRootId ?? "",
         ]
       : ["embedding_column", "disabled"],
     queryFn: () =>
@@ -239,6 +283,7 @@ export function useEmbeddingColumn(args: EmbeddingColumnArgs | null) {
                 : args!.matVersion === null || args!.matVersion === undefined
                   ? undefined
                   : String(args!.matVersion),
+            seed: args!.seedRootId || undefined,
           },
         },
       ),
@@ -284,6 +329,7 @@ export function useColumnHistogram(args: ColumnHistogramArgs | null) {
           args.matVersion ?? "",
           args.bins ?? 60,
           args.binning ?? "linear",
+          args.seedRootId ?? "",
         ]
       : ["column_histogram", "disabled"],
     queryFn: () =>
@@ -302,6 +348,7 @@ export function useColumnHistogram(args: ColumnHistogramArgs | null) {
                 : args!.matVersion === null || args!.matVersion === undefined
                   ? undefined
                   : String(args!.matVersion),
+            seed: args!.seedRootId || undefined,
           },
         },
       ),
@@ -419,5 +466,67 @@ export function useFindCellsMutation() {
           mat_version: args.matVersion,
         },
       }),
+  });
+}
+
+// ---- /seed_summary ---------------------------------------------------------
+
+export interface SeedSummaryArgs {
+  ds: string;
+  featureTableId: string;
+  matVersion: number | "live" | null;
+  seedRootId: string;
+}
+
+/** Connectivity-seed partner counts restricted to the feature table.
+ *  `n_in` / `n_out` count feature-table cells with any input / output
+ *  contact with the seed (a reciprocal cell is in both); `n_partners`
+ *  is the distinct partner count; `n_universe` is the feature table's
+ *  total cell count. */
+export interface SeedSummaryResponse {
+  n_in: number;
+  n_out: number;
+  n_partners: number;
+  n_universe: number;
+}
+
+/** Feature-table-scoped seed summary. Drives the Connectivity Seed
+ *  widget's "ready" indicator: while it's pending the seed projection
+ *  is still computing; on success the seed columns are warm and the
+ *  widget shows how many of *this feature table's* cells are partners.
+ *  Frozen mat_version → immutable, cached for the session. */
+export function useSeedSummary(args: SeedSummaryArgs | null) {
+  return useQuery<SeedSummaryResponse>({
+    queryKey: args
+      ? [
+          "seed_summary",
+          args.ds,
+          args.featureTableId,
+          args.matVersion ?? "",
+          args.seedRootId,
+        ]
+      : ["seed_summary", "disabled"],
+    queryFn: () =>
+      apiFetch<SeedSummaryResponse>(
+        PATHS.seedSummary(args!.ds, args!.featureTableId),
+        {
+          query: {
+            seed: args!.seedRootId,
+            mat_version:
+              args!.matVersion === "live" || args!.matVersion == null
+                ? undefined
+                : String(args!.matVersion),
+          },
+        },
+      ),
+    enabled:
+      !!args &&
+      !!args.ds &&
+      !!args.featureTableId &&
+      !!args.seedRootId &&
+      args.matVersion !== "live" &&
+      args.matVersion != null,
+    staleTime: Infinity,
+    gcTime: Infinity,
   });
 }

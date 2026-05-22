@@ -152,6 +152,8 @@ import { PartnersTable } from "../PartnersTable";
 import { CellIdSearch } from "./CellIdSearch";
 import { ChannelPicker } from "./ChannelPicker";
 import { CollapsibleSection } from "./CollapsibleSection";
+import { ConnectivitySeedWidget } from "./ConnectivitySeedWidget";
+import { useResolveCellIds } from "../../api/cellIds";
 import { DecorationPicker } from "./DecorationPicker";
 import { EmbeddingPicker } from "./EmbeddingPicker";
 import { FeatureTablePicker } from "./FeatureTablePicker";
@@ -198,6 +200,23 @@ export function FeatureExplorer() {
   const [emb] = useUrlParam("emb");
   const [decRaw] = useUrlParam("dec");
   const [cells, setCells] = useUrlParam("cells");
+  // Connectivity seed: a single root_id whose cached partners bundle
+  // sources server-derived `seed_*` columns (`seed_is_partner`,
+  // `seed_n_syn_out`, etc.) for binding on the scatter and plots.
+  // Multi-seed is a planned future; today the URL carries one root_id.
+  const [seedRootId, setSeedRootId] = useUrlParam("seed");
+  // Raw `?sel_filters=` — read here (not just in SelectionBuilderPanel)
+  // so the stale-seed-reference cleanup effect can prune it.
+  const [selFiltersRaw] = useUrlParam("sel_filters");
+  // Client-side "Seed view" filter for the cell-list table — when ON,
+  // hides cells that aren't partners of the active seed. Only visible
+  // (and only meaningful) when a seed is set. Local state — survives
+  // table drawer collapses but doesn't pollute the URL.
+  const [seedViewActive, setSeedViewActive] = useState(false);
+  // Whether to mark the seed cell itself on the scatter with a ring
+  // overlay. Default on — a seed is most useful when you can see where
+  // it sits. Local state; toggled from the Connectivity seed widget.
+  const [markSeed, setMarkSeed] = useState(true);
   // Out-of-scope cell rendering mode for the universe scatter. "ghost"
   // (default) shows them desaturated in the background as context;
   // "hide" omits them entirely. In both modes out-of-scope cells are
@@ -225,10 +244,23 @@ export function FeatureExplorer() {
   // — only URL-shaped overlay. Cross-session restore of a curated
   // selection is what "Save as my recipe" + ExplorerShareMenu is for.
   useSessionRecipe("explorer");
+  // Pending "save as a named selection on landing" payload, populated
+  // when a connectivity → explorer cross-nav stages a selection blob
+  // via pendingApplyExtras. We defer the actual save() call until ft is
+  // known because useNamedSelections is keyed on (ds, ft); the bag
+  // itself is applied immediately at ds-time below (it's just local
+  // state and doesn't need ft).
+  const [pendingNamedSave, setPendingNamedSave] = useState<{
+    name: string;
+    cellIds: string[];
+  } | null>(null);
   // One-shot: when an explorer recipe was just applied via
-  // useApplyRecipe, the Selection bag from the recipe is staged in
+  // useApplyRecipe, OR when /neuron's "Open in Explorer" button staged
+  // a connectivity-origin payload, the Selection bag is staged in
   // localStorage. Consume it on first ds-bearing render and push it
-  // into component state.
+  // into component state. If the extras carry a `save_as_named` block
+  // (connectivity origin), also defer a useNamedSelections save until
+  // ft becomes available.
   useEffect(() => {
     if (!ds) return;
     const extras = consumePendingApplyExtras(ds, "explorer");
@@ -238,6 +270,19 @@ export function FeatureExplorer() {
       : null;
     if (sel && sel.length > 0) {
       setSelectionBag(sel);
+    }
+    const saveBlock = extras.save_as_named;
+    if (
+      saveBlock &&
+      typeof saveBlock === "object" &&
+      sel &&
+      sel.length > 0
+    ) {
+      const name =
+        typeof (saveBlock as Record<string, unknown>).name === "string"
+          ? ((saveBlock as Record<string, unknown>).name as string)
+          : "From connectivity";
+      setPendingNamedSave({ name, cellIds: sel });
     }
     // ds is the only dep we care about — the consumer is intentionally
     // one-shot per ds.
@@ -365,6 +410,17 @@ export function FeatureExplorer() {
 
   const matVersion = parseMatVersion(mv);
   const decorationTables = decRaw ? decRaw.split(",").filter(Boolean) : [];
+  // Resolve the connectivity seed root_id → cell_id. Drives the
+  // seed-cell ring marker on the scatter and the widget breadcrumb.
+  // Skipped in live mode (no universe cache backs the resolver).
+  const seedResolve = useResolveCellIds(
+    seedRootId && ds && matVersion !== "live"
+      ? { ds, matVersion, rootIds: [seedRootId] }
+      : null,
+  );
+  const seedCellId: string | null = seedRootId
+    ? seedResolve.data?.root_to_cell?.[seedRootId] ?? null
+    : null;
   // Distinct-value universe for every attached decoration table, merged
   // into a single `${table}.${col}` map. Feeds the Filter Scope
   // predicate builder so string columns get a dropdown / checkbox list
@@ -407,6 +463,15 @@ export function FeatureExplorer() {
   // catalog defaults kick in) so the panel just renders the empty
   // state during that brief window.
   const namedSelections = useNamedSelections(ds, ft);
+  // Flush the deferred connectivity-origin save once ft is known. Same
+  // (ds, ft) scope as namedSelections so the saved set lands in the
+  // right localStorage slot.
+  useEffect(() => {
+    if (!pendingNamedSave || !ds || !ft) return;
+    namedSelections.save(pendingNamedSave.name, pendingNamedSave.cellIds);
+    setPendingNamedSave(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingNamedSave, ds, ft]);
   // "Save selection" affordance: the drawer header pill opens an
   // anchored popover containing the name input. Local state holds the
   // draft + open flag so the input doesn't fight with the pill's
@@ -526,6 +591,7 @@ export function FeatureExplorer() {
           sizeBy: effectiveSizeBinding,
           decorationTables,
           matVersion,
+          seedRootId,
         }
       : null,
   );
@@ -558,10 +624,16 @@ export function FeatureExplorer() {
     if (colorBinding === "__distance") return distanceBound;
     const c = scatter.data?.color;
     if (!c || c.kind !== "numeric") return null;
+    // Seed columns: 0 means "not connected" and is rendered as
+    // background, not on the colormap — exclude it from the slider /
+    // legend bounds so they match the gradient the scatter draws.
+    const seedCol =
+      typeof c.column === "string" && c.column.startsWith("seed_");
     let lo = Number.POSITIVE_INFINITY;
     let hi = Number.NEGATIVE_INFINITY;
     for (const v of c.values) {
       if (typeof v !== "number" || !Number.isFinite(v)) continue;
+      if (seedCol && v === 0) continue;
       if (v < lo) lo = v;
       if (v > hi) hi = v;
     }
@@ -615,6 +687,7 @@ export function FeatureExplorer() {
           decorationTables,
           cells,
           cellIds: directScopeBag.length > 0 ? directScopeBag : null,
+          seedRootId,
         }
       : null,
   );
@@ -629,6 +702,54 @@ export function FeatureExplorer() {
     if (!cellList.data) return null;
     return new Set(cellList.data.cell_ids);
   }, [hasScope, cellList.data]);
+
+  // Prune stale connectivity-seed references from URL state. When the
+  // seed is cleared (or a seed column is removed from the schema), any
+  // `seed_*` predicate in `?sel_filters=` or `seed.*` clause in
+  // `?cells=` becomes invalid — leaving them would render broken
+  // Build-Selection rows and show an inert scope clause as if it were
+  // active. Strip them so the displayed filters stay coherent. The
+  // `seed` column group only appears once /cells has loaded with a
+  // seed, so the "group loaded" guard avoids pruning a still-valid
+  // seed reference during the brief pre-load window.
+  useEffect(() => {
+    const seedCols = new Set(
+      (cellList.data?.column_groups ?? []).find((g) => g.name === "seed")
+        ?.columns ?? [],
+    );
+    const seedGroupLoaded = seedCols.size > 0;
+    const seedColInvalid = (col: string): boolean => {
+      if (!col.startsWith("seed_")) return false;
+      if (!seedRootId) return true;
+      if (seedGroupLoaded && !seedCols.has(col)) return true;
+      return false;
+    };
+    const updates: Record<string, string | null> = {};
+    if (selFiltersRaw) {
+      const kept = selFiltersRaw
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .filter((c) => !seedColInvalid(c));
+      const next = kept.join(",");
+      if (next !== selFiltersRaw) updates.sel_filters = next || null;
+    }
+    if (cells) {
+      const kept = cells
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .filter((clause) => {
+          const body = clause.startsWith("~") ? clause.slice(1) : clause;
+          const head = body.split(":", 1)[0];
+          if (!head.startsWith("seed.")) return true;
+          return !seedColInvalid("seed_" + head.slice(5));
+        });
+      const next = kept.join(",");
+      if (next !== cells) updates.cells = next || null;
+    }
+    if (Object.keys(updates).length > 0) setUrl(updates);
+  }, [seedRootId, cells, selFiltersRaw, cellList.data, setUrl]);
 
   // Effective selection (the "mark" set) — the bag intersected with the
   // active scope. Drives the orange highlight overlay, the NGL
@@ -936,6 +1057,7 @@ export function FeatureExplorer() {
           featureTable={currentFt}
           cellsColumnGroups={cellList.data?.column_groups}
           hasDistanceProbe={distanceProbe != null}
+          hasSeed={!!seedRootId}
           x={xBinding}
           y={yBinding}
           colorBy={colorBinding}
@@ -1061,6 +1183,7 @@ export function FeatureExplorer() {
               cellsColumnGroups={cellList.data?.column_groups}
               matVersion={matVersion}
               decorationTables={decorationTables}
+              seedRootId={seedRootId}
               onReplaceSelection={replaceSelection}
               onUnionIntoSelection={unionIntoSelection}
               onApplyFilterScope={(s) => setCells(s.length > 0 ? s : null)}
@@ -1092,6 +1215,36 @@ export function FeatureExplorer() {
             />
           </CollapsibleSection>
         )}
+        {/* Connectivity seed sits last in the rail — it's an optional
+            cross-tool input layered on top of the embedding workflow,
+            not part of the core configure → channels → select flow. */}
+        <CollapsibleSection
+          title="Connectivity seed"
+          // Disabled in live mode — the seed mechanism resolves cell_ids
+          // through the universe cache, which only exists at frozen
+          // materialization versions.
+          enabled={matVersion !== "live"}
+          disabledHint="Set a materialization version first (live mode has no universe cache)"
+          defaultOpen={!!seedRootId}
+          badge={seedRootId ? "seeded" : undefined}
+          summary={
+            seedRootId ? (
+              <div>
+                <code>{seedRootId}</code>
+              </div>
+            ) : undefined
+          }
+        >
+          <ConnectivitySeedWidget
+            ds={ds}
+            featureTableId={ft}
+            matVersion={matVersion}
+            seedRootId={seedRootId}
+            onChange={(next) => setSeedRootId(next)}
+            markSeed={markSeed}
+            onMarkSeedChange={setMarkSeed}
+          />
+        </CollapsibleSection>
       </aside>
       {/* Vertical drag handle between rail and scatter. Hover state in
           CSS; the active class comes from the hook's isDragging flag
@@ -1116,6 +1269,8 @@ export function FeatureExplorer() {
             y={yBinding}
             colorBy={effectiveColorBinding}
             sizeBy={effectiveSizeBinding}
+            seedRootId={seedRootId}
+            seedCellId={markSeed ? seedCellId : null}
             baseColor={colorBinding === "__none__" ? colorValue : null}
             distanceColorMap={
               colorBinding === "__distance" && distanceProbe
@@ -1409,8 +1564,30 @@ export function FeatureExplorer() {
                 rootId={ft}
                 matVersion={matVersion}
                 direction="both"
-                rows={enrichedCells.rows}
+                rows={
+                  seedViewActive && seedRootId
+                    ? enrichedCells.rows.filter(
+                        (r) => (r.seed_is_partner as number | undefined) === 1,
+                      )
+                    : enrichedCells.rows
+                }
                 columnGroups={enrichedCells.column_groups}
+                extraActions={
+                  seedRootId ? (
+                    <button
+                      type="button"
+                      className={`seed-view-toggle${seedViewActive ? " active" : ""}`}
+                      onClick={() => setSeedViewActive((v) => !v)}
+                      title={
+                        seedViewActive
+                          ? "Showing only cells that are partners of the seed — click to clear"
+                          : "Filter to cells that are partners of the active seed"
+                      }
+                    >
+                      {seedViewActive ? "Seed view ✓" : "Seed view"}
+                    </button>
+                  ) : undefined
+                }
                 decorationTables={decorationTables}
                 keyColumn="cell_id"
                 // Resolve cell_id → root_id at the active mv. Cells

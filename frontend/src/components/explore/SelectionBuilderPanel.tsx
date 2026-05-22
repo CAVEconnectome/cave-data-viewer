@@ -20,6 +20,10 @@ interface Props {
   cellsColumnGroups?: ColumnGroup[];
   matVersion: number | "live" | null;
   decorationTables: string[];
+  /** Active connectivity seed root_id. Required for predicate rows
+   *  built on `seed_*` columns — the column endpoints join the seed
+   *  projection only when it's supplied. Null when no seed is set. */
+  seedRootId: string | null;
   /** "Select" action — replaces the selection bag with the matching
    *  cell_ids. The bag's existing union/subtract path is reused for the
    *  "Union" action below. */
@@ -65,6 +69,16 @@ type Predicate =
  * user re-sets the ranges. (Promoting predicates to URL is a small
  * follow-up if the workflow needs it.)
  */
+/** Translate an internal column id into the `?cells=` clause column.
+ *  Seed columns are bare-underscore (`seed_net_size_in`) on the frame
+ *  but the cells-filter grammar is `<table>.<col>` — so seed columns
+ *  serialize against the `seed` pseudo-table (`seed.net_size_in`),
+ *  which the backend's `_apply_cell_filters` maps back. Non-seed
+ *  columns are already dotted and pass through. */
+function cellsClauseColumn(col: string): string {
+  return col.startsWith("seed_") ? `seed.${col.slice(5)}` : col;
+}
+
 export function SelectionBuilderPanel({
   ds,
   featureTableId,
@@ -72,18 +86,38 @@ export function SelectionBuilderPanel({
   cellsColumnGroups,
   matVersion,
   decorationTables,
+  seedRootId,
   onReplaceSelection,
   onUnionIntoSelection,
   onApplyFilterScope,
 }: Props) {
   const [columnsRaw, setColumnsRaw] = useUrlParam("sel_filters");
-  const columns = useMemo<string[]>(
-    () =>
-      columnsRaw
-        ? Array.from(new Set(columnsRaw.split(",").map((s) => s.trim()).filter(Boolean)))
-        : [],
-    [columnsRaw],
-  );
+  const columns = useMemo<string[]>(() => {
+    const raw = columnsRaw
+      ? Array.from(
+          new Set(columnsRaw.split(",").map((s) => s.trim()).filter(Boolean)),
+        )
+      : [];
+    // Drop predicate rows on `seed_*` columns that are no longer
+    // available — the connectivity seed was cleared, or the column was
+    // removed from the seed schema. Rendering a predicate row on a
+    // column the backend won't serve raises a "Failed to load column"
+    // error; dropping it is the graceful equivalent of how the scatter
+    // degrades a stale seed channel. The `seed` group only appears in
+    // cellsColumnGroups once /cells has loaded with a seed, so the
+    // "group loaded" guard avoids nuking a valid seed column during the
+    // brief pre-load window.
+    const seedCols = new Set(
+      (cellsColumnGroups ?? []).find((g) => g.name === "seed")?.columns ?? [],
+    );
+    const seedGroupLoaded = seedCols.size > 0;
+    return raw.filter((c) => {
+      if (!c.startsWith("seed_")) return true;
+      if (!seedRootId) return false;
+      if (seedGroupLoaded && !seedCols.has(c)) return false;
+      return true;
+    });
+  }, [columnsRaw, cellsColumnGroups, seedRootId]);
   const updateColumns = (next: string[]) =>
     setColumnsRaw(next.length > 0 ? next.join(",") : null);
 
@@ -170,14 +204,15 @@ export function SelectionBuilderPanel({
     for (const col of columns) {
       const p = predicates.get(col);
       if (!p || p.kind === "pending") continue;
+      const clauseCol = cellsClauseColumn(col);
       if (p.kind === "numeric") {
         if (p.lo != null && Number.isFinite(p.lo))
-          clauses.push(`${col}:gte:${p.lo}`);
+          clauses.push(`${clauseCol}:gte:${p.lo}`);
         if (p.hi != null && Number.isFinite(p.hi))
-          clauses.push(`${col}:lte:${p.hi}`);
+          clauses.push(`${clauseCol}:lte:${p.hi}`);
       } else {
         if (p.values.size > 0) {
-          clauses.push(`${col}:in:${Array.from(p.values).join("|")}`);
+          clauses.push(`${clauseCol}:in:${Array.from(p.values).join("|")}`);
         }
       }
     }
@@ -210,6 +245,7 @@ export function SelectionBuilderPanel({
           column={col}
           decorationTables={decorationTables}
           matVersion={matVersion}
+          seedRootId={seedRootId}
           predicate={predicates.get(col)}
           // Memoized setters with the column key baked in are owned by
           // the row — keeps the row's useEffect deps stable across
@@ -300,6 +336,7 @@ interface RowProps {
   column: string;
   decorationTables: string[];
   matVersion: number | "live" | null;
+  seedRootId: string | null;
   predicate: Predicate | undefined;
   /** Parent's memoized setters. The row binds the column key before
    *  use so the per-row callbacks identity-stable across renders. */
@@ -314,6 +351,7 @@ function PredicateRow({
   column,
   decorationTables,
   matVersion,
+  seedRootId,
   predicate,
   setPredicate,
   reportMatches,
@@ -338,6 +376,7 @@ function PredicateRow({
     column,
     decorationTables,
     matVersion,
+    seedRootId,
     bins: 60,
     binning,
   });
@@ -347,6 +386,7 @@ function PredicateRow({
     column,
     decorationTables,
     matVersion,
+    seedRootId,
   });
   const resp = query.data;
   const histogram = histogramQuery.data;

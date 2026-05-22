@@ -17,6 +17,8 @@ import {
 } from "@tanstack/react-table";
 import { useNglLink } from "../hooks/useNglLink";
 import type { ColumnGroup, PartnerRecord } from "../api/types";
+import { CopyIdsMenu } from "./CopyIdsMenu";
+import { OpenInExplorerButton } from "./OpenInExplorerButton";
 import { CopyableId, FilterInput, columnDisplayName, displayName, formatCell, inferKind, type ColumnKind } from "./tableColumns";
 
 interface Props {
@@ -190,6 +192,12 @@ export function PartnersTable({ ds, rootId, matVersion, direction, rows, columnG
   const ngl = useNglLink();
   const [sorting, setSorting] = useState<SortingState>([]);
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
+  // "Show only selected" — local toolbar toggle that narrows visible
+  // rows to the current selection bag. Composes with column filters
+  // and the brush-set globalFilter via intersection. Auto-clears when
+  // the bag empties so the user doesn't get a blank table they can't
+  // diagnose (see the effect below the table setup).
+  const [showOnlySelected, setShowOnlySelected] = useState(false);
   // Row selection is *controlled* when both `selectedIds` and
   // `onSelectedIdsChange` are passed (explorer path). Otherwise the
   // table owns its own selection state (the legacy /neuron path).
@@ -426,6 +434,13 @@ export function PartnersTable({ ds, rootId, matVersion, direction, rows, columnG
       accessorFn: () => null,
       enableSorting: true,
       enableColumnFilter: false,
+      // First click → ascending → selected first (selected = 1, sorts
+      // before unselected = 0 under our compare below). TanStack
+      // defaults `sortDescFirst` to true when the column has no usable
+      // accessor type, which would otherwise put unselected rows at
+      // the top on the first click — exactly the opposite of what a
+      // user reaches for this column to do.
+      sortDescFirst: false,
       sortingFn: (a, b) =>
         Number(b.getIsSelected()) - Number(a.getIsSelected()),
       meta: { rowSelectColumn: true },
@@ -670,13 +685,24 @@ export function PartnersTable({ ds, rootId, matVersion, direction, rows, columnG
     return [selectGroup, ...groups];
   }, [columnGroups, leafColumnDefs, selectColumnDef, collapsedGroups, hrefFor, open, linkTemplate, enableNglAction, onRowNglClick]);
 
-  // External selection (from a plot brush) ANDs with column filters via
-  // TanStack's globalFilter. Empty / null disables; otherwise rows whose
-  // root_id isn't in the set are hidden, and pagination updates naturally.
-  const globalFilterValue = useMemo(
-    () => (externalSelection && externalSelection.length > 0 ? new Set(externalSelection) : null),
-    [externalSelection],
-  );
+  // Plot-brush set and show-only-selected both narrow visible rows by
+  // row id, so they compose through a single TanStack globalFilter —
+  // intersected when both are present. Pagination updates naturally
+  // either way. `null` = no row-id filter (column filters still apply).
+  const globalFilterValue = useMemo(() => {
+    const brushSet =
+      externalSelection && externalSelection.length > 0
+        ? new Set(externalSelection)
+        : null;
+    const selSet = showOnlySelected ? new Set(Object.keys(rowSelection)) : null;
+    if (!brushSet && !selSet) return null;
+    if (brushSet && selSet) {
+      const out = new Set<string>();
+      for (const id of selSet) if (brushSet.has(id)) out.add(id);
+      return out;
+    }
+    return brushSet ?? selSet;
+  }, [externalSelection, rowSelection, showOnlySelected]);
 
   const table = useReactTable({
     data: rows,
@@ -711,6 +737,16 @@ export function PartnersTable({ ds, rootId, matVersion, direction, rows, columnG
   // Renamed from the bare `selectedIds` to avoid shadowing the new
   // prop of the same name.
   const effectiveSelectedIds = Object.keys(rowSelection);
+
+  // Auto-clear the show-only-selected toggle when the bag empties.
+  // Without this, a user who clears their selection (brush pill, header
+  // checkbox, external state change) is left looking at a blank table
+  // with no obvious cause.
+  useEffect(() => {
+    if (showOnlySelected && effectiveSelectedIds.length === 0) {
+      setShowOnlySelected(false);
+    }
+  }, [showOnlySelected, effectiveSelectedIds.length]);
 
   const filterIsActive = columnFilters.length > 0 && filteredRows.length !== rows.length;
 
@@ -789,6 +825,27 @@ export function PartnersTable({ ds, rootId, matVersion, direction, rows, columnG
             pagination, Columns) rather than in a separate toolbar
             above the table. */}
         {extraActions}
+        {/* Show-only-selected toggle — gated on having a non-empty bag
+            (or being already on) so the pill doesn't clutter the
+            toolbar in the common no-selection state. Disabled tooltip
+            covers the transient state right after auto-clear. */}
+        {(effectiveSelectedIds.length > 0 || showOnlySelected) && (
+          <button
+            type="button"
+            className={`show-only-selected${showOnlySelected ? " active" : ""}`}
+            onClick={() => setShowOnlySelected((v) => !v)}
+            disabled={effectiveSelectedIds.length === 0}
+            title={
+              showOnlySelected
+                ? "Showing only selected rows — click to show all"
+                : `Hide all rows except the ${effectiveSelectedIds.length} selected`
+            }
+          >
+            {showOnlySelected
+              ? `Showing ${effectiveSelectedIds.length} selected`
+              : `Show only selected (${effectiveSelectedIds.length})`}
+          </button>
+        )}
         {/* NGL action bar (bulk + per-direction) is partner-frame specific.
             Explorer disables via enableNglAction=false; the counter and
             CSV controls still render so the action bar isn't empty. */}
@@ -855,6 +912,24 @@ export function PartnersTable({ ds, rootId, matVersion, direction, rows, columnG
         >
           ↓ CSV
         </button>
+        <CopyIdsMenu
+          rows={rows}
+          visibleIds={filteredRows.map((r) => r.id)}
+          selectedIds={effectiveSelectedIds}
+          keyColumn={keyColumn}
+          hasCellIds={rows.some((r) => r.cell_id != null && r.cell_id !== "")}
+        />
+        {/* /neuron-only cross-nav. The explorer's PartnersTable keys on
+            cell_id and already lives in /explore, so it doesn't get
+            this button. */}
+        {keyColumn === "root_id" && (
+          <OpenInExplorerButton
+            ds={ds}
+            matVersion={matVersion}
+            rootId={rootId}
+            selectedRootIds={effectiveSelectedIds}
+          />
+        )}
         <div className="pagination">
           <button
             onClick={() => table.previousPage()}
@@ -870,13 +945,14 @@ export function PartnersTable({ ds, rootId, matVersion, direction, rows, columnG
             title="Next page"
           >›</button>
         </div>
-        {(columnFilters.length > 0 || sorting.length > 0) && (
+        {(columnFilters.length > 0 || sorting.length > 0 || showOnlySelected) && (
           <button
             onClick={() => {
               setColumnFilters([]);
               setSorting([]);
+              setShowOnlySelected(false);
             }}
-            title="Clear all column filters and sorting"
+            title="Clear column filters, sorting, and the show-only-selected toggle"
           >
             Reset
           </button>
@@ -950,7 +1026,7 @@ export function PartnersTable({ ds, rootId, matVersion, direction, rows, columnG
           {/* Second row: leaf columns (sortable). The row-select column
               renders the select-all checkbox in this row (paired with a
               sort indicator — clicking the column header sorts by
-              selection state, descending lifts selected rows to the
+              selection state, first click lifts selected rows to the
               top). Selects all *filtered* rows across pages, not just
               the current page. */}
           <tr>
@@ -981,7 +1057,13 @@ export function PartnersTable({ ds, rootId, matVersion, direction, rows, columnG
                       type="button"
                       className="sortable row-select-sort"
                       onClick={header.column.getToggleSortingHandler()}
-                      title="Click to sort by selection — descending lifts selected rows to the top, ascending puts them at the bottom"
+                      title={
+                        sort === "asc"
+                          ? "Selected rows are at the top — click to flip"
+                          : sort === "desc"
+                            ? "Selected rows are at the bottom — click to clear sort"
+                            : "Sort by selection — lifts selected rows to the top"
+                      }
                       aria-label="Sort by selection"
                     >
                       <input

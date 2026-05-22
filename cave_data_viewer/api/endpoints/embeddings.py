@@ -150,6 +150,54 @@ def _load_universe_frame(
     return ft_query.frame(decoration_tables=decoration_tables or None)
 
 
+def _parse_seed_root(seed_raw: str | None) -> int | None:
+    """Coerce a raw ``?seed=`` value to a positive int root_id, or None."""
+    if seed_raw is None or seed_raw == "":
+        return None
+    try:
+        v = int(seed_raw)
+    except (TypeError, ValueError):
+        return None
+    return v if v > 0 else None
+
+
+def _join_seed_columns(
+    frame: pd.DataFrame,
+    *,
+    ds: str,
+    cfg,
+    mat_version: int | str | None,
+    seed_raw: str | None,
+    client_factory,
+) -> pd.DataFrame:
+    """Left-join the connectivity-seed ``seed_*`` columns onto an
+    embedding frame. No-op when no valid seed is set, in live mode (no
+    universe cache backs the resolver), or on an empty frame. Shared by
+    the ``/cells``, ``/column`` and ``/column_histogram`` endpoints;
+    ``/scatter`` keeps its own channel-gated copy.
+    """
+    seed_root_id = _parse_seed_root(seed_raw)
+    if (
+        seed_root_id is None
+        or mat_version is None
+        or mat_version == "live"
+        or frame.empty
+    ):
+        return frame
+    from ..services.seed import seed_columns
+    cell_ids_int = frame["cell_id"].astype("int64").tolist()
+    with timer("seed_columns"):
+        seed_df = seed_columns(
+            client_factory=client_factory,
+            cfg=cfg,
+            datastack=ds,
+            mat_version=mat_version,
+            seed_root_id=seed_root_id,
+            cell_ids=cell_ids_int,
+        )
+    return frame.join(seed_df, on="cell_id", how="left")
+
+
 def _scale_size_rank(
     values: pd.Series, *, lo_px: float = 2.0, hi_px: float = 18.0
 ) -> pd.Series:
@@ -359,17 +407,83 @@ def scatter(ds: str, feature_table_id: str, embedding_id: str):
         client_factory=client_factory,
     )
 
-    missing = [c for c in (x_col, y_col) if c not in frame.columns]
-    for ch in (color_col, size_col):
-        if ch and ch not in frame.columns:
-            missing.append(ch)
-    if missing:
+    # Connectivity-seed projection: when ?seed=<root_id> is set, derive
+    # per-cell `seed_*` columns from the seed's cached connectivity bundle
+    # (services/seed.py) and left-join onto the universe frame. Cells
+    # whose cell_id doesn't resolve to a root_id (or whose root_id isn't
+    # in the seed's partners) get binary/count = 0 and direction = "none".
+    # Skipped when seed is missing/invalid, in live mode (no universe
+    # cache), or when the channels don't reference any seed_* column —
+    # the latter avoids the join cost when the user just wants the
+    # default scatter.
+    seed_raw = request.args.get("seed") or None
+    seed_root_id: int | None = None
+    if seed_raw:
+        try:
+            seed_root_id = int(seed_raw)
+        except ValueError:
+            seed_root_id = None
+        if seed_root_id is not None and seed_root_id <= 0:
+            seed_root_id = None
+    channels_use_seed = any(
+        (c and c.startswith("seed_")) for c in (x_col, y_col, color_col, size_col)
+    )
+    if (
+        seed_root_id is not None
+        and channels_use_seed
+        and mat_version is not None
+        and mat_version != "live"
+        and not frame.empty
+    ):
+        from ..services.seed import seed_columns
+        cell_ids_int = frame["cell_id"].astype("int64").tolist()
+        with timer("seed_columns"):
+            seed_df = seed_columns(
+                client_factory=client_factory,
+                cfg=cfg,
+                datastack=ds,
+                mat_version=mat_version,
+                seed_root_id=seed_root_id,
+                cell_ids=cell_ids_int,
+            )
+        # `frame` is shared by the L1+L2 universe cache and must not be
+        # mutated in place; copy before the join so a subsequent
+        # seed-less request still sees the unaugmented frame.
+        frame = frame.join(seed_df, on="cell_id", how="left")
+
+    # x / y are structural — a missing axis is fatal, the scatter can't
+    # render without coordinates.
+    missing_axes = [c for c in (x_col, y_col) if c not in frame.columns]
+    if missing_axes:
+        # Friendlier message when an axis references a `seed_*` column
+        # but no seed is set — the column hasn't been joined onto the
+        # frame in that case.
+        if (
+            any(m and m.startswith("seed_") for m in missing_axes)
+            and seed_root_id is None
+        ):
+            raise ApiError(
+                422,
+                "channel_requires_seed",
+                f"axis references seed-derived column(s) {missing_axes!r} "
+                f"— set a connectivity seed in the left rail first.",
+            )
         raise ApiError(
             422,
             "channel_column_missing",
-            f"channel references unknown column(s) {missing!r} "
+            f"axis references unknown column(s) {missing_axes!r} "
             f"(have {list(frame.columns)})",
         )
+    # color / size are decorative — a missing or stale binding degrades
+    # to "no channel" rather than failing the whole scatter. This keeps
+    # a URL carrying an old / renamed / removed column (e.g. a seed_*
+    # column that no longer exists, or a seed channel with the seed
+    # cleared) from breaking the render; the SPA just shows an
+    # uncolored / unsized scatter and the user can re-pick.
+    if color_col and color_col not in frame.columns:
+        color_col = None
+    if size_col and size_col not in frame.columns:
+        size_col = None
 
     # Channel projections.
     color_block: dict | None = None
@@ -596,6 +710,19 @@ def column(ds: str, feature_table_id: str, column: str):
         client_factory=client_factory,
     )
 
+    # Seed-derived columns aren't on the parquet frame — join them when
+    # the requested column is a `seed_*` column (drives the Build
+    # Selection predicate rows over connectivity-seed columns).
+    if column.startswith("seed_"):
+        frame = _join_seed_columns(
+            frame,
+            ds=ds,
+            cfg=cfg,
+            mat_version=mat_version,
+            seed_raw=request.args.get("seed"),
+            client_factory=client_factory,
+        )
+
     if column not in frame.columns:
         raise ApiError(
             422,
@@ -749,7 +876,9 @@ def cells(ds: str, feature_table_id: str):
     # columns are skipped — those columns live on the frame natively,
     # no decoration join needed.
     for f in cell_filters:
-        if f.table == feature_table_id or f.table == "nucleus":
+        # `seed` is the connectivity-seed pseudo-table — its columns are
+        # joined via _join_seed_columns below, not a CAVE decoration.
+        if f.table in (feature_table_id, "nucleus", "seed"):
             continue
         if f.table not in decoration_tables:
             decoration_tables.append(f.table)
@@ -806,6 +935,44 @@ def cells(ds: str, feature_table_id: str):
         client_factory=client_factory,
     )
     total_count = int(len(frame))
+
+    # Connectivity-seed projection: mirrors the /scatter wiring. When
+    # the explorer holds a seed (``?seed=<root_id>``) and the cell list
+    # is being fetched, join the seed_columns DataFrame so the SPA's
+    # "Seed view" toggle and any future filter on seed_is_partner has
+    # the columns to read. Live mode is skipped because the resolver
+    # has no universe cache. The request body's ``seed`` field is the
+    # canonical channel; query-string also accepted as a fallback for
+    # parity with /scatter.
+    seed_raw = body.get("seed")
+    if seed_raw is None:
+        seed_raw = request.args.get("seed")
+    seed_root_id: int | None = None
+    if seed_raw is not None and seed_raw != "":
+        try:
+            seed_root_id = int(seed_raw)
+        except (TypeError, ValueError):
+            seed_root_id = None
+        if seed_root_id is not None and seed_root_id <= 0:
+            seed_root_id = None
+    if (
+        seed_root_id is not None
+        and mat_version is not None
+        and mat_version != "live"
+        and not frame.empty
+    ):
+        from ..services.seed import seed_columns
+        cell_ids_int = frame["cell_id"].astype("int64").tolist()
+        with timer("seed_columns"):
+            seed_df = seed_columns(
+                client_factory=client_factory,
+                cfg=cfg,
+                datastack=ds,
+                mat_version=mat_version,
+                seed_root_id=seed_root_id,
+                cell_ids=cell_ids_int,
+            )
+        frame = frame.join(seed_df, on="cell_id", how="left")
 
     if cell_filters:
         frame = _apply_cell_filters(frame, cell_filters)
@@ -889,6 +1056,27 @@ def cells(ds: str, feature_table_id: str):
                 {"name": table, "kind": "table", "columns": cols}
             )
 
+    # Seed-derived synthetic group. Present only when the request set a
+    # seed; rendered under its own "kind: synthetic" so the SPA can
+    # style it distinctly from CAVE-backed decoration columns. Column
+    # order is the canonical reading order: direction class, then
+    # count metrics, then is_self / is_partner flags.
+    seed_cols = [c for c in frame.columns if c.startswith("seed_")]
+    if seed_cols:
+        # Deterministic order: keep the canonical columns first, then any
+        # synapse-aggregation-rule derived columns (`seed_<rule>_in/out`)
+        # in their natural order.
+        canonical = [
+            "seed_partner_dir", "seed_is_partner",
+            "seed_n_syn_in", "seed_n_syn_out",
+        ]
+        ordered = [c for c in canonical if c in seed_cols] + [
+            c for c in seed_cols if c not in canonical
+        ]
+        column_groups.append(
+            {"name": "seed", "kind": "synthetic", "columns": ordered}
+        )
+
     return jsonify(
         {
             "cell_ids": [row["cell_id"] for row in rows],
@@ -898,6 +1086,101 @@ def cells(ds: str, feature_table_id: str):
             "total_count": total_count,
             "limit": limit,
             "limit_hit": limit_hit,
+        }
+    )
+
+
+@bp.route(
+    "/<ds>/feature_tables/<feature_table_id>/seed_summary",
+    methods=["GET"],
+)
+@auth_required
+def seed_summary(ds: str, feature_table_id: str):
+    """Connectivity-seed summary *restricted to this feature table*.
+
+    The whole-connectome partner counts (from ``/connectivity``) over-
+    count for the explorer: the scatter only renders cells that are in
+    the feature table, so a seed with 6,000 input partners may only
+    have a few hundred that actually appear here. This endpoint runs
+    the seed projection over the feature table's cell universe and
+    reports how many of *those* cells are partners, split by direction.
+
+    It also warms the seed's connectivity bundle (same synapse cache
+    `seed_columns` projects from), so the first seed-channel plot /
+    table request after this lands is fast.
+
+    Query params: ``seed`` (root_id), ``mat_version``. Returns
+    ``{n_in, n_out, n_partners, n_universe}`` — counts of feature-table
+    cells. ``n_in`` / ``n_out`` count cells with any input / output
+    contact (a reciprocal cell is in both); ``n_partners`` is the
+    distinct partner count.
+    """
+    cfg = load_datastack_config(ds)
+    src = source_for(ds, cfg)
+    if src is None:
+        raise ApiError(
+            404,
+            "feature_explorer_disabled",
+            f"datastack {ds!r} does not enable the feature explorer",
+        )
+    try:
+        ft = src.resolve_feature_table(feature_table_id)
+    except KeyError as exc:
+        raise ApiError(404, "feature_table_not_found", str(exc)) from exc
+
+    seed_root_id = _parse_seed_root(request.args.get("seed"))
+    if seed_root_id is None:
+        raise ApiError(
+            422, "missing_seed", "seed_summary requires a ?seed=<root_id> param"
+        )
+
+    mv_raw = request.args.get("mat_version")
+    if mv_raw is None or mv_raw == "" or mv_raw == "live":
+        raise ApiError(
+            422,
+            "seed_requires_materialized",
+            "seed_summary requires a materialized ?mat_version= "
+            "(the cell_id resolver has no live-mode universe cache)",
+        )
+    try:
+        mat_version: int | str = int(mv_raw)
+    except ValueError as exc:
+        raise ApiError(
+            422, "invalid_mat_version",
+            f"mat_version must be an integer, got {mv_raw!r}",
+        ) from exc
+
+    client_factory = _make_client_factory(ds, mat_version)
+    frame = _load_universe_frame(
+        ds=ds,
+        cfg=cfg,
+        ft=ft,
+        mat_version=mat_version,
+        decoration_tables=[],
+        client_factory=client_factory,
+    )
+    if frame.empty:
+        return jsonify(
+            {"n_in": 0, "n_out": 0, "n_partners": 0, "n_universe": 0}
+        )
+
+    from ..services.seed import seed_columns
+    with timer("seed_columns"):
+        seed_df = seed_columns(
+            client_factory=client_factory,
+            cfg=cfg,
+            datastack=ds,
+            mat_version=mat_version,
+            seed_root_id=seed_root_id,
+            cell_ids=frame["cell_id"].astype("int64").tolist(),
+        )
+    direction = seed_df["seed_partner_dir"].astype("string")
+    return jsonify(
+        {
+            "n_in": int(direction.isin(["in", "both"]).sum()),
+            "n_out": int(direction.isin(["out", "both"]).sum()),
+            "n_partners": int((direction != "none").sum()),
+            "n_universe": int(len(frame)),
         }
     )
 
@@ -999,11 +1282,19 @@ def column_histogram(ds: str, feature_table_id: str, column: str):
 
     cache_ds = cfg.cache_alias or ds
     dec_tuple = tuple(sorted(decoration_tables))
+    # Seed columns vary per seed root_id — fold the seed into the key
+    # for `seed_*` columns so two seeds don't collide on one histogram.
+    seed_for_key = (
+        request.args.get("seed") if column.startswith("seed_") else None
+    )
     # Binning participates in the cache key so the linear and log
     # variants of the same column cache as distinct entries — switching
     # the toggle pays at most one cold-fetch per (column, mode), then
     # the cache serves either instantly.
-    key = (cache_ds, ft.id, column, dec_tuple, mat_version, n_bins, binning_raw)
+    key = (
+        cache_ds, ft.id, column, dec_tuple, mat_version, n_bins,
+        binning_raw, seed_for_key,
+    )
 
     cache = current_app.extensions.get("dcv_column_histogram_cache")
     if cache is not None:
@@ -1024,6 +1315,18 @@ def column_histogram(ds: str, feature_table_id: str, column: str):
         decoration_tables=decoration_tables,
         client_factory=client_factory,
     )
+
+    # Seed-derived columns aren't on the parquet frame — join them when
+    # the requested column is a `seed_*` column.
+    if column.startswith("seed_"):
+        frame = _join_seed_columns(
+            frame,
+            ds=ds,
+            cfg=cfg,
+            mat_version=mat_version,
+            seed_raw=request.args.get("seed"),
+            client_factory=client_factory,
+        )
 
     if column not in frame.columns:
         raise ApiError(

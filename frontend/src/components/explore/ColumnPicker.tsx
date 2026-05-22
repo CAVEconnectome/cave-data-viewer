@@ -1,6 +1,22 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ColumnGroup, FeatureTableListItem } from "../../api/types";
 
+/** Prettify a `seed_*` column for display. `seed_net_size_out` →
+ *  "net size (out)", `seed_partner_dir` → "partner dir". Kept local
+ *  (a trivial pure formatter) to avoid a cross-component import. */
+function seedColumnLabel(col: string): string {
+  let body = col.startsWith("seed_") ? col.slice(5) : col;
+  let suffix = "";
+  if (body.endsWith("_in")) {
+    body = body.slice(0, -3);
+    suffix = " (in)";
+  } else if (body.endsWith("_out")) {
+    body = body.slice(0, -4);
+    suffix = " (out)";
+  }
+  return body.replace(/_/g, " ") + suffix;
+}
+
 export interface ColumnPickerOption {
   /** Dotted column path used in URL state and `useEmbeddingColumn` keys. */
   value: string;
@@ -189,6 +205,26 @@ export function ColumnPicker({
       if (opts.length > 0) {
         out.push({ section: g.name, description: null, options: opts });
       }
+    }
+
+    // Connectivity-seed columns — the `seed` synthetic group emitted by
+    // /cells when a seed is set. Surfaced so the Build Selection tool
+    // can build predicates over `seed_is_partner`, `seed_n_syn_out`,
+    // `seed_net_size_in`, etc.
+    const seedGroup = (cellsColumnGroups ?? []).find((g) => g.name === "seed");
+    if (seedGroup && seedGroup.columns.length > 0) {
+      out.push({
+        section: "Connectivity seed",
+        description:
+          "Per-cell connectivity to the active seed neuron. " +
+          "Predicate over these to select the seed's partners.",
+        options: seedGroup.columns.map((col) => ({
+          value: col,
+          label: seedColumnLabel(col),
+          section: "Connectivity seed",
+          isNumeric: col !== "seed_partner_dir",
+        })),
+      });
     }
 
     return out;

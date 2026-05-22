@@ -64,6 +64,25 @@ def make_plot(ds: str, spec_name: str):
     if isinstance(bindings, dict) and "show_cell_depth" in bindings:
         show_cell_depth = bool(bindings.get("show_cell_depth"))
     mat_version = request.args.get("mat_version") or None
+    # Connectivity-seed binding (embedding_cells source only). Shape:
+    # `{root_id: "<int as string or int>", mat_version?: <number|"live">}`.
+    # mat_version defaults to the request's mat_version when omitted, so
+    # the typical case ("seed at the same mat_version as the embedding")
+    # is the no-op default. Validated loosely — malformed root_id silently
+    # disables the seed instead of 422-ing the whole plot.
+    seed_payload: dict | None = None
+    raw_seed = body.get("seed")
+    if isinstance(raw_seed, dict):
+        raw_root = raw_seed.get("root_id")
+        try:
+            seed_root_int = int(raw_root) if raw_root is not None else None
+        except (TypeError, ValueError):
+            seed_root_int = None
+        if seed_root_int is not None and seed_root_int > 0:
+            seed_payload = {
+                "root_id": seed_root_int,
+                "mat_version": raw_seed.get("mat_version", mat_version),
+            }
     # Global cell filter — `?cells=<table>.<col>:<op>:<val>[,...]`. Applied as
     # a row mask after decoration columns are merged. Tables referenced by a
     # predicate are auto-added to decoration_tables so the user doesn't have
@@ -182,6 +201,7 @@ def make_plot(ds: str, spec_name: str):
             spatial_provider=spatial_provider,
             cell_filters=cell_filters,
             show_cell_depth=show_cell_depth,
+            seed=seed_payload,
         )
     except ValueError as exc:
         raise ApiError(422, "plot_invalid_request", str(exc)) from exc

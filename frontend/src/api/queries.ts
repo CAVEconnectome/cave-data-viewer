@@ -417,6 +417,12 @@ export interface PlotArgs {
    *  even in edge cases where `cells` happens to compare equal across
    *  the toggle. */
   unfiltered?: boolean;
+  /** Connectivity seed root_id (int64-safe string). When set, the
+   *  backend joins per-cell `seed_*` columns onto the plot's frame so
+   *  bindings can reference them. Forward-compatible: today's /neuron
+   *  partners plots don't bind seed_* columns; future explorer-side
+   *  embedding plots will. */
+  seedRootId?: string | null;
 }
 
 function bindingsCacheKey(b: PlotBindings | null | undefined): string {
@@ -437,7 +443,8 @@ export function usePlot(args: PlotArgs | null) {
     queryKey: args
       ? ["plot", args.ds, args.spec, args.rootId, args.matVersion,
          (args.decorationTables ?? []).join(","), args.column ?? "", bindingsCacheKey(args.bindings),
-         args.cells ?? "", args.unfiltered ? "unfiltered" : "filtered"]
+         args.cells ?? "", args.unfiltered ? "unfiltered" : "filtered",
+         args.seedRootId ?? ""]
       : ["plot", "disabled"],
     queryFn: () =>
       apiFetch<PlotResponse>(
@@ -453,6 +460,7 @@ export function usePlot(args: PlotArgs | null) {
             decoration_tables: args!.decorationTables ?? [],
             column: args!.column ?? null,
             bindings: args!.bindings ?? undefined,
+            seed: args!.seedRootId ? { root_id: args!.seedRootId } : undefined,
           },
         },
       ),

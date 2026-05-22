@@ -74,6 +74,19 @@ interface Props {
   colorCenter?: number | null;
   decorationTables?: string[];
   matVersion?: number | "live" | null;
+  /** Connectivity seed root_id. Forwarded to /scatter so seed-derived
+   *  `seed_*` columns are joinable as channels. Must be threaded here
+   *  (not just in FeatureExplorer's parallel useEmbeddingScatter call)
+   *  because this component's fetch is the one that drives the render
+   *  — a query-key mismatch would split the cache and fetch a
+   *  seedless variant that 422s on any `seed_*` channel. */
+  seedRootId?: string | null;
+  /** Resolved cell_id of the connectivity seed. When set, the seed
+   *  cell is marked on the scatter with a distinct ring overlay —
+   *  independent of the color channel, so the seed stays locatable
+   *  whatever the colormap. Null = no marker (seed cleared, seed not
+   *  in this embedding's universe, or the mark toggle is off). */
+  seedCellId?: string | null;
   /** Cells passing the active Filter Scope. Null means the full
    *  universe is in scope (no predicate, no snapshot) — everything
    *  renders normally. When set, cells *not* in this set are
@@ -241,6 +254,8 @@ export const UniverseScatter = forwardRef<UniverseScatterHandle, Props>(function
     colorCenter,
     decorationTables,
     matVersion,
+    seedRootId,
+    seedCellId,
     inScopeCellIds,
     selectedCellIds,
     scopeMode = "ghost",
@@ -294,6 +309,7 @@ export const UniverseScatter = forwardRef<UniverseScatterHandle, Props>(function
     sizeBy,
     decorationTables,
     matVersion,
+    seedRootId,
   });
 
   // Compute the per-axis extents once per data update. Used both to
@@ -625,6 +641,29 @@ export const UniverseScatter = forwardRef<UniverseScatterHandle, Props>(function
         },
       }),
     );
+    // Seed-connected layer — cells connected to the active connectivity
+    // seed, drawn ON TOP of the recessed not-connected background so
+    // the colormap signal isn't overdrawn by the ~90k background
+    // points. Pickable like the base layer.
+    if (partition.seedConnected.length > 0) {
+      out.push(
+        new ScatterplotLayer({
+          id: "universe-seed-connected",
+          data: partition.seedConnected,
+          pickable: true,
+          stroked: false,
+          filled: true,
+          radiusUnits: "pixels",
+          getPosition: (d: RenderRow) => d.position,
+          getFillColor: (d: RenderRow) => d.color,
+          getRadius: (d: RenderRow) => d.radius,
+          updateTriggers: {
+            getFillColor: partition.colorRevision,
+            getRadius: partition.sizeRevision,
+          },
+        }),
+      );
+    }
     if (partition.selected.length > 0) {
       // Thin black stroke on every selected marker. The fill carries
       // most of the selection signal against a heavily-recessed base
@@ -652,8 +691,36 @@ export const UniverseScatter = forwardRef<UniverseScatterHandle, Props>(function
         }),
       );
     }
+    // Seed-cell marker — a hollow ring drawn on top of everything,
+    // independent of the color channel so the seed stays locatable
+    // under any colormap. Searches all three partition buckets since
+    // the seed cell can be in or out of the active scope.
+    if (seedCellId) {
+      const seedRow =
+        partition.inScopeBase.find((r) => r.id === seedCellId) ??
+        partition.seedConnected.find((r) => r.id === seedCellId) ??
+        partition.selected.find((r) => r.id === seedCellId) ??
+        partition.outOfScope.find((r) => r.id === seedCellId);
+      if (seedRow) {
+        out.push(
+          new ScatterplotLayer({
+            id: "universe-seed-marker",
+            data: [seedRow],
+            pickable: false,
+            stroked: true,
+            filled: false,
+            radiusUnits: "pixels",
+            lineWidthUnits: "pixels",
+            getPosition: (d: RenderRow) => d.position,
+            getRadius: 12,
+            getLineColor: [220, 38, 38, 255],
+            getLineWidth: 2.5,
+          }),
+        );
+      }
+    }
     return out;
-  }, [partition]);
+  }, [partition, seedCellId]);
 
   const handleClick = useCallback(
     (info: { object?: unknown }) => {
@@ -663,6 +730,27 @@ export const UniverseScatter = forwardRef<UniverseScatterHandle, Props>(function
     },
     [onPointClick],
   );
+
+  // Save the current scatter as a PNG. Grabs the deck.gl WebGL canvas
+  // directly — `preserveDrawingBuffer` on the DeckGL device keeps the
+  // last frame readable. The HTML overlays (lasso, legend, tooltip)
+  // are intentionally not composited in; the export is the data view.
+  const handleSaveImage = useCallback(() => {
+    const canvas = containerRef.current?.querySelector("canvas");
+    if (!canvas) return;
+    canvas.toBlob((blob) => {
+      if (!blob) return;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+      a.download = `embedding-${featureTableId}-${ts}.png`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }, "image/png");
+  }, [featureTableId]);
 
   const handleHover = useCallback(
     (info: { object?: unknown; x?: number; y?: number }) => {
@@ -738,7 +826,11 @@ export const UniverseScatter = forwardRef<UniverseScatterHandle, Props>(function
     // them. ~94k × ~10 polygon edges = 1M ops; sub-50ms in JS at
     // this scale, fine without needing GPU-side picking.
     const selected: string[] = [];
-    const inScopeRows = [...partition.inScopeBase, ...partition.selected];
+    const inScopeRows = [
+      ...partition.inScopeBase,
+      ...partition.seedConnected,
+      ...partition.selected,
+    ];
     for (const row of inScopeRows) {
       if (pointInPolygon(row.position, polyData)) selected.push(row.id);
     }
@@ -871,6 +963,10 @@ export const UniverseScatter = forwardRef<UniverseScatterHandle, Props>(function
       <>
       <DeckGL
         views={new OrthographicView({ id: "ortho" })}
+        // preserveDrawingBuffer keeps the last rendered frame readable
+        // so the "save image" toolbar button can grab the canvas via
+        // toBlob(). Without it a WebGL canvas reads back blank.
+        deviceProps={{ webgl: { preserveDrawingBuffer: true } }}
         viewState={viewState ?? undefined}
         // In lasso mode (without Space) we keep the controller *alive*
         // — just with drag-pan/rotate/double-click-zoom turned off — so
@@ -1011,6 +1107,13 @@ export const UniverseScatter = forwardRef<UniverseScatterHandle, Props>(function
         >
           ⤢ fit
         </button>
+        <button
+          type="button"
+          onClick={handleSaveImage}
+          title="Save the scatter as a PNG image"
+        >
+          ⤓ image
+        </button>
       </div>
       {/* Hover tooltip. Anchored to the canvas position deck.gl reports
           (info.x/y), offset so the cursor doesn't sit under it.
@@ -1075,6 +1178,14 @@ interface Partition {
    *  universe" — these are pickable, render in normal channel color,
    *  and form the base layer the user interacts with. */
   inScopeBase: RenderRow[];
+  /** In-scope cells that ARE connected to the active connectivity seed
+   *  (a `seed_*` numeric color channel with a non-zero / non-null
+   *  value). Split out of `inScopeBase` so they render in a layer ON
+   *  TOP of the recessed not-connected background — otherwise the ~90k
+   *  background points, drawn in data order, overdraw the few hundred
+   *  connected ones. Empty when no seed numeric color channel is
+   *  bound. */
+  seedConnected: RenderRow[];
   /** In-scope cells in the active selection — the orange highlight
    *  overlay layered on top of inScopeBase with a stroke + size bump.
    *  Out-of-scope bag members are NOT in this list (they live in
@@ -1147,6 +1258,19 @@ function buildPartition(
   const yScale = ySpan > 0 ? 1 / ySpan : 0;
   const colorBlock = data.color;
   const sizeBlock = data.size;
+  // A `seed_*` numeric color channel encodes connectivity to the seed.
+  // A value of 0 means "not connected on this metric" — informative
+  // absence, not a genuine low value. Treat 0 as null: it drops out of
+  // the colormap range (so the gradient spans only the connected cells)
+  // and renders in the recessed background color rather than the low
+  // end of the colormap. NaN-valued seed columns (the per-direction
+  // aggregations for non-partners) already behave this way.
+  const seedNumericColor =
+    colorBlock?.kind === "numeric" &&
+    typeof colorBlock.column === "string" &&
+    colorBlock.column.startsWith("seed_");
+  const isSeedAbsentValue = (v: unknown): boolean =>
+    v === 0 || v === null || v === undefined;
   const hasScope = !!inScope;
   const hasSelected = !!selected && selected.size > 0;
   // "Recede the rest" condition — when a scope OR a selection is
@@ -1173,6 +1297,9 @@ function buildPartition(
     let hi = Number.NEGATIVE_INFINITY;
     for (const v of colorBlock.values) {
       if (typeof v !== "number" || !Number.isFinite(v)) continue;
+      // Seed columns: 0 = "not connected" — exclude from the colormap
+      // range so the gradient stretches over the connected cells only.
+      if (seedNumericColor && v === 0) continue;
       if (v < lo) lo = v;
       if (v > hi) hi = v;
     }
@@ -1184,6 +1311,7 @@ function buildPartition(
 
   const outOfScope: RenderRow[] = [];
   const inScopeBase: RenderRow[] = [];
+  const seedConnected: RenderRow[] = [];
   const selectedRows: RenderRow[] = [];
   for (let i = 0; i < n; i++) {
     const id = data.cell_ids[i];
@@ -1258,6 +1386,21 @@ function buildPartition(
     if (isInScope && !isHighlight && hasHighlight && colorBlock) {
       rgb = desaturate(rgb, BASE_DESATURATE_WHEN_HIGHLIGHT);
     }
+    // Connectivity-seed "not connected" cells: a 0 / null value on a
+    // seed_* numeric color channel renders as recessed background
+    // rather than a colormap color, so the cells actually connected to
+    // the seed own the gradient. A highlighted (selected) cell keeps
+    // its highlight — selection outranks the channel signal.
+    const isSeedConnected =
+      seedNumericColor && !isSeedAbsentValue(colorBlock!.values[i]);
+    if (seedNumericColor && !isHighlight && !isSeedConnected) {
+      rgb = [
+        BASE_RGBA_WITH_HIGHLIGHT[0],
+        BASE_RGBA_WITH_HIGHLIGHT[1],
+        BASE_RGBA_WITH_HIGHLIGHT[2],
+      ];
+      alpha = BASE_ALPHA_WHEN_HIGHLIGHT;
+    }
     // Out-of-scope cells (ghost mode only — hide path skipped them
     // upstream). Override channel color entirely so they read as a
     // recessed background regardless of what the active color
@@ -1294,6 +1437,7 @@ function buildPartition(
     };
     if (!isInScope) outOfScope.push(row);
     else if (isSelected) selectedRows.push(row);
+    else if (isSeedConnected) seedConnected.push(row);
     else inScopeBase.push(row);
   }
 
@@ -1324,6 +1468,7 @@ function buildPartition(
   return {
     outOfScope,
     inScopeBase,
+    seedConnected,
     selected: selectedRows,
     colorRevision,
     sizeRevision,

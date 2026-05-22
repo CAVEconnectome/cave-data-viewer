@@ -233,8 +233,19 @@ def _apply_cell_filters(df: pd.DataFrame, filters: list[CellFilter]) -> pd.DataF
     if df.empty:
         return df
     for f in filters:
-        col = f"{f.table}.{f.column}"
+        # The `seed` pseudo-table is the connectivity-seed column space.
+        # Its frame columns are bare-underscore (`seed_is_partner`), not
+        # dotted, so a `seed.is_partner` predicate maps to `seed_is_partner`.
+        col = f"seed_{f.column}" if f.table == "seed" else f"{f.table}.{f.column}"
         if col not in df.columns:
+            if f.table == "seed":
+                # A `seed.*` predicate with no active connectivity seed
+                # (or one referencing a seed column that no longer
+                # exists) is inert — the seed projection simply isn't on
+                # the frame. Skip it rather than failing the whole
+                # request; the SPA also strips stale seed clauses from
+                # ?cells= so the displayed filter stays coherent.
+                continue
             raise ValueError(
                 f"cells filter references column {col!r} which is not loaded — "
                 f"add the table to decoration_tables, or remove the predicate."
@@ -1317,6 +1328,7 @@ def resolve_plot(
     spatial_provider=None,
     cell_filters: list[CellFilter] | None = None,
     show_cell_depth: bool = True,
+    seed: dict | None = None,
 ) -> dict:
     """Materialize `spec.data_query` against the supplied row context
     (with optional decoration), dispatch to the kind-specific builder,
@@ -1357,6 +1369,33 @@ def resolve_plot(
         # — the partners-frame decoration path below is skipped for this source.
         with timer("load_feature_table_frame"):
             df = ft_query.frame(decoration_tables=decoration_tables or []).copy()
+
+        # Connectivity-seed projection: when a seed root_id is set, derive
+        # per-cell `seed_*` columns from the seed's cached connectivity
+        # bundle and left-join by cell_id. Skipped silently for cells with
+        # unresolved cell_id (treated as "not a partner"). The seed's
+        # mat_version defaults to the request's mat_version when not given.
+        if seed and seed.get("root_id") is not None and not df.empty:
+            from .datastack_config import load_datastack_config
+            from .seed import seed_columns
+            seed_mv = seed.get("mat_version", ft_query.mat_version)
+            cfg = load_datastack_config(ft_query.datastack)
+            with timer("seed_columns"):
+                seed_df = seed_columns(
+                    client_factory=client_factory,
+                    cfg=cfg,
+                    datastack=ft_query.datastack,
+                    mat_version=seed_mv,
+                    seed_root_id=int(seed["root_id"]),
+                    cell_ids=df["cell_id"].astype("int64").tolist(),
+                )
+            # Left-join by cell_id. seed_df's index is cell_id (int64); the
+            # frame's `cell_id` column is also int-coerced upstream by
+            # FeatureTableQuery, so the merge is one-shot. Missing cells
+            # are not possible — seed_columns emits one row per input
+            # cell_id with informative-absence defaults — but we still use
+            # a left join to be defensive.
+            df = df.join(seed_df, on="cell_id", how="left")
     else:
         if nq is None:
             raise ValueError(
@@ -1430,6 +1469,10 @@ def resolve_plot(
         if f.table == embedding_ft_id:
             continue
         if f.table == "nucleus":
+            continue
+        if f.table == "seed":
+            # Connectivity-seed pseudo-table — joined via seed_columns,
+            # not a CAVE decoration.
             continue
         if f.table not in decoration_tables:
             decoration_tables.append(f.table)

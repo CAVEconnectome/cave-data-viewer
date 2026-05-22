@@ -31,6 +31,13 @@ interface Props {
    *  color + size pickers. Set by FeatureExplorer when a
    *  selection-growth probe has populated the in-memory distance map. */
   hasDistanceProbe?: boolean;
+  /** When true, the explorer holds an active connectivity seed
+   *  (``?seed=<root_id>``) and the picker exposes the server-derived
+   *  ``seed_*`` columns under a "Connectivity seed" group. The columns
+   *  resolve to per-cell projections of the seed's cached partners
+   *  bundle. Disabled silently otherwise — the bindings stay valid in
+   *  URL state but are not selectable from the picker. */
+  hasSeed?: boolean;
   x: string | null;
   y: string | null;
   colorBy: string | null;
@@ -97,6 +104,24 @@ interface Props {
   }) => void;
 }
 
+/** Prettify a `seed_*` column name for the picker. Strips the `seed_`
+ *  prefix, lifts a trailing `_in` / `_out` into a "(in)" / "(out)"
+ *  direction tag, and spaces out the remaining underscores. E.g.
+ *  `seed_net_size_out` → "net size (out)", `seed_partner_dir` →
+ *  "partner dir", `seed_n_syn_in` → "n syn (in)". */
+function seedColumnLabel(col: string): string {
+  let body = col.startsWith("seed_") ? col.slice(5) : col;
+  let suffix = "";
+  if (body.endsWith("_in")) {
+    body = body.slice(0, -3);
+    suffix = " (in)";
+  } else if (body.endsWith("_out")) {
+    body = body.slice(0, -4);
+    suffix = " (out)";
+  }
+  return body.replace(/_/g, " ") + suffix;
+}
+
 /** Default uniform color for color=__none__. Matches BASE_RGBA_NO_HIGHLIGHT
  *  in UniverseScatter so the swatch picker's initial value matches what
  *  the scatter already paints. */
@@ -121,6 +146,7 @@ export function ChannelPicker({
   featureTable,
   cellsColumnGroups,
   hasDistanceProbe,
+  hasSeed,
   x,
   y,
   colorBy,
@@ -236,7 +262,24 @@ export function ChannelPicker({
           isNumeric: true,
         }
       : null;
-    const all = [...parquetOptions, ...decorationOptions];
+    // Server-derived seed_* columns. Data-driven from the backend's
+    // "seed" column group (emitted by /cells when a seed is set) so the
+    // datastack's synapse-aggregation columns (`seed_net_size_in`,
+    // `seed_mean_size_out`, …) surface automatically without the picker
+    // hard-coding the rule names. `seed_partner_dir` is the only
+    // categorical column; everything else is numeric.
+    const seedGroup = hasSeed
+      ? (cellsColumnGroups ?? []).find((g) => g.name === "seed")
+      : undefined;
+    const seedOptions: ChannelOption[] = (seedGroup?.columns ?? []).map(
+      (col) => ({
+        value: col,
+        label: seedColumnLabel(col),
+        source: "Connectivity seed",
+        isNumeric: col !== "seed_partner_dir",
+      }),
+    );
+    const all = [...seedOptions, ...parquetOptions, ...decorationOptions];
     const allWithDistance = distanceOption ? [distanceOption, ...all] : all;
     return {
       // x/y axes are scatter-only (no bar/strip path yet), so categorical
@@ -248,7 +291,7 @@ export function ChannelPicker({
       colorOptions: allWithDistance,
       sizeOptions: allWithDistance.filter((o) => o.isNumeric !== false),
     };
-  }, [featureTable, cellsColumnGroups, hasDistanceProbe]);
+  }, [featureTable, cellsColumnGroups, hasDistanceProbe, hasSeed]);
 
   // Auto-clear stale axis bindings. If x or y is set to a column that
   // isn't in the (filtered) axisOptions — typically a categorical
@@ -267,6 +310,27 @@ export function ChannelPicker({
       onChange(updates);
     }
   }, [featureTable, axisOptions, x, y, onChange]);
+
+  // Auto-clear a stale `seed_*` color / size binding — e.g. a URL
+  // carrying a seed column that was removed or renamed. Gated tightly:
+  // only fires once the backend's `seed` column group has actually
+  // loaded (non-empty) AND the bound column isn't in it. Without the
+  // "group loaded" gate this would wrongly null a perfectly valid seed
+  // binding during the brief window before /cells responds.
+  useEffect(() => {
+    const seedCols = new Set(
+      (cellsColumnGroups ?? []).find((g) => g.name === "seed")?.columns ?? [],
+    );
+    if (seedCols.size === 0) return; // seed group not loaded — don't touch
+    const updates: { colorBy?: null; sizeBy?: null } = {};
+    if (colorBy && colorBy.startsWith("seed_") && !seedCols.has(colorBy))
+      updates.colorBy = null;
+    if (sizeBy && sizeBy.startsWith("seed_") && !seedCols.has(sizeBy))
+      updates.sizeBy = null;
+    if (updates.colorBy !== undefined || updates.sizeBy !== undefined) {
+      onChange(updates);
+    }
+  }, [cellsColumnGroups, colorBy, sizeBy, onChange]);
 
   return (
     <div className="explore-channels">
