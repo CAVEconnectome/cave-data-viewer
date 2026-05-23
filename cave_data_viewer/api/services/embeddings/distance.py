@@ -31,17 +31,31 @@ the SPA can surface "we used N of M seeds."
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, Sequence
+from typing import Any, Literal, Sequence
 
 import numpy as np
 
-from .feature_matrix import EmbeddingMatrix
-from .pca import EmbeddingPcaSvd, pca_components, whitened_components
+from .feature_matrix import EmbeddingMatrix, get_matrix
+from .pca import EmbeddingPcaSvd, pca_components, resolve_k_for_variance, whitened_components, get_pca_svd
 from ..timing import timer
+from ...errors import ApiError
+from .manifest import FeatureTableSpec
 
 
 Space = Literal["raw", "pca", "mahalanobis"]
 Reduction = Literal["centroid", "nearest", "mean"]
+
+# Distance-to-set seed cap. The nearest/mean reductions allocate a
+# pairwise (chunk, S, D) intermediate per chunk, so keeping S small
+# bounds per-request transient memory predictably regardless of
+# universe size.
+_MAX_SEED_CELL_IDS = 20
+
+# Top-K truncation defaults. The default is set high enough to ship
+# the entire universe for every public connectome we know about; the
+# ceiling stays in place as a guard against runaway client requests.
+_DEFAULT_DISTANCE_LIMIT = 200000
+_MAX_DISTANCE_LIMIT = 1000000
 
 
 @dataclass
@@ -231,3 +245,214 @@ def _chunked_distance(
             else:  # "mean"
                 out[start:end] = d.mean(axis=1)
     return out
+
+
+def compute_distance_to_set_payload(
+    *,
+    ds: str,
+    cfg,
+    src,
+    ft: FeatureTableSpec,
+    feature_table_id: str,
+    body: dict[str, Any],
+) -> dict[str, Any]:
+    """End-to-end distance_to_set: parse body → resolve matrix/SVD →
+    compute distances → sort + truncate → response dict.
+
+    Raises :class:`ApiError` (422) with the same code strings the
+    inline route did (``missing_cell_ids``, ``too_many_seeds``,
+    ``invalid_cell_id``, ``invalid_space``, ``missing_embedding_id``,
+    ``embedding_not_found`` [404], ``invalid_reduction``,
+    ``invalid_limit``, ``invalid_variance``, ``invalid_feature_columns``,
+    ``matrix_build_failed``, ``no_seeds_in_index``).
+    """
+    raw_ids = body.get("cell_ids")
+    if not isinstance(raw_ids, list) or not raw_ids:
+        raise ApiError(
+            422,
+            "missing_cell_ids",
+            "request body must include a non-empty `cell_ids` list",
+        )
+    if len(raw_ids) > _MAX_SEED_CELL_IDS:
+        raise ApiError(
+            422,
+            "too_many_seeds",
+            f"distance_to_set accepts at most {_MAX_SEED_CELL_IDS} seed "
+            f"cell_ids; got {len(raw_ids)}. Narrow the selection (e.g. "
+            "lasso a tighter kernel) before computing.",
+        )
+    seed_cell_ids: list[int] = []
+    for sid in raw_ids:
+        try:
+            seed_cell_ids.append(int(sid))
+        except (TypeError, ValueError) as exc:
+            raise ApiError(
+                422,
+                "invalid_cell_id",
+                f"cell_ids must be ints or numeric strings; got {sid!r}",
+            ) from exc
+
+    space = body.get("space", "pca")
+    if space not in ("raw", "pca", "mahalanobis", "embedding"):
+        raise ApiError(
+            422,
+            "invalid_space",
+            f"space must be one of raw | pca | mahalanobis | embedding; "
+            f"got {space!r}",
+        )
+
+    embedding_axes: list[str] | None = None
+    if space == "embedding":
+        embedding_id = body.get("embedding_id")
+        if not embedding_id:
+            raise ApiError(
+                422,
+                "missing_embedding_id",
+                "space 'embedding' requires 'embedding_id' in the request body",
+            )
+        try:
+            _ft_e, emb = src.resolve_embedding(feature_table_id, embedding_id)
+        except KeyError as exc:
+            raise ApiError(404, "embedding_not_found", str(exc)) from exc
+        embedding_axes = list(emb.axes)
+
+    reduction = body.get("reduction", "centroid")
+    if reduction not in ("centroid", "nearest", "mean"):
+        raise ApiError(
+            422,
+            "invalid_reduction",
+            f"reduction must be one of centroid | nearest | mean; "
+            f"got {reduction!r}",
+        )
+
+    limit_raw = body.get("limit", _DEFAULT_DISTANCE_LIMIT)
+    try:
+        limit = int(limit_raw)
+    except (TypeError, ValueError) as exc:
+        raise ApiError(
+            422, "invalid_limit", f"limit must be an integer, got {limit_raw!r}"
+        ) from exc
+    if limit < 1:
+        raise ApiError(422, "invalid_limit", "limit must be >= 1")
+    if limit > _MAX_DISTANCE_LIMIT:
+        raise ApiError(
+            422,
+            "invalid_limit",
+            f"limit may not exceed {_MAX_DISTANCE_LIMIT}; got {limit}",
+        )
+
+    variance_raw = body.get("variance", 0.9)
+    try:
+        variance = float(variance_raw)
+    except (TypeError, ValueError) as exc:
+        raise ApiError(
+            422,
+            "invalid_variance",
+            f"variance must be a number in (0, 1], got {variance_raw!r}",
+        ) from exc
+    if not (0.0 < variance <= 1.0):
+        raise ApiError(
+            422,
+            "invalid_variance",
+            f"variance must be in (0, 1], got {variance}",
+        )
+
+    feature_columns = body.get("feature_columns")
+    if feature_columns is not None:
+        if not isinstance(feature_columns, list) or not all(
+            isinstance(c, str) for c in feature_columns
+        ):
+            raise ApiError(
+                422,
+                "invalid_feature_columns",
+                "feature_columns must be a list of column names",
+            )
+        if len(feature_columns) < 2:
+            raise ApiError(
+                422,
+                "invalid_feature_columns",
+                "feature_columns must include at least 2 columns "
+                "(distance in 1D collapses to absolute difference and "
+                "PCA / Mahalanobis are undefined)",
+            )
+
+    clip_setting = ft.clip_percentiles
+    clip_percentiles: tuple[float, float] | None = (
+        (float(clip_setting[0]), float(clip_setting[1]))
+        if clip_setting is not None
+        else None
+    )
+    if space == "embedding":
+        matrix_feature_columns = embedding_axes
+        matrix_scaling = "raw"
+        matrix_clip = None
+    else:
+        matrix_feature_columns = feature_columns
+        matrix_scaling = ft.scaling
+        if not ft.standardize and matrix_scaling == "zscore":
+            matrix_scaling = "raw"
+        matrix_clip = clip_percentiles
+    # `get_matrix` and `get_pca_svd` accept `cache_ds` as a parameter
+    # and their internal accessor key builders apply `cache_datastack`
+    # idempotently — passing the raw `ds` here is equivalent to (and
+    # less brittle than) computing `cfg.cache_alias or ds` inline.
+    try:
+        matrix = get_matrix(
+            ds,
+            ft,
+            feature_columns=matrix_feature_columns,
+            scaling=matrix_scaling,
+            clip_percentiles=matrix_clip,
+            cache_ds=ds,
+        )
+    except ValueError as exc:
+        raise ApiError(422, "matrix_build_failed", str(exc)) from exc
+
+    svd = None
+    resolved_k = None
+    variance_explained = None
+    if space not in ("raw", "embedding"):
+        svd = get_pca_svd(ds, ft, matrix)
+        if space == "pca":
+            resolved_k, variance_explained = resolve_k_for_variance(svd, variance)
+
+    compute_space = "raw" if space == "embedding" else space
+    try:
+        result = compute_distance_to_set(
+            matrix,
+            seed_cell_ids,
+            space=compute_space,
+            reduction=reduction,
+            k_pca=resolved_k or 1,
+            svd=svd,
+        )
+    except ValueError as exc:
+        raise ApiError(422, "no_seeds_in_index", str(exc)) from exc
+
+    n_universe = len(result.distances)
+    effective_limit = min(limit, n_universe)
+    with timer("distance_truncate_topk"):
+        if effective_limit < n_universe:
+            unsorted_top = np.argpartition(
+                result.distances, effective_limit - 1
+            )[:effective_limit]
+            order = unsorted_top[np.argsort(result.distances[unsorted_top])]
+        else:
+            order = np.argsort(result.distances)
+        top_cell_ids = result.cell_ids[order]
+        top_distances = result.distances[order]
+
+    return {
+        "cell_ids": [str(cid) for cid in top_cell_ids.tolist()],
+        "distances": top_distances.tolist(),
+        "space": space,
+        "variance": variance if space == "pca" else None,
+        "k_pca": resolved_k,
+        "variance_explained": variance_explained,
+        "reduction": reduction,
+        "n_seed_in_index": result.n_seed_in_index,
+        "n_seed_missing": result.n_seed_missing,
+        "n_returned": int(effective_limit),
+        "n_universe": int(n_universe),
+        "feature_columns": list(matrix.feature_columns),
+    }

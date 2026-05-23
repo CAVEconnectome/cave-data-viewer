@@ -6,9 +6,13 @@ import { adapterForRecipe } from "./adapters/registry";
 /**
  * Cross-route handoff for adapter-supplied "extras" — non-URL recipe
  * state (e.g. the explorer's Selection bag) that needs to land in a
- * different view's component state. useApplyRecipe writes the
- * extras to a transient localStorage key keyed by (ds, kind); the
- * target view reads + removes it on mount.
+ * different view's component state. useApplyRecipe writes the extras
+ * to a transient sessionStorage key keyed by (ds, kind); the target
+ * view reads + removes it on mount.
+ *
+ * sessionStorage (not localStorage): the handoff is meaningful only
+ * within the tab that triggered the apply, and should not survive a
+ * tab crash to be consumed by an unrelated future session.
  *
  * One-shot semantics: any read consumes the value. This avoids the
  * extras getting re-applied on a later /explore mount that wasn't
@@ -27,9 +31,9 @@ export function consumePendingApplyExtras(
   if (!ds) return null;
   try {
     const key = pendingExtrasKey(ds, kind);
-    const raw = localStorage.getItem(key);
+    const raw = sessionStorage.getItem(key);
     if (!raw) return null;
-    localStorage.removeItem(key);
+    sessionStorage.removeItem(key);
     const parsed = JSON.parse(raw) as Record<string, unknown>;
     return typeof parsed === "object" && parsed !== null ? parsed : null;
   } catch {
@@ -44,7 +48,7 @@ export function writePendingApplyExtras(
 ): void {
   if (!ds) return;
   try {
-    localStorage.setItem(pendingExtrasKey(ds, kind), JSON.stringify(extras));
+    sessionStorage.setItem(pendingExtrasKey(ds, kind), JSON.stringify(extras));
   } catch {
     // Quota exceeded etc. — non-fatal; URL state still lands, just
     // without the extras.
@@ -85,19 +89,26 @@ export function useApplyRecipe(): (recipe: Recipe) => void {
       // anchors.
       const ds = prev.get("ds") ?? "";
       const mv = prev.get("mv");
+      // Capture the extras rather than writing them immediately. The
+      // write is deferred past the confirm dialog below, so a cancelled
+      // apply doesn't leave a stale Selection bag for the next /explore
+      // visit to consume.
+      let capturedExtras: Record<string, unknown> | null = null;
       const onExtras = (extras: Record<string, unknown>) => {
-        writePendingApplyExtras(ds, recipe.kind, extras);
+        capturedExtras = extras;
       };
 
       if (!adapter.hasNavContext(prev)) {
         if (!ds) return;
         // buildOpenParams calls applyToParams internally — pass the
-        // extras-writer so a recipe with a Selection bag still
-        // restores it on the destination route.
+        // extras callback so a recipe with a Selection bag still
+        // restores it on the destination route. No confirm on this
+        // path, so the write happens unconditionally before navigate.
         const fresh = new URLSearchParams();
         fresh.set("ds", ds);
         if (mv) fresh.set("mv", mv);
         const openParams = adapter.applyToParams(fresh, recipe, onExtras);
+        if (capturedExtras) writePendingApplyExtras(ds, recipe.kind, capturedExtras);
         navigate(`${adapter.openRoute}?${openParams.toString()}`);
         return;
       }
@@ -108,6 +119,7 @@ export function useApplyRecipe(): (recipe: Recipe) => void {
       if (summary && !window.confirm(`Apply recipe "${recipe.title}"?\n\n${summary}`)) {
         return;
       }
+      if (capturedExtras) writePendingApplyExtras(ds, recipe.kind, capturedExtras);
       navigate(`${adapter.openRoute}?${next.toString()}`);
     },
     [navigate, searchParams],

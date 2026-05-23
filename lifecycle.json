@@ -1,0 +1,21 @@
+{
+  "lifecycle": {
+    "rule": [
+      {
+        "action": { "type": "Delete" },
+        "condition": {
+          "age": 2,
+          "matchesPrefix": ["cache/default/"]
+        }
+      },
+      {
+        "action": { "type": "Delete" },
+        "condition": {
+          "age": 730,
+          "matchesPrefix": ["cache/longlived/"]
+        }
+      }
+    ]
+  }
+}
+

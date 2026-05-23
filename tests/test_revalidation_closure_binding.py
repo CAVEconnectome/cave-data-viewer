@@ -70,24 +70,26 @@ def test_decoration_revalidation_closures_use_default_args():
     `services/decoration.py` must default-arg-capture every variable
     they reference. Drop one and this test fails — re-read CLAUDE.md
     before "cleaning up" the signature.
+
+    `_refresh_soma` / `_refresh_table` live inside the `for tbl in ...`
+    loop in `lookup_decorations`; `_table=tbl` in particular pins the
+    loop variable — referencing it free would let a later iteration's
+    `tbl` poison every already-submitted closure. Brittle to renames,
+    but that's the point: any rename re-affirms the rule.
     """
     import inspect
 
     from cave_data_viewer.api.services import decoration
 
     source = inspect.getsource(decoration)
-    # Each refresh closure inside `lookup_decorations` captures via
-    # `_cache=...`, `_key=...`, `_table=...`, `_mv=...`. Search the
-    # source for the canonical def lines and assert the default-arg
-    # capture is present. Brittle to renames, but that's the point —
-    # any rename of these closures should re-affirm the rule.
-    refresh_closures = [
-        "_refresh_soma",
-        "_refresh_table",
-    ]
-    for name in refresh_closures:
-        assert f"def {name}(_cache=" in source, (
-            f"Closure {name!r} in decoration.py must default-arg-capture "
-            "_cache. Without `_cache=...` the late-binding bug from "
-            "phase-c regresses — see CLAUDE.md 'late-binding closure bug'."
-        )
+    for name in ("_refresh_soma", "_refresh_table"):
+        marker = f"def {name}("
+        assert marker in source, f"closure {name!r} not found in decoration.py"
+        # The signature runs from `def <name>(` to the first `):`.
+        signature = source[source.index(marker):].split("):", 1)[0]
+        for captured in ("_service=", "_table=", "_mv="):
+            assert captured in signature, (
+                f"Closure {name!r} in decoration.py must default-arg-capture "
+                f"`{captured}...`. Without it the late-binding bug from "
+                "phase-c regresses — see CLAUDE.md 'late-binding closure bug'."
+            )

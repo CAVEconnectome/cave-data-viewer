@@ -27,7 +27,7 @@
  * sidebar has something to render).
  */
 import { JSON_SCHEMA, load as yamlLoad } from "js-yaml";
-import type { Recipe, RecipeKind, RecipeScope, ScopePredicate, ScopePredicateOp } from "../api/types";
+import type { Recipe, RecipeKind } from "../api/types";
 import { newPersonalId } from "./personalRecipes";
 import { adapterFor, ALL_KINDS } from "./adapters/registry";
 
@@ -36,8 +36,6 @@ export interface RecipeParseResult {
   warnings: string[];
   errors: string[];
 }
-
-const VALID_SCOPE_OPS = new Set<string>(["in", "eq", "ne", "gt", "gte", "lt", "lte"]);
 
 // Hardening: cap input size before handing it to the YAML parser. A
 // hostile (or accidentally enormous) blob shouldn't be able to OOM the
@@ -105,28 +103,6 @@ export function parseRecipesFromYaml(yamlText: string): RecipeParseResult {
     errors.push("No usable recipes found in YAML.");
   }
   return { recipes, warnings, errors };
-}
-
-export function parseScopeBlock(raw: unknown, _where: string): RecipeScope | undefined {
-  if (raw == null) return undefined;
-  if (typeof raw !== "object") return undefined;
-  const preds = (raw as Record<string, unknown>).predicates;
-  if (!Array.isArray(preds)) return undefined;
-  const out: ScopePredicate[] = [];
-  for (const p of preds) {
-    if (typeof p !== "object" || p == null) continue;
-    const r = p as Record<string, unknown>;
-    if (typeof r.column !== "string" || typeof r.op !== "string") continue;
-    if (!VALID_SCOPE_OPS.has(r.op)) continue;  // drop invalid op silently — tolerant parser
-    out.push({
-      column: r.column,
-      op: r.op as ScopePredicateOp,
-      value: r.value,
-      values: Array.isArray(r.values) ? r.values : undefined,
-    });
-  }
-  if (out.length === 0) return undefined;
-  return { predicates: out };
 }
 
 function coerceRecipe(

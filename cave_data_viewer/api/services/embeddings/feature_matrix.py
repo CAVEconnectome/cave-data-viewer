@@ -333,9 +333,13 @@ def get_matrix(
     digest = feature_subset_digest(
         cols, scaling=scaling, clip_percentiles=clip_percentiles
     )
-    key = (cache_ds, ft.id, digest)
+    from ..cache_accessors import (
+        embedding_matrix_cache_key,
+        get_embedding_matrix_cache,
+    )
+    key = embedding_matrix_cache_key(cache_ds, ft.id, digest)
 
-    cache = current_app.extensions.get("dcv_embedding_matrix_cache")
+    cache = get_embedding_matrix_cache()
     if cache is not None:
         t0 = time.perf_counter()
         hit = cache.get(key)

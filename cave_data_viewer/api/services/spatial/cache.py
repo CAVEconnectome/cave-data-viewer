@@ -17,10 +17,11 @@ from typing import Any
 
 import pandas as pd
 
-from flask import current_app
-
-from ...caches import cache_key_with_config
-from ..cache_lifecycle import cache_datastack
+from ...caches import config_digest
+from ..cache_accessors import (
+    get_spatial_features_cache,
+    spatial_features_cache_key,
+)
 from ..keys import is_live
 import time as _time
 
@@ -71,17 +72,18 @@ def compute_spatial_features_cached(
     # `NeuronQuery._cache_key` for the synapse df. The 1.2s recompute
     # cost is acceptable on the live path; warm plot requests in mat
     # mode are the wins this cache is for.
-    cache = (
-        current_app.extensions.get("dcv_spatial_features_cache")
-        if not is_live(nq.mat_version) else None
-    )
-    key = cache_key_with_config(
-        cache_datastack(nq.datastack), nq.mat_version, nq.root_id, nq.soma_table,
-        config_bundle={
-            "syn_position_prefix": nq.synapse_position_prefix,
-            "desired_resolution": list(nq.desired_resolution),
-            "spatial_provider": provider.cache_key(),
-        },
+    cache = get_spatial_features_cache() if not is_live(nq.mat_version) else None
+    # `config_digest` rolls every knob that shapes the cached payload
+    # into a single hash; the accessor's key builder applies
+    # cache_datastack + assembles the final tuple shape the cache uses.
+    digest = config_digest({
+        "syn_position_prefix": nq.synapse_position_prefix,
+        "desired_resolution": list(nq.desired_resolution),
+        "spatial_provider": provider.cache_key(),
+    })
+    key = spatial_features_cache_key(
+        nq.datastack, nq.mat_version, nq.root_id, nq.soma_table,
+        config_digest=digest,
     )
     if cache is not None:
         # Time the lookup itself so a cold-pod L2 promotion shows up under

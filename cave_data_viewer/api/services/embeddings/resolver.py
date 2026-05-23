@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Callable, Literal, Sequence
+from typing import Literal, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -106,77 +106,6 @@ def resolve_cell_ids_to_root_ids(
                 )
             )
     return results
-
-
-def resolve_pairs_to_root_ids(
-    *,
-    client_factory: Callable[[str], Any],
-    cfg_factory: Callable[[str], Any],
-    mat_version: int | str | None,
-    pairs: Sequence[tuple[str, int]],
-) -> list[Resolution]:
-    """Translate ``(datastack, cell_id)`` pairs → root_ids at ``mat_version``.
-
-    The multi-dataset companion to :func:`resolve_cell_ids_to_root_ids`.
-    Shards ``pairs`` by datastack, dispatches one per-ds batch through
-    the existing single-ds primitive, and stitches results back into the
-    original positional order. Each returned ``Resolution`` carries its
-    ``source_ds`` so multi-ds callers (e.g. the phase-2 body-scoped
-    ``/resolve_roots`` endpoint) can route every resolution back to its
-    home datastack without a side lookup.
-
-    Parameters
-    ----------
-    client_factory
-        ``ds -> CAVEclient``. Called once per distinct datastack present
-        in ``pairs``. Phase-1 callers can wrap the existing
-        :func:`api.cave.request_client` factory.
-    cfg_factory
-        ``ds -> DatastackConfig``. Called once per distinct datastack.
-        Typically a thin closure over
-        :func:`services.datastack_config.load_datastack_config`.
-    mat_version
-        Shared materialization version for the whole batch. The resolver
-        only supports one mat_version per call because the cell_id
-        universe cache is keyed on it; mixing versions in one call would
-        force per-pair cache lookups and lose the batching benefit.
-    pairs
-        ``(datastack, cell_id)`` tuples. Order is preserved in the
-        output. An empty list short-circuits to ``[]``.
-    """
-    if not pairs:
-        return []
-
-    # Bucket positions by datastack so we can issue one batch per ds
-    # while preserving the caller's order in the final list.
-    by_ds: dict[str, list[int]] = {}
-    positions: dict[str, list[int]] = {}
-    for i, (ds, cid) in enumerate(pairs):
-        by_ds.setdefault(ds, []).append(int(cid))
-        positions.setdefault(ds, []).append(i)
-
-    output: list[Resolution | None] = [None] * len(pairs)
-    for ds, cids in by_ds.items():
-        client = client_factory(ds)
-        cfg = cfg_factory(ds)
-        results = resolve_cell_ids_to_root_ids(
-            client=client,
-            cfg=cfg,
-            mat_version=mat_version,
-            datastack=ds,
-            cell_ids=cids,
-        )
-        for j, res in enumerate(results):
-            original_index = positions[ds][j]
-            # Re-stamp with source_ds so the wire shape carries the
-            # row's home datastack. ``replace`` rather than mutating
-            # because Resolution is frozen.
-            from dataclasses import replace
-            output[original_index] = replace(res, source_ds=ds)
-
-    # Cast: ``None`` slots are filled because every position appears in
-    # exactly one ds bucket; the type narrowing is for the type checker.
-    return [r for r in output if r is not None]
 
 
 def reverse_resolve_root_id_to_cell_id(

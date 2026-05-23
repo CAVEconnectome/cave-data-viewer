@@ -20,7 +20,7 @@ import type {
   DistanceToSetArgs,
   DistanceToSetResponse,
   EmbeddingColumnResponse,
-  EmbeddingListResponse,
+  FeatureTableListResponse,
   EmbeddingScatterResponse,
   FeatureTableCellsResponse,
   FindCellsResponse,
@@ -55,9 +55,9 @@ const PATHS = {
 
 /** Catalog of embeddings for one datastack. Always 200; check `enabled`. */
 export function useEmbeddingList(ds: string | null) {
-  return useQuery<EmbeddingListResponse>({
+  return useQuery<FeatureTableListResponse>({
     queryKey: ["embedding_list", ds],
-    queryFn: () => apiFetch<EmbeddingListResponse>(PATHS.list(ds!)),
+    queryFn: () => apiFetch<FeatureTableListResponse>(PATHS.list(ds!)),
     enabled: !!ds,
     // Catalog comes from a SWR-cached manifest server-side (~5 min refresh).
     // 5 min stale matches that cadence so the SPA doesn't poll the catalog

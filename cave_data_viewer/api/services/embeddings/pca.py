@@ -124,9 +124,10 @@ def get_pca_svd(
         scaling=matrix.scaling,
         clip_percentiles=matrix.clip_percentiles,
     )
-    key = (cache_ds, ft.id, digest)
+    from ..cache_accessors import embedding_pca_cache_key, get_embedding_pca_cache
+    key = embedding_pca_cache_key(cache_ds, ft.id, digest)
 
-    cache = current_app.extensions.get("dcv_embedding_pca_cache")
+    cache = get_embedding_pca_cache()
     if cache is not None:
         t0 = time.perf_counter()
         hit = cache.get(key)

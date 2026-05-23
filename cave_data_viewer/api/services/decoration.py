@@ -18,9 +18,8 @@ from flask import current_app
 
 from .keys import is_live
 from .query_runner import run_query
-from .request_state import current_timestamp
 from .tables import is_view_name
-from .timing import current_stages, timer
+from .timing import timer
 
 
 def _decoration_query_factory(client, name: str, mat_version, **filters):
@@ -159,11 +158,59 @@ class DecorationService:
             return self.table_decorations_live if live else self.table_decorations_mat
         return self.num_soma_live if live else self.num_soma_mat
 
+    def refresh_cache(
+        self,
+        *,
+        kind: Literal["num_soma", "table"],
+        ds: str,
+        mat_version,
+        table: str,
+        client,
+        soma_root_id_column: str = "pt_root_id",
+        timestamp=None,
+        stages: dict | None = None,
+    ) -> dict[int, dict]:
+        """The single fetch -> cache.set -> cell-id-backfill path.
+
+        Shared by all three decoration-cache writers — the periodic
+        warmer, the request-path cold fetch, and background revalidation.
+        Fetcher dispatch, cache-key construction (via
+        :func:`decoration_cache_key`, which applies the alias) and the
+        soma cell-id back-population all happen here, in exactly one
+        place, so the writers can't drift. Returns the freshly fetched
+        lookup dict so request-path callers can use it directly.
+        """
+        from .cache_accessors import decoration_cache_key
+
+        live = is_live(mat_version)
+        if kind == "num_soma":
+            value = _fetch_num_soma_table(
+                client, table, mat_version,
+                soma_root_id_column=soma_root_id_column,
+                stages=stages, timestamp=timestamp,
+            )
+        else:
+            value = _fetch_decoration_table(
+                client, table, mat_version,
+                stages=stages, timestamp=timestamp,
+            )
+        # The accessor's key builder applies cache_datastack() so every
+        # writer lands on the same key the request-path readers consult.
+        self.cache_for(kind, live).set(decoration_cache_key(ds, mat_version, table), value)
+        # The soma fetch is also the canonical (root_id, cell_id) source —
+        # back-populate the cell-id caches. Materialized mode only: a
+        # concrete integer version pins stable cell_ids; live ids drift.
+        if kind == "num_soma" and not live:
+            _populate_cell_id_caches_from_soma(value, ds, int(mat_version))
+        return value
+
     # --- Tickets --------------------------------------------------------------
 
     def mint_ticket(self, *, ds: str, mat_version: int | str | None,
                     soma_table: str | None,
-                    served: dict[int, dict]) -> str:
+                    served: dict[int, dict],
+                    stale_soma: bool,
+                    stale_tables: list[str]) -> str:
         ticket_id = uuid.uuid4().hex
         self.tickets[ticket_id] = {
             "ds": ds,
@@ -171,11 +218,17 @@ class DecorationService:
             "soma_table": soma_table,
             "served": served,
             "minted_at": time.time(),
+            # Which cache sources were stale (background refresh queued) at
+            # mint time. `poll_ticket` waits only on these; soma/tables that
+            # were fresh hits or cold-fetched at request time are already
+            # final and must not gate readiness.
+            "stale_soma": stale_soma,
+            "stale_tables": list(stale_tables),
         }
         return ticket_id
 
     def poll_ticket(self, ticket_id: str) -> dict:
-        from .cache_lifecycle import cache_datastack
+        from .cache_accessors import decoration_cache_key
 
         ticket = self.tickets.get(ticket_id)
         if ticket is None:
@@ -183,24 +236,50 @@ class DecorationService:
         live = is_live(ticket["mat_version"])
         soma_table = ticket["soma_table"]
         ds = ticket["ds"]
-        # Cache namespace alias: must match `lookup_decorations` writes,
-        # otherwise the meta-readback below misses on aliased datastacks.
-        cache_ds = cache_datastack(ds)
         mv = ticket["mat_version"]
         minted_at = ticket["minted_at"]
+        stale_soma = ticket.get("stale_soma", False)
+        stale_tables = ticket.get("stale_tables", [])
 
-        soma_cache = self.cache_for("num_soma", live) if soma_table else None
+        # Readiness = "every cache that was STALE at mint time has been
+        # refreshed since" — i.e. `fetched_at >= minted_at`. This is a
+        # timestamp comparison, NOT a fresh/stale check: a refreshed value
+        # can immediately re-stale under soft TTL, which would never let the
+        # ticket become ready. Caches that were fresh hits or cold-fetched
+        # at request time are already final, so poll never waits on them.
+        #
+        # `decoration_cache_key` applies the cache-namespace alias so
+        # readers here match the writes performed by
+        # `refresh_cache` / `lookup_decorations`.
 
-        # Readiness = "the cache entry has been refreshed since the ticket was minted"
-        # — independent of soft/hard TTL state, which can re-stale a freshly written value.
         soma_lookup = None
-        if soma_cache is not None:
-            meta = soma_cache.get_with_meta((cache_ds, mv, soma_table))
-            if meta is not None and meta[1] >= minted_at:
+        if soma_table:
+            soma_cache = self.cache_for("num_soma", live)
+            meta = soma_cache.get_with_meta(decoration_cache_key(ds, mv, soma_table))
+            if meta is None:
+                # Entry evicted (hard TTL) before its refresh landed — only
+                # blocks readiness if soma was the thing being refreshed.
+                if stale_soma:
+                    return {"status": "in_flight", "retry_after": 2}
+            else:
+                if stale_soma and meta[1] < minted_at:
+                    return {"status": "in_flight", "retry_after": 2}
                 soma_lookup = meta[0]
 
-        if soma_table and soma_lookup is None:
-            return {"status": "in_flight", "retry_after": 2}
+        # Every decoration table that was stale needs its background refresh
+        # to have landed before the ticket can be `ready`. The soma-only
+        # poll used to skip this entirely — a request that went stale on a
+        # cell-type / annotation table reported `ready` with empty deltas
+        # (or `in_flight` forever when a soma table was also present), and
+        # the stale annotation values were never corrected.
+        table_lookups: dict[str, dict[int, dict]] = {}
+        if stale_tables:
+            table_cache = self.cache_for("table", live)
+            for tbl in stale_tables:
+                meta = table_cache.get_with_meta(decoration_cache_key(ds, mv, tbl))
+                if meta is None or meta[1] < minted_at:
+                    return {"status": "in_flight", "retry_after": 2}
+                table_lookups[tbl] = meta[0]
 
         deltas: dict[int, dict[str, Any]] = {}
         for rid_str, served in ticket["served"].items():
@@ -211,6 +290,12 @@ class DecorationService:
                 current["num_soma"] = int(soma_rec.get("num_soma", 0))
                 if "cell_id" in soma_rec:
                     current["cell_id"] = soma_rec["cell_id"]
+            for tbl, tbl_data in table_lookups.items():
+                for k, v in (tbl_data.get(rid) or {}).items():
+                    current[f"{tbl}.{k}"] = v
+            # Only changed/added keys are reported — the delta wire format
+            # has no "removed key" channel, so a decoration value that
+            # disappeared on refresh is not reconciled (pre-existing limit).
             diff = {k: v for k, v in current.items() if served.get(k) != v}
             if diff:
                 deltas[rid] = diff
@@ -293,29 +378,23 @@ def _register_warmup_jobs(app, service: "DecorationService") -> None:
         cf = make_factory(ds_name)
 
         for tbl in tables_to_warm:
-            cache = service.table_decorations_mat
-
-            def _warm_table(_cache=cache, _cf=cf, _ds=ds_name, _table=tbl):
-                from .cache_lifecycle import cache_datastack
+            def _warm_table(_service=service, _cf=cf, _ds=ds_name, _table=tbl):
                 client = _cf()
                 latest = _latest_valid_version(client)
                 if latest is None:
                     return
                 client.materialize.version = latest
-                fresh = _fetch_decoration_table(client, _table, latest)
-                # cache_datastack() resolves the alias so warmer writes
-                # land on the same key the request-path readers consult.
-                _cache.set((cache_datastack(_ds), latest, _table), fresh)
+                _service.refresh_cache(
+                    kind="table", ds=_ds, mat_version=latest,
+                    table=_table, client=client,
+                )
 
             service.warmer.register(
                 f"{ds_name}/table/{tbl}", _warm_table, interval, startup_delay
             )
 
         if warm_soma:
-            cache = service.num_soma_mat
-
-            def _warm_soma(_cache=cache, _cf=cf, _ds=ds_name):
-                from .cache_lifecycle import cache_datastack
+            def _warm_soma(_service=service, _cf=cf, _ds=ds_name):
                 client = _cf()
                 latest = _latest_valid_version(client)
                 if latest is None:
@@ -324,13 +403,13 @@ def _register_warmup_jobs(app, service: "DecorationService") -> None:
                 soma_table = client.info.get_datastack_info().get("soma_table")
                 if not soma_table:
                     return
-                fresh = _fetch_num_soma_table(client, soma_table, latest)
-                _cache.set((cache_datastack(_ds), latest, soma_table), fresh)
-                # Side-populate the cell-id caches from this same fetch — every
-                # single-soma row is a (root_id, cell_id) pair, and the soma
-                # table is the source of truth for that decoration. Saves a
-                # second round-trip against the dedicated lookup view.
-                _populate_cell_id_caches_from_soma(fresh, _ds, latest)
+                # refresh_cache also side-populates the cell-id caches from
+                # the soma fetch — every single-soma row is a (root_id,
+                # cell_id) pair, saving a round-trip against the lookup view.
+                _service.refresh_cache(
+                    kind="num_soma", ds=_ds, mat_version=latest,
+                    table=soma_table, client=client,
+                )
 
             service.warmer.register(
                 f"{ds_name}/num_soma", _warm_soma, interval, startup_delay
@@ -796,19 +875,15 @@ def lookup_decorations(
     annotation source — they no longer get a dedicated cache slot or code
     path.
     """
-    from .cache_lifecycle import cache_datastack
+    from .cache_accessors import decoration_cache_key
 
     service = get_decoration_service()
     live = is_live(mat_version)
     has_stale = False
-
-    # Resolve the cache namespace once. When per-datastack YAML sets
-    # `cache_alias`, requests for `ds` redirect to the alias target's
-    # cache space — readers and writers must agree, so we compute it
-    # here and use `cache_ds` everywhere downstream that builds a cache
-    # key. The original `ds` is still used for non-cache concerns
-    # (cell-id back-population, log lines, ticket bookkeeping).
-    cache_ds = cache_datastack(ds)
+    # Track *which* sources were stale so the poll ticket waits only on the
+    # caches that actually have a background refresh in flight.
+    stale_soma = False
+    stale_tables: list[str] = []
 
     # `soma_lookup[root_id] = {"num_soma": int, "cell_id"?: str}` — cell_id only
     # present when the root has a single row in the soma table.
@@ -816,7 +891,11 @@ def lookup_decorations(
 
     # First pass: read caches synchronously. Decide which need a synchronous
     # cold fetch (no cache or hard-expired) vs an async revalidation (stale).
-    cold_jobs: list[tuple[str, Any]] = []  # ("num_soma" | "table", payload)
+    # Cache keys are built via `decoration_cache_key` so reads here match
+    # writes performed by `refresh_cache` / `poll_ticket` — the alias is
+    # applied in one place. The original `ds` is still used for non-cache
+    # concerns (cell-id back-population, log lines, ticket bookkeeping).
+    cold_jobs: list[tuple[str, str]] = []  # (kind, table)
 
     # Snapshot fetched_at timestamp captured for the live-mode delta
     # fill-in below. Stays None for materialized mode (no delta path).
@@ -824,23 +903,23 @@ def lookup_decorations(
 
     if soma_table:
         soma_cache = service.cache_for("num_soma", live)
-        soma_key = (cache_ds, mat_version, soma_table)
+        soma_key = decoration_cache_key(ds, mat_version, soma_table)
         entry = soma_cache.get_full(soma_key)
         if entry is None:
-            cold_jobs.append(("num_soma", (soma_cache, soma_key)))
+            cold_jobs.append(("num_soma", soma_table))
         else:
             soma_lookup, freshness, soma_snapshot_time = entry
             if freshness == "stale":
                 has_stale = True
+                stale_soma = True
 
-                def _refresh_soma(_cache=soma_cache, _key=soma_key,
+                def _refresh_soma(_service=service, _cf=client_factory,
                                   _table=soma_table, _mv=mat_version,
                                   _col=soma_root_id_column, _ds=ds):
-                    fresh = _fetch_num_soma_table(client_factory(), _table, _mv,
-                                                  soma_root_id_column=_col)
-                    _cache.set(_key, fresh)
-                    if not is_live(_mv):
-                        _populate_cell_id_caches_from_soma(fresh, _ds, int(_mv))
+                    _service.refresh_cache(
+                        kind="num_soma", ds=_ds, mat_version=_mv,
+                        table=_table, client=_cf(), soma_root_id_column=_col,
+                    )
 
                 service.executor.submit(("num_soma", soma_key), _refresh_soma)
 
@@ -857,62 +936,57 @@ def lookup_decorations(
             # because of the per-cell aggregation; everything else is generic).
             continue
         tcache = service.cache_for("table", live)
-        tkey = (cache_ds, mat_version, tbl)
+        tkey = decoration_cache_key(ds, mat_version, tbl)
         entry = tcache.get_full(tkey)
         if entry is None:
-            cold_jobs.append(("table", (tcache, tkey, tbl)))
+            cold_jobs.append(("table", tbl))
             table_lookups[tbl] = None  # populated by the cold-fetch loop below
         else:
             data, freshness, table_snapshot_times[tbl] = entry
             table_lookups[tbl] = data
             if freshness == "stale":
                 has_stale = True
+                stale_tables.append(tbl)
 
-                def _refresh_table(_cache=tcache, _key=tkey,
-                                   _table=tbl, _mv=mat_version):
-                    fresh = _fetch_decoration_table(client_factory(), _table, _mv)
-                    _cache.set(_key, fresh)
+                def _refresh_table(_service=service, _cf=client_factory,
+                                   _table=tbl, _mv=mat_version, _ds=ds):
+                    _service.refresh_cache(
+                        kind="table", ds=_ds, mat_version=_mv,
+                        table=_table, client=_cf(),
+                    )
 
                 service.executor.submit(("table", tkey), _refresh_table)
 
     # Parallelize cold fetches: they don't depend on each other, and the cell-type
     # table + soma table are usually the slowest two CAVE calls in a request.
     if cold_jobs:
-        # Capture the request's timing-stages dict + pinned consistency
-        # timestamp here in the request thread, then pass them explicitly
-        # into worker threads. Workers can't reach `flask.g`; without
-        # explicit pass-through, their decoration_query[*] timings get
-        # silently dropped AND their live_queries fall back to now() —
-        # which would break the per-request consistency we're enforcing.
-        request_stages = current_stages()
-        request_ts = current_timestamp()
+        # `capture_request_context` snapshots the request thread's
+        # timing-stages dict + pinned consistency timestamp; workers
+        # can't reach `flask.g`, and without these explicit captures
+        # their `decoration_query[*]` timings get silently dropped AND
+        # their live_queries fall back to `now()` — which would break
+        # the per-request consistency we're enforcing.
+        from .request_context import capture_request_context
+        ctx = capture_request_context()
         with ThreadPoolExecutor(max_workers=min(len(cold_jobs), 8)) as pool:
             futures: dict = {}
-            for job in cold_jobs:
-                kind = job[0]
-                if kind == "num_soma":
-                    cache, cache_key = job[1]
-                    futures[pool.submit(_fetch_num_soma_table,
-                                        client_factory(), soma_table, mat_version,
-                                        soma_root_id_column,
-                                        stages=request_stages,
-                                        timestamp=request_ts)] = (kind, cache, cache_key, None)
-                else:  # "table" — covers all annotation tables, including cell-type
-                    cache, cache_key, tbl = job[1]
-                    futures[pool.submit(_fetch_decoration_table,
-                                        client_factory(), tbl, mat_version,
-                                        stages=request_stages,
-                                        timestamp=request_ts)] = (kind, cache, cache_key, tbl)
-            for fut, meta in futures.items():
-                kind, cache, cache_key, tbl = meta
+            for kind, table in cold_jobs:
+                # refresh_cache does the fetch + cache.set + (soma) cell-id
+                # back-population; the cold path just needs the returned
+                # value to populate the request's served records.
+                futures[pool.submit(
+                    service.refresh_cache,
+                    kind=kind, ds=ds, mat_version=mat_version, table=table,
+                    client=client_factory(),
+                    soma_root_id_column=soma_root_id_column,
+                    timestamp=ctx.timestamp, stages=ctx.stages,
+                )] = (kind, table)
+            for fut, (kind, table) in futures.items():
                 result = fut.result()
-                cache.set(cache_key, result)
                 if kind == "num_soma":
                     soma_lookup = result
-                    if not live:
-                        _populate_cell_id_caches_from_soma(result, ds, int(mat_version))
                 else:
-                    table_lookups[tbl] = result
+                    table_lookups[table] = result
 
     # Live-mode delta fill-in. For warm-cache hits (where snapshot_time
     # is set), check the chunkedgraph delta between snapshot and the
@@ -928,24 +1002,24 @@ def lookup_decorations(
     # because we don't read get_full's third value into anything for
     # mat-mode purposes; live=False short-circuits below regardless).
     if live and root_ids:
-        request_target_time = current_timestamp()
-        if request_target_time is not None:
+        from .request_context import capture_request_context
+        ctx = capture_request_context()
+        if ctx.timestamp is not None:
             client_for_delta = client_factory()  # one client; reused across tables
-            request_stages_for_fill = current_stages()
 
             if soma_lookup is not None and soma_snapshot_time is not None and soma_table:
                 soma_lookup = _apply_live_delta(
                     snapshot=soma_lookup,
                     snapshot_time=soma_snapshot_time,
                     partner_ids=root_ids,
-                    target_time=request_target_time,
+                    target_time=ctx.timestamp,
                     client=client_for_delta,
                     fetcher=lambda root_ids, *, timestamp, stages: _fetch_num_soma_table_filtered(
                         client_for_delta, soma_table, mat_version, root_ids,
                         soma_root_id_column=soma_root_id_column,
                         stages=stages, timestamp=timestamp,
                     ),
-                    request_stages=request_stages_for_fill,
+                    request_stages=ctx.stages,
                 )
             for tbl, snap_time in table_snapshot_times.items():
                 snap = table_lookups.get(tbl)
@@ -958,13 +1032,13 @@ def lookup_decorations(
                     snapshot=snap,
                     snapshot_time=snap_time,
                     partner_ids=root_ids,
-                    target_time=request_target_time,
+                    target_time=ctx.timestamp,
                     client=client_for_delta,
                     fetcher=lambda root_ids, *, timestamp, stages, _tbl=tbl: _fetch_decoration_table_filtered(
                         client_for_delta, _tbl, mat_version, root_ids,
                         stages=stages, timestamp=timestamp,
                     ),
-                    request_stages=request_stages_for_fill,
+                    request_stages=ctx.stages,
                 )
 
     served: dict[int, dict[str, Any]] = {}
@@ -1033,6 +1107,8 @@ def lookup_decorations(
             ds=ds, mat_version=mat_version,
             soma_table=soma_table,
             served={str(k): v for k, v in served.items()},
+            stale_soma=stale_soma,
+            stale_tables=stale_tables,
         )
         revalidation = {
             "ticket_id": ticket_id,

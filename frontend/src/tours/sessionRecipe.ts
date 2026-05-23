@@ -187,11 +187,6 @@ export function useSessionRecipe(kind: RecipeKind): void {
 
     if (dsChanged) {
       const saved = loadSessionRecipe(ds, kind);
-      if (saved && adapter.urlHasContent(new URLSearchParams())) {
-        // Defensive shouldn't-reach: urlHasContent on an empty URL is
-        // false; we keep the branch for clarity that "non-empty saved"
-        // is the trigger.
-      }
       if (saved && hasAnyField(saved)) {
         const next = adapter.applyToParams(params, saved);
         setParams(next, { replace: true });

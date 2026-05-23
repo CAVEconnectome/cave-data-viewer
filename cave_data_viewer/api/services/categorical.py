@@ -31,8 +31,6 @@ import colorsys
 
 from flask import current_app
 
-from .cache_lifecycle import cache_datastack
-
 
 # tab10 — the canonical categorical palette. Slots 0–9.
 TAB10 = [
@@ -92,11 +90,12 @@ def get_unique_values(
 
     # Tuple-shaped key with `(cache_ds, mat_version)` as the leading
     # elements so the L2 retention resolver can pick default vs
-    # longlived without re-deriving them. `cache_datastack` resolves any
-    # per-datastack alias so two datastacks backed by the same data
-    # share one cache entry.
-    cache = current_app.extensions["dcv_unique_values_cache"]
-    key = (cache_datastack(ds), mat_version, table)
+    # longlived without re-deriving them. The accessor's key builder
+    # applies `cache_datastack` so two datastacks backed by the same
+    # data share one cache entry.
+    from .cache_accessors import get_unique_values_cache, unique_values_cache_key
+    cache = get_unique_values_cache()
+    key = unique_values_cache_key(ds, mat_version, table)
     hit = cache.get(key)
     if hit is None:
         values = _fetch(client_factory, table)

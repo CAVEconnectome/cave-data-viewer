@@ -81,34 +81,32 @@ class NeuronQuery:
         """Build the synapse-cache key.
 
         Live mode returns None so the cache is bypassed entirely. For
-        materialized mode, returns a 3-tuple `(cache_ds, mat_version,
-        canonical_hash)`. The leading `(ds, mv)` lets the LayeredSwrCache
-        retention resolver pick the right L2 partition (default vs
-        longlived) without re-deriving them from a hashed payload.
-        Every knob that affects the returned dataframe shape stays
-        inside `canonical_hash`: synapse_columns drives the projection,
-        position_prefix drives the split-position column names,
-        desired_resolution drives the unit of the position values.
+        materialized mode, returns a 3-tuple ``(cache_ds, mat_version,
+        canonical_hash)`` via :func:`synapse_cache_key`. Every knob
+        that affects the returned dataframe shape stays inside
+        ``canonical_hash``: ``synapse_columns`` drives the projection,
+        ``position_prefix`` drives the split-position column names,
+        ``desired_resolution`` drives the unit of the position values.
         Forgetting any one of these silently serves a previous-request
         shape from cache.
 
-        `cache_datastack` resolves any per-datastack alias (e.g.
-        `minnie65_public` → `minnie65_phase3_v1`) so two datastacks
-        backed by the same underlying data share one cache entry. The
-        actual CAVE call still uses `self.datastack`; only the key
-        changes.
+        Datastack aliasing (e.g. ``minnie65_public`` →
+        ``minnie65_phase3_v1``) is applied by :func:`synapse_cache_key`,
+        so the cache key reflects the aliased namespace while the
+        actual CAVE call still uses ``self.datastack``.
         """
         if is_live(self.mat_version):
             return None
-        from .cache_lifecycle import cache_datastack
-        cache_ds = cache_datastack(self.datastack)
-        payload = {"kind": kind, "ds": cache_ds, "mv": self.mat_version,
+        from .cache_accessors import synapse_cache_key
+        payload = {"kind": kind, "ds": self.datastack, "mv": self.mat_version,
                    "syn": self.synapse_table, "rid": self.root_id,
                    "cols": tuple(self.synapse_columns) if self.synapse_columns else None,
                    "pos_prefix": self.synapse_position_prefix,
                    "desired_res": tuple(self.desired_resolution),
                    **extra}
-        return (cache_ds, self.mat_version, canonical_query_hash(payload))
+        return synapse_cache_key(
+            self.datastack, self.mat_version, canonical_query_hash(payload),
+        )
 
     def _synapse_df(self, direction: str, *, stages: dict | None = None) -> pd.DataFrame:
         """Fetch (or read from cache) the per-direction synapse df.
@@ -133,7 +131,8 @@ class NeuronQuery:
         if self.synapse_table is None:
             raise ValueError("synapse_table is not configured for this datastack")
         key = self._cache_key("synapses", direction=direction)
-        cache = current_app.extensions.get("dcv_synapse_cache") if key else None
+        from .cache_accessors import get_synapse_cache
+        cache = get_synapse_cache() if key else None
         if cache is not None:
             # Time the lookup *around* `get_with_layer` (not inside) so the
             # GCS round-trip on an L2 promotion is captured rather than
@@ -311,7 +310,7 @@ class NeuronQuery:
         "cache cold; ask CAVE." Without it, both cases return None and
         the caller can't tell whether to do a CAVE fetch.
         """
-        from .cache_lifecycle import cache_datastack
+        from .cache_accessors import decoration_cache_key
         from .decoration import get_decoration_service
         try:
             bulk_cache = get_decoration_service().cache_for(
@@ -319,7 +318,7 @@ class NeuronQuery:
             )
         except Exception:
             return None
-        bulk_key = (cache_datastack(self.datastack), self.mat_version, self.soma_table)
+        bulk_key = decoration_cache_key(self.datastack, self.mat_version, self.soma_table)
         # Wall-time the lookup so an L2 GCS read is visible per-request
         # under `soma_l2_hit` rather than disappearing into framework
         # overhead. L1 hits typically log <1ms; L2 hits log the GCS
@@ -667,29 +666,23 @@ def connectivity_bundle(
         if need_in and need_out:
             from concurrent.futures import ThreadPoolExecutor
 
-            from flask import copy_current_request_context
+            from .request_context import capture_request_context
 
-            from .timing import current_stages
-
-            # Capture the request thread's stages dict so worker timer()
-            # calls accumulate into it directly. `copy_current_request_context`
-            # gives each worker its own `flask.g` — writes to that copy
-            # never reach the request log — so we route the timing dict
-            # explicitly via the `stages=` parameter instead of relying
-            # on `g`.
-            request_stages = current_stages()
-
-            @copy_current_request_context
-            def _do_in():
-                return nq.partners_in(stages=request_stages)
-
-            @copy_current_request_context
-            def _do_out():
-                return nq.partners_out(stages=request_stages)
-
+            # `capture_request_context` snapshots the request-thread's
+            # timing-stages dict + pinned timestamp; `ctx.wrap` returns
+            # worker callables that (a) carry a copy of the request
+            # context so `current_app` resolves and (b) auto-inject the
+            # captured stages/timestamp via kwargs so worker `timer()`
+            # calls accumulate into the request's dict, not a
+            # thread-local copy.
+            ctx = capture_request_context()
             with ThreadPoolExecutor(max_workers=2, thread_name_prefix="cdv-syn") as pool:
-                fut_in = pool.submit(_do_in)
-                fut_out = pool.submit(_do_out)
+                fut_in = pool.submit(
+                    ctx.wrap(nq.partners_in, inject_timestamp=False)
+                )
+                fut_out = pool.submit(
+                    ctx.wrap(nq.partners_out, inject_timestamp=False)
+                )
                 pin = fut_in.result()
                 pout = fut_out.result()
         else:

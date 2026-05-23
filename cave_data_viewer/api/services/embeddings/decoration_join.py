@@ -33,7 +33,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable, Sequence
 
-from ..cache_lifecycle import cache_datastack
+from ..cache_accessors import decoration_cache_key
 from ..keys import is_live
 from .resolver import resolve_cell_ids_to_root_ids
 
@@ -66,8 +66,7 @@ def get_decoration_table_snapshot(
     service = get_decoration_service()
     live = is_live(mat_version)
     cache = service.cache_for("table", live)
-    cache_ds = cache_datastack(ds)
-    key = (cache_ds, mat_version, table)
+    key = decoration_cache_key(ds, mat_version, table)
 
     entry = cache.get(key)
     if entry is not None:

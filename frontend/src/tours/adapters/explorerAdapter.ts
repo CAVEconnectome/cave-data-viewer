@@ -24,43 +24,59 @@
  * connectivity emitter) because the nested + many-numeric-fields
  * shape is well outside the emitter's tractable range.
  */
-import { dump as yamlDump, JSON_SCHEMA, load as yamlLoad } from "js-yaml";
+import { dump as yamlDump, JSON_SCHEMA } from "js-yaml";
 
 import type { ExplorerRecipe, ExplorerState } from "../../api/types";
 import type { RecipeKindAdapter, RecipeDiffSummary } from "./types";
-import { parseScopeBlock } from "../recipeFromYaml";
 
-/** URL keys owned by the explorer adapter. applyToParams clears these
- *  before re-setting from the recipe, so a recipe with no `x` clears
- *  any previously-set `?x=` instead of leaving it dangling. Shared
- *  keys (`cells`, `dec`, `mv`, `ds`) are NOT in this list — they
- *  belong to navigation / cross-view continuity and are written
- *  identically by both adapters, so neither one stomps the other on
- *  apply. */
-const EXPLORER_OWNED_KEYS = [
-  "ft",
-  "emb",
-  "scope_mode",
-  "sel_filters",
-  "x",
-  "y",
-  "color",
-  "size",
-  "cmap",
-  "color_min",
-  "color_max",
-  "color_center",
-  "size_min",
-  "size_max",
-  "size_data_min",
-  "size_data_max",
-  "growth_space",
-  "growth_variance",
-  "growth_reduction",
-  "growth_threshold",
-  "growth_features",
-  "growth_topn",
-] as const;
+/**
+ * Single source of truth for the explorer recipe's fields. `applyToParams`
+ * (URL write), `stateFromParams` (URL read), `coerceExplorerFromYaml` (YAML
+ * import) and `urlHasContent` all derive from this table — adding an
+ * explorer field is one line here, not four hand-synced lists.
+ *
+ * `url` omitted: the field has no URL representation (`selection` rides in
+ * RecipeMeta.extras instead). `dec` and `cells` are shared navigation keys
+ * written by both adapters; they're listed so the explorer round-trips
+ * them, but they aren't explorer-exclusive.
+ */
+type FieldKind = "str" | "num" | "int" | "csv";
+
+interface ExplorerField {
+  state: keyof ExplorerState;
+  url?: string;
+  kind: FieldKind;
+  /** Closed enum for a "str" field — values outside the set read back as null. */
+  enumValues?: readonly string[];
+}
+
+const EXPLORER_FIELDS: readonly ExplorerField[] = [
+  { state: "ft", url: "ft", kind: "str" },
+  { state: "emb", url: "emb", kind: "str" },
+  { state: "decoration_tables", url: "dec", kind: "csv" },
+  { state: "cells", url: "cells", kind: "str" },
+  { state: "scope_mode", url: "scope_mode", kind: "str", enumValues: ["hide", "ghost"] },
+  { state: "sel_filters", url: "sel_filters", kind: "csv" },
+  { state: "x", url: "x", kind: "str" },
+  { state: "y", url: "y", kind: "str" },
+  { state: "color", url: "color", kind: "str" },
+  { state: "size", url: "size", kind: "str" },
+  { state: "cmap", url: "cmap", kind: "str" },
+  { state: "color_min", url: "color_min", kind: "num" },
+  { state: "color_max", url: "color_max", kind: "num" },
+  { state: "color_center", url: "color_center", kind: "num" },
+  { state: "size_min", url: "size_min", kind: "num" },
+  { state: "size_max", url: "size_max", kind: "num" },
+  { state: "size_data_min", url: "size_data_min", kind: "num" },
+  { state: "size_data_max", url: "size_data_max", kind: "num" },
+  { state: "growth_space", url: "growth_space", kind: "str" },
+  { state: "growth_variance", url: "growth_variance", kind: "num" },
+  { state: "growth_reduction", url: "growth_reduction", kind: "str" },
+  { state: "growth_threshold", url: "growth_threshold", kind: "num" },
+  { state: "growth_features", url: "growth_features", kind: "csv" },
+  { state: "growth_topn", url: "growth_topn", kind: "int" },
+  { state: "selection", kind: "csv" },
+];
 
 export const explorerAdapter: RecipeKindAdapter<ExplorerRecipe> = {
   kind: "explorer",
@@ -81,62 +97,31 @@ export const explorerAdapter: RecipeKindAdapter<ExplorerRecipe> = {
   },
 
   urlHasContent(params, meta) {
-    if (Array.isArray(meta?.extras?.selection) && (meta!.extras!.selection as unknown[]).length > 0) {
-      return true;
-    }
-    for (const key of EXPLORER_OWNED_KEYS) {
-      const v = params.get(key);
+    const sel = meta?.extras?.selection;
+    if (Array.isArray(sel) && sel.length > 0) return true;
+    for (const f of EXPLORER_FIELDS) {
+      if (!f.url) continue;
+      const v = params.get(f.url);
       if (v && v.length > 0) return true;
     }
-    // Shared keys: `cells` and `dec` count as content too — a user
-    // who's set up a scope filter on /explore should be able to save
-    // it even with no other configuration touched.
-    if (params.get("cells")) return true;
-    if (params.get("dec")) return true;
     return false;
   },
 
   applyToParams(prev, recipe, applyExtras) {
     const next = new URLSearchParams(prev);
-    for (const key of EXPLORER_OWNED_KEYS) next.delete(key);
-    next.delete("cells");
-    next.delete("dec");
-
+    // Clear every owned/shared key first so a recipe with no `x` clears a
+    // dangling `?x=` instead of leaving it. Shared keys (`dec`, `cells`)
+    // are re-set below from the recipe, so clearing them is safe.
+    for (const f of EXPLORER_FIELDS) {
+      if (f.url) next.delete(f.url);
+    }
     const s = recipe.explorer;
-    setIfStr(next, "ft", s.ft);
-    setIfStr(next, "emb", s.emb);
-    if (s.decoration_tables && s.decoration_tables.length > 0) {
-      next.set("dec", s.decoration_tables.join(","));
+    for (const f of EXPLORER_FIELDS) {
+      if (f.url) writeField(next, f.url, f.kind, s[f.state]);
     }
-    setIfStr(next, "cells", s.cells);
-    setIfStr(next, "scope_mode", s.scope_mode);
-    if (s.sel_filters && s.sel_filters.length > 0) {
-      next.set("sel_filters", s.sel_filters.join(","));
-    }
-    setIfStr(next, "x", s.x);
-    setIfStr(next, "y", s.y);
-    setIfStr(next, "color", s.color);
-    setIfStr(next, "size", s.size);
-    setIfStr(next, "cmap", s.cmap);
-    setIfNum(next, "color_min", s.color_min);
-    setIfNum(next, "color_max", s.color_max);
-    setIfNum(next, "color_center", s.color_center);
-    setIfNum(next, "size_min", s.size_min);
-    setIfNum(next, "size_max", s.size_max);
-    setIfNum(next, "size_data_min", s.size_data_min);
-    setIfNum(next, "size_data_max", s.size_data_max);
-    setIfStr(next, "growth_space", s.growth_space);
-    setIfNum(next, "growth_variance", s.growth_variance);
-    setIfStr(next, "growth_reduction", s.growth_reduction);
-    setIfNum(next, "growth_threshold", s.growth_threshold);
-    if (s.growth_features && s.growth_features.length > 0) {
-      next.set("growth_features", s.growth_features.join(","));
-    }
-    setIfNum(next, "growth_topn", s.growth_topn);
-
     // Hand the Selection bag back to the consumer via the extras
-    // callback. URL-only consumers (no callback) simply don't
-    // restore the bag — the URL state still lands correctly.
+    // callback. URL-only consumers (no callback) simply don't restore
+    // the bag — the URL state still lands correctly.
     if (applyExtras && s.selection && s.selection.length > 0) {
       applyExtras({ selection: s.selection });
     }
@@ -171,7 +156,6 @@ export const explorerAdapter: RecipeKindAdapter<ExplorerRecipe> = {
             title: recipe.title,
             description: recipe.description ?? undefined,
             explorer: stripUndefined(recipe.explorer as Record<string, unknown>),
-            ...(recipe.scope !== undefined ? { scope: recipe.scope } : {}),
           },
         ],
       },
@@ -217,58 +201,82 @@ export const explorerAdapter: RecipeKindAdapter<ExplorerRecipe> = {
   },
 };
 
-function setIfStr(p: URLSearchParams, key: string, v: string | null | undefined) {
-  if (typeof v === "string" && v.length > 0) p.set(key, v);
+/** Write one field's value into a URLSearchParams, skipping empty/invalid
+ *  values so the URL stays clean. */
+function writeField(p: URLSearchParams, key: string, kind: FieldKind, v: unknown): void {
+  switch (kind) {
+    case "str":
+      if (typeof v === "string" && v.length > 0) p.set(key, v);
+      break;
+    case "num":
+    case "int":
+      if (typeof v === "number" && Number.isFinite(v)) p.set(key, String(v));
+      break;
+    case "csv":
+      if (Array.isArray(v) && v.length > 0) {
+        const items = (v as unknown[]).filter((x): x is string => typeof x === "string");
+        if (items.length > 0) p.set(key, items.join(","));
+      }
+      break;
+  }
 }
 
-function setIfNum(p: URLSearchParams, key: string, v: number | null | undefined) {
-  if (typeof v === "number" && Number.isFinite(v)) p.set(key, String(v));
+/** Read one field's value from a URLSearchParams, normalized to the field's
+ *  kind. Missing/invalid scalars → null; missing csv → []. */
+function readField(params: URLSearchParams, f: ExplorerField): string | number | string[] | null {
+  const raw = f.url ? params.get(f.url) : null;
+  switch (f.kind) {
+    case "str":
+      if (!raw) return null;
+      if (f.enumValues && !f.enumValues.includes(raw)) return null;
+      return raw;
+    case "num": {
+      if (!raw) return null;
+      const n = parseFloat(raw);
+      return Number.isFinite(n) ? n : null;
+    }
+    case "int": {
+      if (!raw) return null;
+      const n = parseFloat(raw);
+      return Number.isFinite(n) ? Math.trunc(n) : null;
+    }
+    case "csv":
+      return raw ? raw.split(",").map((s) => s.trim()).filter(Boolean) : [];
+  }
+}
+
+/** Coerce one field's value out of a parsed YAML mapping. Returns undefined
+ *  when the runtime shape disagrees with the field's kind (the field is
+ *  then dropped — tolerant import; server-side PUT does the strict check). */
+function coerceYamlField(
+  kind: FieldKind,
+  enumValues: readonly string[] | undefined,
+  v: unknown,
+): string | number | string[] | undefined {
+  switch (kind) {
+    case "str":
+      if (typeof v !== "string") return undefined;
+      if (enumValues && !enumValues.includes(v)) return undefined;
+      return v;
+    case "num":
+      return typeof v === "number" && Number.isFinite(v) ? v : undefined;
+    case "int":
+      return typeof v === "number" && Number.isFinite(v) ? Math.trunc(v) : undefined;
+    case "csv":
+      return Array.isArray(v)
+        ? v.filter((x): x is string => typeof x === "string")
+        : undefined;
+  }
 }
 
 function stateFromParams(params: URLSearchParams, selection: string[]): ExplorerState {
-  const csv = (k: string): string[] => {
-    const raw = params.get(k);
-    if (!raw) return [];
-    return raw.split(",").map((s) => s.trim()).filter(Boolean);
-  };
-  const num = (k: string): number | null => {
-    const raw = params.get(k);
-    if (!raw) return null;
-    const n = parseFloat(raw);
-    return Number.isFinite(n) ? n : null;
-  };
-  const str = (k: string): string | null => {
-    const v = params.get(k);
-    return v && v.length > 0 ? v : null;
-  };
-  const scopeRaw = str("scope_mode");
-  return {
-    ft: str("ft"),
-    emb: str("emb"),
-    decoration_tables: csv("dec"),
-    cells: str("cells"),
-    scope_mode: scopeRaw === "hide" || scopeRaw === "ghost" ? scopeRaw : null,
-    sel_filters: csv("sel_filters"),
-    x: str("x"),
-    y: str("y"),
-    color: str("color"),
-    size: str("size"),
-    cmap: str("cmap"),
-    color_min: num("color_min"),
-    color_max: num("color_max"),
-    color_center: num("color_center"),
-    size_min: num("size_min"),
-    size_max: num("size_max"),
-    size_data_min: num("size_data_min"),
-    size_data_max: num("size_data_max"),
-    growth_space: str("growth_space"),
-    growth_variance: num("growth_variance"),
-    growth_reduction: str("growth_reduction"),
-    growth_threshold: num("growth_threshold"),
-    growth_features: csv("growth_features"),
-    growth_topn: num("growth_topn") !== null ? Math.trunc(num("growth_topn")!) : null,
-    selection,
-  };
+  const state: Record<string, unknown> = {};
+  for (const f of EXPLORER_FIELDS) {
+    if (!f.url) continue;
+    state[f.state] = readField(params, f);
+  }
+  state.selection = selection;
+  return state as ExplorerState;
 }
 
 function stripUndefined<T extends Record<string, unknown>>(obj: T): Partial<T> {
@@ -295,51 +303,11 @@ export function coerceExplorerFromYaml(
   // Tolerant coercion — drop any field whose runtime shape disagrees
   // with the type. The upload UI flags the recipe overall; per-field
   // policing happens server-side at PUT time.
-  const state: ExplorerState = {};
-  for (const key of [
-    "ft",
-    "emb",
-    "cells",
-    "scope_mode",
-    "x",
-    "y",
-    "color",
-    "size",
-    "cmap",
-    "growth_space",
-    "growth_reduction",
-  ] as const) {
-    const v = explorer[key];
-    if (typeof v === "string") (state as Record<string, unknown>)[key] = v;
+  const state: Record<string, unknown> = {};
+  for (const f of EXPLORER_FIELDS) {
+    const coerced = coerceYamlField(f.kind, f.enumValues, explorer[f.state]);
+    if (coerced !== undefined) state[f.state] = coerced;
   }
-  for (const key of [
-    "color_min",
-    "color_max",
-    "color_center",
-    "size_min",
-    "size_max",
-    "size_data_min",
-    "size_data_max",
-    "growth_variance",
-    "growth_threshold",
-    "growth_topn",
-  ] as const) {
-    const v = explorer[key];
-    if (typeof v === "number" && Number.isFinite(v)) (state as Record<string, unknown>)[key] = v;
-  }
-  for (const key of ["decoration_tables", "sel_filters", "growth_features", "selection"] as const) {
-    const v = explorer[key];
-    if (Array.isArray(v)) {
-      (state as Record<string, unknown>)[key] = v.filter((x): x is string => typeof x === "string");
-    }
-  }
-  // scope_mode is a string-typed enum — narrow further.
-  if (state.scope_mode !== "ghost" && state.scope_mode !== "hide") {
-    state.scope_mode = null;
-  }
-
-  const where = typeof parsed.id === "string" ? `recipe "${parsed.id}"` : meta.id;
-  const scope = parseScopeBlock(parsed.scope, where);
 
   return {
     id,
@@ -349,17 +317,8 @@ export function coerceExplorerFromYaml(
       typeof parsed.description === "string"
         ? parsed.description
         : meta.description ?? null,
-    explorer: state,
-    ...(scope !== undefined ? { scope } : {}),
+    explorer: state as ExplorerState,
   };
-}
-
-/** Parse a YAML body that may contain a list of recipes (the standard
- *  upload format) OR a single recipe object. Used internally by
- *  fromYaml; exported for the upload handler to share the same
- *  parser without re-implementing the wrapper unwrapping. */
-export function parseExplorerYamlBody(text: string): unknown {
-  return yamlLoad(text, { schema: JSON_SCHEMA });
 }
 
 function isObject(v: unknown): v is Record<string, unknown> {

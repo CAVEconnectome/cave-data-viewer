@@ -85,30 +85,14 @@ def config():
     recipes are available. No auth gate so the SPA can call it before
     any cookie exists; the response carries no per-user data.
 
-    `schema_version` and `supported_schema_versions` are negotiation
-    hooks: a future SPA can read them to decide whether to send v1 or v2
-    PUT bodies, and to surface a "your client is older than the server"
-    notice if the SPA only knows about earlier schemas. Sent on every
-    response (including disabled) so the SPA can introspect even when
-    storage is off — useful for the UX message "recipes work in
-    production but not in dev-bypass mode."
+    Reported even when storage is off so the SPA can surface the UX
+    message "recipes work in production but not in dev-bypass mode."
     """
-    base = {
-        "schema_version": recipes_svc.CURRENT_SCHEMA_VERSION,
-        "supported_schema_versions": sorted(recipes_svc.SUPPORTED_SCHEMA_VERSIONS),
-        # `kinds` advertises the recipe kinds this server can read and
-        # write. The SPA reads it at startup so it can refuse to send a
-        # PUT for a kind the server hasn't shipped yet (e.g. a future
-        # `table` kind), and so a newer SPA against an older server
-        # surfaces a clean "your client is newer than the server"
-        # rather than a 400 on save.
-        "kinds": sorted(recipes_svc.ALLOWED_KINDS),
-    }
     if is_dev_bypass():
-        return jsonify({**base, "enabled": False, "reason": "dev_bypass"})
+        return jsonify({"enabled": False, "reason": "dev_bypass"})
     if current_app.extensions.get("dcv_userdata_store") is None:
-        return jsonify({**base, "enabled": False, "reason": "no_bucket"})
-    return jsonify({**base, "enabled": True})
+        return jsonify({"enabled": False, "reason": "no_bucket"})
+    return jsonify({"enabled": True})
 
 
 @bp.route("/<ds>", methods=["GET"])

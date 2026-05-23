@@ -9,20 +9,8 @@ _DEFAULTS = {
     "DEFAULT_DATASTACK": None,
     "CORS_ORIGINS": ["http://localhost:5173"],
     "SPELUNKER_URL": "https://spelunker.cave-explorer.org",
-    "CACHE_QUERY_TTL_SECONDS": 15 * 60,
     "CACHE_TABLE_META_TTL_SECONDS": 60 * 60,
-    # Frozen materializations are immutable, so this is effectively forever.
-    # The 7-day ceiling exists only because cachetools.TTLCache requires a
-    # finite TTL; it also bounds memory if a config or proxy quirk makes us
-    # accumulate keys across many datastacks.
-    "CACHE_UNIQUE_VALUES_TTL_SECONDS": 7 * 24 * 60 * 60,
     "CACHE_INFO_TTL_SECONDS": 24 * 60 * 60,
-    # Spatial-features payload (per-partner soma_depth, soma_x/z,
-    # radial_dist, median_dist, median_syn_depth) is invariant for a
-    # frozen materialization. 30 minutes covers a typical exploration
-    # session; live mode short-circuits the cache by including
-    # mat_version="live" in the key (always fresh).
-    "CACHE_SPATIAL_FEATURES_TTL_SECONDS": 30 * 60,
     "CACHE_DECORATION_SOFT_TTL_SECONDS": 4 * 60 * 60,
     "CACHE_DECORATION_HARD_TTL_SECONDS": 24 * 60 * 60,
     "CACHE_DECORATION_LIVE_SOFT_TTL_SECONDS": 5 * 60,

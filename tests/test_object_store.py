@@ -120,8 +120,11 @@ def test_build_l2_stores_returns_empty_when_unconfigured():
 def test_build_l2_stores_populates_all_kinds_per_retention_class():
     """Returns a 2-level dict: outer keys = retention classes, inner keys
     = decoration / synapse kinds. Each prefix is
-    `<base><retention>/<kind>/`."""
-    from cave_data_viewer.api.services.object_store import build_l2_stores
+    `<base><retention>/<kind>/<version>/`."""
+    from cave_data_viewer.api.services.object_store import (
+        _CACHE_VERSIONS,
+        build_l2_stores,
+    )
 
     class App:
         config = {"GCS_CACHE_BUCKET": "my-bucket", "GCS_CACHE_PREFIX": "cdv/"}
@@ -133,21 +136,72 @@ def test_build_l2_stores_populates_all_kinds_per_retention_class():
     expected_kinds = set(_KINDS)
     for retention in ("default", "longlived"):
         assert set(stores[retention].keys()) == expected_kinds
-    assert stores["default"]["table"]._prefix == "cdv/default/table/"
-    assert stores["longlived"]["synapse"]._prefix == "cdv/longlived/synapse/"
+    assert (
+        stores["default"]["table"]._prefix
+        == f"cdv/default/table/{_CACHE_VERSIONS['table']}/"
+    )
+    assert (
+        stores["longlived"]["synapse"]._prefix
+        == f"cdv/longlived/synapse/{_CACHE_VERSIONS['synapse']}/"
+    )
 
 
 def test_build_l2_stores_normalizes_missing_trailing_slash():
     """An operator who sets `CDV_GCS_CACHE_PREFIX=foo` (no slash) gets
-    `foo/<retention>/table/`, not `foo<retention>/table/`. Cheap
-    defensive normalization."""
-    from cave_data_viewer.api.services.object_store import build_l2_stores
+    `foo/<retention>/table/<version>/`, not
+    `foo<retention>/table/<version>/`. Cheap defensive normalization."""
+    from cave_data_viewer.api.services.object_store import (
+        _CACHE_VERSIONS,
+        build_l2_stores,
+    )
 
     class App:
         config = {"GCS_CACHE_BUCKET": "b", "GCS_CACHE_PREFIX": "foo"}
     stores = build_l2_stores(App())
-    assert stores["default"]["table"]._prefix == "foo/default/table/"
-    assert stores["longlived"]["table"]._prefix == "foo/longlived/table/"
+    version = _CACHE_VERSIONS["table"]
+    assert stores["default"]["table"]._prefix == f"foo/default/table/{version}/"
+    assert stores["longlived"]["table"]._prefix == f"foo/longlived/table/{version}/"
+
+
+def test_build_l2_stores_includes_version_segment_per_kind():
+    """Every store's prefix carries a `/<kind>/<version>/` segment sourced
+    from `_CACHE_VERSIONS`. Bumping the version routes new writes to a
+    fresh subtree without colliding with prior entries.
+    """
+    from cave_data_viewer.api.services.object_store import (
+        _CACHE_VERSIONS,
+        build_l2_stores,
+    )
+
+    class App:
+        config = {"GCS_CACHE_BUCKET": "b", "GCS_CACHE_PREFIX": "cache/"}
+    stores = build_l2_stores(App())
+    for retention, by_kind in stores.items():
+        for kind, store in by_kind.items():
+            expected_version = _CACHE_VERSIONS[kind]
+            assert f"/{kind}/{expected_version}/" in store._prefix, (
+                f"store for retention={retention!r} kind={kind!r} has "
+                f"prefix {store._prefix!r}; expected segment "
+                f"/{kind}/{expected_version}/"
+            )
+
+
+def test_build_l2_stores_raises_when_kinds_and_versions_diverge(monkeypatch):
+    """A new kind added to `_KINDS` without a matching `_CACHE_VERSIONS`
+    entry must fail the build, not silently produce an unversioned
+    store. Same in reverse — a version entry for a non-existent kind
+    is also a configuration bug."""
+    from cave_data_viewer.api.services import object_store
+
+    class App:
+        config = {"GCS_CACHE_BUCKET": "b"}
+
+    # Add a phantom kind without a version entry.
+    monkeypatch.setattr(
+        object_store, "_KINDS", (*object_store._KINDS, "phantom_kind"),
+    )
+    with pytest.raises(RuntimeError, match="phantom_kind"):
+        object_store.build_l2_stores(App())
 
 
 def test_build_l2_stores_threads_project_into_each_store():

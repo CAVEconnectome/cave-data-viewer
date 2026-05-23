@@ -9,7 +9,14 @@ from __future__ import annotations
 
 import time
 
-from cave_data_viewer.api.services.swr import LayeredSwrCache, SwrCache
+import pytest
+
+from cave_data_viewer.api.services.swr import (
+    ImmutableCache,
+    LayeredImmutableCache,
+    LayeredSwrCache,
+    SwrCache,
+)
 
 
 class FakeL2:
@@ -307,3 +314,136 @@ def test_bare_l2_store_still_works_for_compat():
     assert len(bare.set_calls) == 1
     bare.store["k2"] = ("hello", time.time() - 1)
     assert cache.get("k2") == ("hello", "fresh")
+
+
+# ----- ImmutableCache & LayeredImmutableCache -------------------------------
+#
+# The immutable family is the sibling to SwrCache/LayeredSwrCache for data
+# whose cache key pins enough invariants (mat_version, parquet_uri, …)
+# that any hit is bit-identical to a fresh fetch. Reads always report
+# `fresh`; no soft/hard TTL gating.
+
+
+def test_immutable_cache_get_reports_fresh_regardless_of_age():
+    """A 24-hour-old entry still reads `fresh` — the immutable contract
+    says any hit is bit-identical to a fresh fetch."""
+    cache = ImmutableCache()
+    cache.set_with_timestamp("k", "v", time.time() - 24 * 3600)
+    assert cache.get("k") == ("v", "fresh")
+
+
+def test_immutable_cache_never_auto_evicts_on_age():
+    """Unlike SwrCache.hard_ttl, ImmutableCache has no eviction.
+    Entries leave only via LRU pressure (maxsize) or explicit `clear()`.
+    """
+    cache = ImmutableCache(maxsize=4)
+    cache.set_with_timestamp("k", "v", time.time() - 365 * 24 * 3600)
+    assert "k" in cache
+    cache.clear()
+    assert "k" not in cache
+
+
+def test_immutable_cache_lru_pressure_still_evicts():
+    """Maxsize bounds memory regardless of immutability — the oldest
+    entry is dropped when capacity is reached."""
+    cache = ImmutableCache(maxsize=2)
+    cache.set("a", 1)
+    cache.set("b", 2)
+    cache.set("c", 3)
+    assert cache.get("a") is None
+    assert cache.get("b") == (2, "fresh")
+    assert cache.get("c") == (3, "fresh")
+
+
+def test_immutable_cache_get_full_carries_fetched_at():
+    cache = ImmutableCache()
+    five_min_ago = time.time() - 300
+    cache.set_with_timestamp("k", "v", five_min_ago)
+    full = cache.get_full("k")
+    assert full is not None
+    value, freshness, fetched_at = full
+    assert value == "v"
+    assert freshness == "fresh"
+    assert abs(fetched_at - five_min_ago) < 0.01
+
+
+def test_layered_immutable_cache_promotes_old_l2_entry_without_eviction():
+    """Counterpart to LayeredSwrCache's hard_ttl behavior: a very old
+    L2 entry promotes successfully because the immutable contract says
+    age doesn't gate freshness. Bucket lifecycle is the single source
+    of L2 expiry."""
+    l2 = FakeL2()
+    cache = LayeredImmutableCache(l2=l2)
+    l2.store["k"] = ("payload", time.time() - 30 * 24 * 3600)  # 30d old
+    result = cache.get("k")
+    assert result == ("payload", "fresh")
+
+
+def test_layered_immutable_cache_preserves_fetched_at_on_promotion():
+    """Promotion from L2 must not reset the timestamp — `get_with_meta`
+    reads back the original L2 fetched_at, not 'now'."""
+    l2 = FakeL2()
+    cache = LayeredImmutableCache(l2=l2)
+    five_seconds_ago = time.time() - 5
+    l2.store["k"] = ("payload", five_seconds_ago)
+    cache.get("k")  # triggers promotion
+    meta = cache.get_with_meta("k")
+    assert meta is not None
+    _, fetched_at = meta
+    assert abs(fetched_at - five_seconds_ago) < 0.01
+
+
+def test_layered_immutable_cache_get_with_layer_distinguishes_l1_l2():
+    """Layer attribution is identical to LayeredSwrCache: L1 hit reports
+    `l1`, promoted-from-L2 reports `l2` on the first call after
+    promotion (and `l1` thereafter)."""
+    l2 = FakeL2()
+    cache = LayeredImmutableCache(l2=l2)
+    l2.store["k"] = ("v", time.time() - 2)
+    first = cache.get_with_layer("k")
+    assert first == ("v", "fresh", "l2")
+    second = cache.get_with_layer("k")
+    assert second == ("v", "fresh", "l1")
+
+
+def test_layered_immutable_cache_writes_through_to_l2():
+    l2 = FakeL2()
+    cache = LayeredImmutableCache(l2=l2)
+    cache.set("k", "v")
+    assert len(l2.set_calls) == 1
+    key, value, _ts = l2.set_calls[0]
+    assert key == "k"
+    assert value == "v"
+
+
+def test_layered_immutable_cache_retention_dispatch():
+    """Same dict-of-stores + resolver shape works for the immutable
+    variant, since dispatch lives on the shared base."""
+    default_l2 = FakeL2()
+    longlived_l2 = FakeL2()
+    cache = LayeredImmutableCache(
+        l2={"default": default_l2, "longlived": longlived_l2},
+        retention_resolver=lambda key: "longlived" if key.startswith("ll-") else "default",
+    )
+    cache.set("ll-key", "A")
+    cache.set("regular", "B")
+    assert len(longlived_l2.set_calls) == 1
+    assert longlived_l2.set_calls[0][0] == "ll-key"
+    assert len(default_l2.set_calls) == 1
+    assert default_l2.set_calls[0][0] == "regular"
+
+
+# ----- Deprecation guard on the immutable=True flag --------------------------
+
+
+def test_swr_cache_immutable_true_raises():
+    """The old `immutable=True` flag is gone — passing it must fail loudly
+    so a stale caller can't silently get the wrong semantics. The error
+    message names the replacement class."""
+    with pytest.raises(TypeError, match="ImmutableCache"):
+        SwrCache(soft_ttl=10, hard_ttl=100, immutable=True)
+
+
+def test_layered_swr_cache_immutable_true_raises():
+    with pytest.raises(TypeError, match="LayeredImmutableCache"):
+        LayeredSwrCache(soft_ttl=10, hard_ttl=100, immutable=True)

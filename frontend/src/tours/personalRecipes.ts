@@ -86,6 +86,17 @@ export function listForDs(ds: string): Recipe[] {
   // pre-discriminator items that may still be sitting in localStorage
   // from before the migration.
   const known = new Set<string>(ALL_KINDS);
+  // Fire-and-forget: reconcile-on-first-read for this ds. Covers the
+  // case where bootstrap saw the URL with no `?ds=` (e.g. landing on
+  // `/`) and the active datastack was selected by the LandingPage's
+  // useActiveDatastack effect after module load — bootstrap's
+  // active-ds branch missed it, so the server recipes never landed in
+  // localStorage. Calling listForDs from the consumer that needs the
+  // recipes also kicks the reconcile that fills it; subsequent calls
+  // are no-ops (the `_reconciledDs` set guards against re-fetch).
+  // Reconcile fires a CHANGE_EVENT when it commits, so subscribers
+  // (LandingPage, Sidebar) re-render with server contents.
+  void reconcileDsIfNeeded(ds);
   return (readAll().byDs[ds] ?? []).filter((r) =>
     typeof r.kind === "string" && known.has(r.kind),
   );
@@ -308,6 +319,23 @@ type RetryOp =
 // Server ops queued during "pending" or after a transient failure.
 // Drained on bootstrap-completion and on window focus.
 const _retryQueue: RetryOp[] = [];
+
+// Datastacks that have been reconciled (or are mid-reconcile) this
+// session. Two writers populate it: `bootstrapServerSync` for every
+// ds it sweeps at module load, and `reconcileDsIfNeeded` for any ds a
+// later consumer asks about. Read by `reconcileDsIfNeeded` to skip
+// already-handled ds without firing a redundant GET. Session-scoped
+// because the cache lives in localStorage and we only need to
+// reconcile once per browser-tab lifetime — subsequent listForDs
+// calls in the same session are served from local.
+const _reconciledDs: Set<string> = new Set();
+
+// Promise that resolves when `bootstrapServerSync` finishes its first
+// pass. `reconcileDsIfNeeded` awaits it before checking `_serverMode`,
+// so a consumer that reads listForDs() at component mount (while
+// bootstrap is still in flight) doesn't race against bootstrap's own
+// reconcile or short-circuit on a "pending" mode that's about to flip.
+let _bootstrapPromise: Promise<void> | null = null;
 
 /** Internal status read for tests / future "synced" indicator. */
 export function _serverSyncMode(): ServerMode {
@@ -553,19 +581,73 @@ async function bootstrapServerSync(): Promise<void> {
   await flushRetryQueue();
 
   // Reconcile every known datastack + the active one from the URL.
+  // Mark each in `_reconciledDs` BEFORE awaiting reconcileDs so a
+  // listForDs(ds) call landing concurrently doesn't double-fetch.
   const all = readAll();
   const known = new Set(Object.keys(all.byDs));
   for (const ds of known) {
+    _reconciledDs.add(ds);
     await reconcileDs(ds);
   }
   try {
     const url = new URL(window.location.href);
     const activeDs = url.searchParams.get("ds");
-    if (activeDs && !known.has(activeDs)) {
+    if (activeDs && !_reconciledDs.has(activeDs)) {
+      _reconciledDs.add(activeDs);
       await reconcileDs(activeDs);
     }
   } catch {
     // window.location parsing failure is ignorable here.
+  }
+}
+
+/**
+ * Reconcile a single ds against the server if no one has done it yet
+ * this session. Idempotent — safe to call from every read site.
+ *
+ * Designed for callers that don't know whether bootstrap covered this
+ * ds (most commonly: the LandingPage tab the user lands on AFTER
+ * bootstrap ran, when the URL had no `?ds=` at module load and the
+ * active ds was set by an effect afterwards). Bootstrap's URL-snapshot
+ * pass can't see future router writes, so this hook closes that gap.
+ *
+ * Semantics:
+ * - If this ds is already in `_reconciledDs` (bootstrap got it, or an
+ *   earlier listForDs call did), no-op.
+ * - Otherwise claim it in the set, then await bootstrap if it's still
+ *   in flight. After bootstrap, if server sync ended up disabled,
+ *   silently return (we're in localStorage-only mode).
+ * - If enabled, reconcileDs writes server contents over local and
+ *   dispatches CHANGE_EVENT — every `subscribe()`-er re-renders.
+ *
+ * Adding `ds` to the set BEFORE the await is what keeps the race
+ * tight: a second concurrent caller sees `has(ds) === true` and
+ * skips. The cost of a stuck reconcile (server slow, network down)
+ * is "one missed retry until the user reloads," which is the same
+ * recovery story bootstrap already has.
+ */
+async function reconcileDsIfNeeded(ds: string): Promise<void> {
+  if (_reconciledDs.has(ds)) return;
+  _reconciledDs.add(ds);
+
+  if (_serverMode === "pending" && _bootstrapPromise) {
+    try {
+      await _bootstrapPromise;
+    } catch {
+      // bootstrap swallows its own errors and flips mode to "disabled"
+      // — the awaited promise itself shouldn't throw, but we belt-and-
+      // braces against a future bootstrap refactor.
+    }
+  }
+  if (_serverMode !== "enabled") return;
+  try {
+    await reconcileDs(ds);
+  } catch (err) {
+    // reconcileDs already logs and short-circuits on its own GET
+    // failure; nothing more to do here. Don't remove from
+    // `_reconciledDs` — a retry is the user's reload, matching
+    // bootstrap's recovery story.
+    console.warn(`[recipes] reconcileDsIfNeeded(${ds}) failed`, err);
   }
 }
 
@@ -589,5 +671,10 @@ if (typeof window !== "undefined") {
   });
   // Kick off async server sync. Don't await — module exports must stay
   // synchronous so consumers can render from localStorage immediately.
-  void bootstrapServerSync();
+  // Capture the promise so `reconcileDsIfNeeded` (called by listForDs)
+  // can await it if a consumer reads recipes during the bootstrap
+  // window — otherwise that path would either race against bootstrap's
+  // own reconcile or short-circuit on `_serverMode === "pending"`.
+  _bootstrapPromise = bootstrapServerSync();
+  void _bootstrapPromise;
 }

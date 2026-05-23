@@ -93,7 +93,7 @@ def _lookup_query_factory(client, name: str, kind: str, **filters):
 # from the lookup view.
 #
 # Production path: `dcv_cell_id_universe_cache` on `app.extensions` — a
-# LayeredSwrCache(immutable=True) shared across all pods + users via
+# LayeredImmutableCache shared across all pods + users via
 # GCS L2 (see `_init_l2_immutable_caches`). First request pays the CAVE
 # fetch; everyone after gets the universe from L1 (this pod) or L2 (any
 # pod's previous fetch). Mat_versions are frozen, so entries never go
@@ -193,10 +193,11 @@ def _get_universe(
     # non-default column doesn't read a stale `id`-keyed universe.
     # `cell_id_column` is part of the key so two datastacks pointing at
     # the same view but indexing different columns stay isolated.
-    from .cache_lifecycle import cache_datastack
-    cache_ds = cache_datastack(datastack)
+    from .cache_accessors import cell_id_universe_cache_key
     app_cache = _app_universe_cache()
-    app_key = (cache_ds, int(mat_version), view, kind, cell_id_column, "v3")
+    app_key = cell_id_universe_cache_key(
+        datastack, mat_version, view, kind, cell_id_column,
+    )
 
     if app_cache is not None:
         hit = app_cache.get(app_key)

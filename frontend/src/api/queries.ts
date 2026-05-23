@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import {
   useMutation,
   useQueries,
@@ -285,6 +285,10 @@ export function useConnectivity(args: ConnectivityArgs | null) {
 interface DecorationPollResponse {
   status: "ready" | "in_flight" | "expired";
   retry_after?: number;
+  // Delta values are partial partner records. `num_soma`/`cell_id` are the
+  // statically-known keys; values also carry dynamic `<table>.<col>`
+  // decoration keys, which flow through the spread merge in
+  // `mergeDecorationDeltas` untyped (as decoration columns are elsewhere).
   deltas?: Record<string, { num_soma?: number; cell_id?: string | null }>;
 }
 
@@ -304,6 +308,15 @@ function useDecorationRevalidationPoll(
   const ticketId = bundle?.decoration_revalidation?.ticket_id ?? null;
   const pollUrl = bundle?.decoration_revalidation?.poll_url ?? null;
 
+  // `queryKey` is rebuilt as a fresh array on every render of the calling
+  // hook, so depending on it directly would tear down + reschedule the
+  // poll timer on every render — a poll whose delay outlasts the render
+  // cadence would never fire. The effect only needs to (re)start when a
+  // *new* ticket arrives; the queryKey is just the write target, so read
+  // its current value from a ref at callback time instead.
+  const queryKeyRef = useRef(queryKey);
+  queryKeyRef.current = queryKey;
+
   useEffect(() => {
     if (!ticketId || !pollUrl) return;
     let cancelled = false;
@@ -315,6 +328,7 @@ function useDecorationRevalidationPoll(
         try {
           const resp = await apiFetch<DecorationPollResponse>(pollUrl);
           if (cancelled) return;
+          const queryKey = queryKeyRef.current;
           if (resp.status === "ready" && resp.deltas) {
             qc.setQueryData<ConnectivityBundle>(queryKey, (prev) =>
               prev ? mergeDecorationDeltas(prev, resp.deltas!) : prev,
@@ -343,7 +357,7 @@ function useDecorationRevalidationPoll(
       cancelled = true;
       if (timer) window.clearTimeout(timer);
     };
-  }, [ticketId, pollUrl, queryKey, qc]);
+  }, [ticketId, pollUrl, qc]);
 }
 
 function mergeDecorationDeltas(

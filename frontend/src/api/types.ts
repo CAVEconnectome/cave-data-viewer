@@ -342,7 +342,6 @@ export interface ConnectivityExample {
   hide?: string[];
   show?: string[];
   coll?: string[];
-  scope?: RecipeScope;
 }
 
 export interface ExplorerExample {
@@ -355,7 +354,6 @@ export interface ExplorerExample {
   thumbnail?: string;
   pinned: ExamplePinning;
   explorer: ExplorerState;
-  scope?: RecipeScope;
 }
 
 export type Example = ConnectivityExample | ExplorerExample;
@@ -365,19 +363,6 @@ export interface ExamplesListResponse {
   hidden_count: number;
 }
 
-export type ScopePredicateOp = "in" | "eq" | "ne" | "gt" | "gte" | "lt" | "lte";
-
-export interface ScopePredicate {
-  column: string;
-  op: ScopePredicateOp;
-  value?: unknown;
-  values?: unknown[];
-}
-
-export interface RecipeScope {
-  predicates: ScopePredicate[];
-}
-
 /** Discriminator value for the Recipe union. New kinds get added here
  *  alongside the backend `ALLOWED_KINDS` in services/recipes.py. */
 export type RecipeKind = "connectivity" | "explorer";
@@ -385,7 +370,6 @@ export type RecipeKind = "connectivity" | "explorer";
 /** Connectivity-shape recipe — the original /neuron overlay. */
 export interface ConnectivityRecipe extends TourBase {
   kind: "connectivity";
-  scope?: RecipeScope;
 }
 
 /** /explore workspace state captured for save/restore. Mirrors the
@@ -433,7 +417,6 @@ export interface ExplorerRecipe {
   description?: string | null;
   kind: "explorer";
   explorer: ExplorerState;
-  scope?: RecipeScope;
   version?: number;
   tags?: string[];
   saved_at?: string;
@@ -445,11 +428,6 @@ export type Recipe = ConnectivityRecipe | ExplorerRecipe;
 
 export interface ToursResponse {
   datastack: string;
-  // Deprecated — the /tours endpoint no longer returns examples.
-  // Examples are served by /api/v1/examples (Task 3.x). Field kept on
-  // the interface as optional to keep older client code type-checking,
-  // but it will always be `undefined` at runtime today.
-  examples?: Example[];
   recipes: Recipe[];
   /** Server-reported count of saved recipes the user has on disk that
    *  were skipped because they lack a recognized `kind`. Surfaced as a
@@ -562,11 +540,6 @@ export interface FeatureTableListResponse {
   knn?: SimilarityDefaults;
   feature_tables?: FeatureTableListItem[];
 }
-
-/** Back-compat alias. The catalog used to be a flat embeddings list under
- *  schema v1; the catalog hook keeps the historical name even though the
- *  inner shape is now feature_tables. */
-export type EmbeddingListResponse = FeatureTableListResponse;
 
 /** Tiny histogram summary of one column. ~hundred-bytes wire payload;
  *  L2-cached server-side. Numeric → bin counts + edges. Categorical →

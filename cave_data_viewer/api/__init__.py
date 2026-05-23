@@ -83,7 +83,7 @@ def _init_l2_immutable_caches(app: Flask) -> None:
     already L2-backed. A separate per-cell partition would just shadow
     a subset of the bulk cache's data.
 
-    All three are configured with `immutable=True`: the cache key pins
+    All three use `LayeredImmutableCache`: the cache key pins
     `mat_version` (or otherwise frozen invariants for unique_values),
     so a hit is bit-identical to what the source would return. SWR
     semantics (soft/hard TTL gating, background revalidation) don't
@@ -102,7 +102,12 @@ def _init_l2_immutable_caches(app: Flask) -> None:
     """
     from concurrent.futures import ThreadPoolExecutor
     from .services.cache_lifecycle import retention_class_for
-    from .services.swr import LayeredSwrCache, SwrCache
+    from .services.swr import (
+        ImmutableCache,
+        LayeredImmutableCache,
+        LayeredSwrCache,
+        SwrCache,
+    )
 
     l2 = build_l2_stores(app)
     if l2:
@@ -133,40 +138,29 @@ def _init_l2_immutable_caches(app: Flask) -> None:
             return None
         return {retention: l2[retention][kind] for retention in l2}
 
-    # `soft_ttl` / `hard_ttl` are not consulted in `immutable=True` mode
-    # but the constructor requires them. Pass the configured values for
-    # documentation value (operator can still see them in config).
-    soft = app.config["CACHE_QUERY_TTL_SECONDS"]
-    hard = soft
+    # The four immutable L1+L2 caches below all use `LayeredImmutableCache`:
+    # their keys pin enough invariants (typically `(ds, mat_version, ...)`)
+    # that any hit is bit-identical to a fresh fetch. No soft/hard TTL
+    # gating — bucket lifecycle on the L2 layer is the single source of
+    # L2 expiry.
 
-    app.extensions["dcv_synapse_cache"] = LayeredSwrCache(
-        soft_ttl=soft,
-        hard_ttl=hard,
+    app.extensions["dcv_synapse_cache"] = LayeredImmutableCache(
         maxsize=4096,  # # of distinct (ds, mv, syn-hash) entries in memory
         l2=_l2_for_kind("synapse"),
         executor=writer,
         retention_resolver=_resolve_retention,
-        immutable=True,
     )
-    soft_spatial = app.config["CACHE_SPATIAL_FEATURES_TTL_SECONDS"]
-    app.extensions["dcv_spatial_features_cache"] = LayeredSwrCache(
-        soft_ttl=soft_spatial,
-        hard_ttl=soft_spatial,
+    app.extensions["dcv_spatial_features_cache"] = LayeredImmutableCache(
         maxsize=256,  # entries can be a few MB on heavily-connected neurons
         l2=_l2_for_kind("spatial_features"),
         executor=writer,
         retention_resolver=_resolve_retention,
-        immutable=True,
     )
-    soft_unique = app.config["CACHE_UNIQUE_VALUES_TTL_SECONDS"]
-    app.extensions["dcv_unique_values_cache"] = LayeredSwrCache(
-        soft_ttl=soft_unique,
-        hard_ttl=soft_unique,
+    app.extensions["dcv_unique_values_cache"] = LayeredImmutableCache(
         maxsize=512,  # # of distinct (ds, mv, table) entries
         l2=_l2_for_kind("unique_values"),
         executor=writer,
         retention_resolver=_resolve_retention,
-        immutable=True,
     )
 
     # Cell_id universe cache. One entry per (cache_ds, mat_version,
@@ -176,14 +170,11 @@ def _init_l2_immutable_caches(app: Flask) -> None:
     # CAVE round-trip; every subsequent user and pod hits warm via
     # the shared L2 (GCS) layer. Replaces the per-process TTLCache
     # that used to live in `services/cell_id.py:_universe_mat`.
-    app.extensions["dcv_cell_id_universe_cache"] = LayeredSwrCache(
-        soft_ttl=soft,
-        hard_ttl=hard,
+    app.extensions["dcv_cell_id_universe_cache"] = LayeredImmutableCache(
         maxsize=64,  # per-pod L1 — generous; entries are single-digit MB
         l2=_l2_for_kind("cell_id_universe"),
         executor=writer,
         retention_resolver=_resolve_retention,
-        immutable=True,
     )
 
     # Feature-explorer embedding frames. L1-only (per-pod) — deliberately
@@ -197,12 +188,7 @@ def _init_l2_immutable_caches(app: Flask) -> None:
     # parquet_uri); a repoint to a new parquet routes to a fresh entry.
     # Entries are full pickled DataFrames (single-digit MB up to ~200MB
     # for a 500k-row embedding), so maxsize is conservative.
-    app.extensions["dcv_embedding_frame_cache"] = SwrCache(
-        soft_ttl=soft_unique,
-        hard_ttl=soft_unique,
-        maxsize=32,
-        immutable=True,
-    )
+    app.extensions["dcv_embedding_frame_cache"] = ImmutableCache(maxsize=32)
 
     # Datastack-info cache: long-TTL (24h via CACHE_INFO_TTL_SECONDS).
     # Holds the dict returned by `client.info.get_datastack_info()` per
@@ -251,9 +237,7 @@ def _init_l2_immutable_caches(app: Flask) -> None:
     # serializing to L2 — the parquet itself is cached per-pod via
     # dcv_embedding_frame_cache (also L1-only), and standardizing a
     # cached frame is fast (~10-50ms for 100k cells).
-    app.extensions["dcv_embedding_matrix_cache"] = SwrCache(
-        soft_ttl=0, hard_ttl=0, maxsize=32, immutable=True,
-    )
+    app.extensions["dcv_embedding_matrix_cache"] = ImmutableCache(maxsize=32)
 
     # SVD cache for PCA + Mahalanobis projections. Keyed on the same
     # (cache_ds, ft_id, feature_subset_digest) triple as the matrix cache
@@ -261,9 +245,7 @@ def _init_l2_immutable_caches(app: Flask) -> None:
     # full-whitening Mahalanobis. L1-only: the components matrix is
     # n_features^2 floats, negligible to refit from the cached matrix
     # (~5-50ms), and the matrix itself is the larger cache entry.
-    app.extensions["dcv_embedding_pca_cache"] = SwrCache(
-        soft_ttl=0, hard_ttl=0, maxsize=32, immutable=True,
-    )
+    app.extensions["dcv_embedding_pca_cache"] = ImmutableCache(maxsize=32)
 
     # Per-column histogram summaries (numeric bin counts or categorical
     # per-value counts). Keyed on (cache_ds, ft_id, column, dec_tuple,
@@ -272,14 +254,11 @@ def _init_l2_immutable_caches(app: Flask) -> None:
     # cache in the feature explorer: every user opening the Selection
     # Builder on a popular column pays one ~30ms GCS read instead of
     # re-binning 94k values.
-    app.extensions["dcv_column_histogram_cache"] = LayeredSwrCache(
-        soft_ttl=soft_unique,
-        hard_ttl=soft_unique,
+    app.extensions["dcv_column_histogram_cache"] = LayeredImmutableCache(
         maxsize=512,
         l2=_l2_for_kind("column_histograms"),
         executor=writer,
         retention_resolver=_resolve_retention,
-        immutable=True,
     )
 
 

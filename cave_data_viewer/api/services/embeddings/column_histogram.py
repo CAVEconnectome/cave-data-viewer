@@ -21,13 +21,19 @@ intersection step). The histogram is purely a display-tier accelerant.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
+from flask import current_app
 
-from ..timing import timer
+from ..datastack_config import check_live_allowed
+from ..timing import record_stage, timer
+from ...errors import ApiError
+from .manifest import FeatureTableSpec
+from .runtime import join_seed_columns, load_universe_frame
 
 
 # Binning modes for numeric columns. ``linear`` = equal-width bins
@@ -214,6 +220,104 @@ def _compute_categorical_histogram(
         n_null=n_null,
         truncated=truncated,
     )
+
+
+def compute_column_histogram(
+    *,
+    ds: str,
+    cfg,
+    ft: FeatureTableSpec,
+    column: str,
+    mat_version: int | str | None,
+    decoration_tables: list[str],
+    n_bins: int,
+    binning: Binning,
+    seed_raw: str | None,
+    client_factory,
+) -> dict[str, Any]:
+    """Resolve, cache-or-compute, and return the histogram payload for
+    one column. The cache key tuple is identical to the inline version
+    — ``(cache_ds, ft.id, column, dec_tuple, mat_version, n_bins,
+    binning, seed_for_key)`` — so warm pods don't stampede on a refactor.
+    Raises :class:`ApiError` (422) with the same code strings the inline
+    route did."""
+    if "." in column:
+        table = column.split(".", 1)[0]
+        if table not in (ft.id, "nucleus") and table not in decoration_tables:
+            decoration_tables = [*decoration_tables, table]
+    if decoration_tables and mat_version is None:
+        raise ApiError(
+            422,
+            "missing_mat_version",
+            "mat_version is required when the column lives in a "
+            "decoration table or synthetic nucleus space",
+        )
+    if decoration_tables:
+        try:
+            check_live_allowed(ds, mat_version)
+        except ValueError as exc:
+            raise ApiError(422, "live_mode_disallowed", str(exc)) from exc
+
+    # Route alias resolution through the shared accessor so this site
+    # can't drift from `cache_lifecycle.cache_datastack` if the alias
+    # logic ever evolves (the previous inline `cfg.cache_alias or ds`
+    # was a parallel implementation of the same rule).
+    from ..cache_accessors import (
+        column_histogram_cache_key,
+        get_column_histogram_cache,
+    )
+    dec_tuple = tuple(sorted(decoration_tables))
+    seed_for_key = seed_raw if column.startswith("seed_") else None
+    key = column_histogram_cache_key(
+        ds, ft.id, column, dec_tuple, mat_version, n_bins, binning, seed_for_key,
+    )
+
+    cache = get_column_histogram_cache()
+    if cache is not None:
+        t0 = time.perf_counter()
+        hit = cache.get(key)
+        cache_elapsed_ms = (time.perf_counter() - t0) * 1000.0
+        if hit is not None:
+            value, _ = hit
+            record_stage("column_histogram_l1_hit", cache_elapsed_ms)
+            return value
+
+    frame = load_universe_frame(
+        ds=ds,
+        cfg=cfg,
+        ft=ft,
+        mat_version=mat_version,
+        decoration_tables=decoration_tables,
+        client_factory=client_factory,
+    )
+    if column.startswith("seed_"):
+        frame = join_seed_columns(
+            frame,
+            ds=ds,
+            cfg=cfg,
+            mat_version=mat_version,
+            seed_raw=seed_raw,
+            client_factory=client_factory,
+        )
+
+    if column not in frame.columns:
+        raise ApiError(
+            422,
+            "column_not_found",
+            f"column {column!r} not present in feature_table frame "
+            f"(have {list(frame.columns)[:20]}…)",
+        )
+
+    series = frame[column]
+    if pd.api.types.is_numeric_dtype(series):
+        h = compute_numeric_histogram(series, n_bins=n_bins, binning=binning)
+    else:
+        h = compute_categorical_histogram(series)
+
+    payload = histogram_to_json(h)
+    if cache is not None:
+        cache.set(key, payload)
+    return payload
 
 
 def histogram_to_json(

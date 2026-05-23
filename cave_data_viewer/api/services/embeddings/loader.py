@@ -33,7 +33,6 @@ import logging
 import time
 
 import pandas as pd
-from flask import current_app
 
 from .manifest import FeatureTableSpec
 from .uri import fetch_bytes, local_path_for
@@ -75,10 +74,15 @@ def load_feature_table_frame(
     by-definition fixed, and a repoint to a new file routes to a fresh
     entry.
     """
+    from ..cache_accessors import embedding_frame_cache_key, get_embedding_frame_cache
+    # `cache_ds` is accepted for callers that already aliased; pass the
+    # raw value (or default to `datastack`) to the accessor's key builder,
+    # which applies cache_datastack idempotently — passing an already-aliased
+    # ds is a no-op since aliases don't self-loop.
+    key = embedding_frame_cache_key(cache_ds or datastack, ft.id, ft.source.uri)
     cache_ds = cache_ds or datastack
-    key = _cache_key(cache_ds, ft)
 
-    cache = current_app.extensions.get("dcv_embedding_frame_cache")
+    cache = get_embedding_frame_cache()
     if cache is not None:
         t0 = time.perf_counter()
         hit = cache.get(key)
@@ -123,10 +127,6 @@ def _ensure_source_ds(df: pd.DataFrame, default_ds: str) -> pd.DataFrame:
     df = df.copy()
     df[SOURCE_DS_COLUMN] = default_ds
     return df
-
-
-def _cache_key(cache_ds: str, ft: FeatureTableSpec) -> tuple:
-    return (cache_ds, ft.id, ft.source.uri)
 
 
 def _read_parquet(uri: str) -> pd.DataFrame:

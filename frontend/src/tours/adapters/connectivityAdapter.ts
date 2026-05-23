@@ -17,7 +17,6 @@ import {
 } from "../urlMint";
 import { parseRecipeFromUrl, urlHasRecipeContent } from "../recipeFromUrl";
 import { recipeToYaml } from "../recipeYaml";
-import { parseScopeBlock } from "../recipeFromYaml";
 import type { RecipeKindAdapter, RecipeDiffSummary } from "./types";
 
 export const connectivityAdapter: RecipeKindAdapter<ConnectivityRecipe> = {
@@ -86,8 +85,6 @@ export function coerceConnectivityFromYaml(
   const id = typeof parsed.id === "string" ? parsed.id : meta.id;
   const title =
     typeof parsed.title === "string" ? parsed.title : meta.title ?? id;
-  const where = typeof parsed.id === "string" ? `recipe "${parsed.id}"` : meta.id;
-  const scope = parseScopeBlock(parsed.scope, where);
   return {
     id,
     kind: "connectivity",
@@ -102,7 +99,6 @@ export function coerceConnectivityFromYaml(
     hide: arrOfStrings(parsed.hide),
     show: arrOfStrings(parsed.show),
     coll: arrOfStrings(parsed.coll),
-    ...(scope !== undefined ? { scope } : {}),
   };
 }
 

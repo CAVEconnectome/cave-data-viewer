@@ -5,8 +5,8 @@ which holds short-lived per-(ds, mv) responses whose values legitimately
 shift with mat_version (table list, version metadata) and need TTL
 eviction rather than the immutable-data semantics of `LayeredSwrCache`.
 
-Every other CAVE-derived cache moved to
-`LayeredSwrCache(immutable=True)` instances on `app.extensions` — see
+Every other CAVE-derived cache moved to `LayeredImmutableCache` /
+`ImmutableCache` instances on `app.extensions` — see
 `_init_l2_immutable_caches` in `api/__init__.py`. Those carry their own
 L1 LRU and an optional GCS L2 layer. Reach for that primitive for any
 new cache-able CAVE-derived data; reach for `_LazyTTLCache` only when
@@ -63,25 +63,32 @@ class _LazyTTLCache:
         return self._resolve().pop(key, default)
 
 
+def config_digest(config_bundle: dict) -> str:
+    """Stable BLAKE2b-8 digest of a config bundle.
+
+    Used as a cache-key segment so every knob that shapes the cached
+    payload (synapse aggregation rules, position prefix, desired
+    resolution, …) participates in the key. Identical bundles produce
+    identical digests; one extra field flips the key.
+
+    Bundle values must be JSON-serializable primitives (handled via
+    ``default=str`` for the few cases — like ``Path`` — that aren't).
+    """
+    from hashlib import blake2b
+    blob = json.dumps(config_bundle, sort_keys=True, default=str, separators=(",", ":")).encode()
+    return blake2b(blob, digest_size=8).hexdigest()
+
+
 def cache_key_with_config(*positional: Any, config_bundle: dict) -> tuple:
     """Build a tuple cache key that includes a stable hash of the response-
     shaping config bundle.
 
-    Caches keyed by `(ds, mat_version, root_id, ...)` are correct only if every
-    knob that changes the cached payload is part of the key. Knobs sourced from
-    the request body or per-datastack YAML (synapse aggregation rules, position
-    prefix, desired resolution, etc.) belong in the key too — but listing them
-    by hand is error-prone and a future knob silently leaks a stale-shape hit.
-
-    Pass the inputs as `config_bundle` (a dict of primitives — JSON-dump'd
-    deterministically with `sort_keys=True`); the digest enters the key as a
-    short BLAKE2b prefix. Identical bundles produce identical digests; one
-    extra field flips the key.
+    Thin wrapper over :func:`config_digest` for callers that want the
+    key tuple constructed in one call. Reach for ``config_digest``
+    directly when the surrounding key is built by an accessor's key
+    builder.
     """
-    from hashlib import blake2b
-    blob = json.dumps(config_bundle, sort_keys=True, default=str, separators=(",", ":")).encode()
-    digest = blake2b(blob, digest_size=8).hexdigest()
-    return (*positional, digest)
+    return (*positional, config_digest(config_bundle))
 
 
 table_meta_cache = _LazyTTLCache("CACHE_TABLE_META_TTL_SECONDS", maxsize=512)

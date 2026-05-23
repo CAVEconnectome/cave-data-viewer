@@ -3,11 +3,10 @@ from concurrent.futures import ThreadPoolExecutor
 from cachetools.keys import hashkey
 from flask import Blueprint, current_app, jsonify, request
 
-from ..auth import auth_required, current_token, is_dev_bypass
+from ..auth import auth_required
 from ..caches import table_meta_cache
-from ..cave import request_client
 from ..errors import ApiError
-from ..services.cache_lifecycle import cache_datastack
+from ._helpers import request_client_or_401
 from ..services.datastack_config import (
     cached_datastack_info,
     latest_valid_mat_version,
@@ -34,24 +33,11 @@ def list_datastacks():
     return jsonify({"datastacks": list_configured_datastacks()})
 
 
-def _client_for(ds: str) -> "object":
-    mat_version = request.args.get("mat_version") or None
-    try:
-        return request_client(
-            datastack_name=ds,
-            server_address=current_app.config["GLOBAL_SERVER_ADDRESS"],
-            auth_token=current_token(),
-            dev_bypass=is_dev_bypass(),
-            materialize_version=mat_version,
-        )
-    except ValueError as exc:
-        raise ApiError(401, "no_auth_token", str(exc)) from exc
-
-
 @bp.route("/<ds>/info")
 @auth_required
 def info(ds: str):
-    client = _client_for(ds)
+    mat_version = request.args.get("mat_version") or None
+    client = request_client_or_401(ds, mat_version)
     # 24h cache covers all the fields below; a warm pod serves /info
     # without an info-service round-trip. None if CAVE's info service
     # is unreachable or the datastack is unconfigured — we still return
@@ -80,8 +66,9 @@ def versions(ds: str):
     cache_key = hashkey("versions", ds)
     if cache_key in table_meta_cache:
         return jsonify(table_meta_cache[cache_key])
+    mat_version = request.args.get("mat_version") or None
     try:
-        client = _client_for(ds)
+        client = request_client_or_401(ds, mat_version)
         metadata = client.materialize.get_versions_metadata()
     except ApiError:
         raise
@@ -161,7 +148,7 @@ def tables(ds: str):
     if cache_key in table_meta_cache:
         return jsonify(table_meta_cache[cache_key])
     try:
-        client = _client_for(ds)
+        client = request_client_or_401(ds, mv_raw)
     except ApiError:
         raise
     except Exception as exc:
@@ -288,7 +275,7 @@ def table_values(ds: str, table: str):
     """
     mv_raw = request.args.get("mat_version") or None
     live_mode = is_live(mv_raw)
-    client = _client_for(ds)
+    client = request_client_or_401(ds, mv_raw)
     if live_mode:
         latest = latest_valid_mat_version(client)
         if latest is None:
@@ -298,8 +285,8 @@ def table_values(ds: str, table: str):
                 f"cannot resolve 'live' to a unique-values lookup.",
             )
         client.materialize.version = latest
-    # `dcv_unique_values_cache` is a `LayeredSwrCache(immutable=True)`:
-    # for materialized versions the values are frozen at
+    # `dcv_unique_values_cache` is a `LayeredImmutableCache`: for
+    # materialized versions the values are frozen at
     # `materialize.create()` time, so the cached entry is bit-identical
     # to a re-fetch. Bucket lifecycle handles expiry.
     #
@@ -307,9 +294,13 @@ def table_values(ds: str, table: str):
     # `services/categorical.py` writes — so both consumers share one
     # cache entry rather than racing on differently-prefixed keys.
     # The `{table, values}` payload is shaped here at read time.
+    from ..services.cache_accessors import (
+        get_unique_values_cache,
+        unique_values_cache_key,
+    )
     cache_version = client.materialize.version
-    cache_key = (cache_datastack(ds), cache_version, table)
-    cache = current_app.extensions["dcv_unique_values_cache"]
+    cache_key = unique_values_cache_key(ds, cache_version, table)
+    cache = get_unique_values_cache()
     hit = cache.get(cache_key)
     if hit is not None:
         return jsonify({"table": table, "values": hit[0]})

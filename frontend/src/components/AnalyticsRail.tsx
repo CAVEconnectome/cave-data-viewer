@@ -6,7 +6,6 @@ import type { PlotBindings } from "../api/queries";
 import { useUrlParam } from "../hooks/useUrlState";
 import {
   type ColumnBoundPlotDescriptor,
-  type PlotDescriptor,
   useResolvedPlotRegistry,
 } from "../plots/registry";
 import {
@@ -833,6 +832,3 @@ function ColumnBoundPlot({
   );
 }
 
-// re-export for the type contract — PlotDescriptor isn't used directly here but
-// callers may want to import alongside.
-export type { PlotDescriptor };

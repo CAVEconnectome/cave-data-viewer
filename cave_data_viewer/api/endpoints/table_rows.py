@@ -1,10 +1,10 @@
 import re
 
 import pandas as pd
-from flask import Blueprint, current_app, jsonify, request
+from flask import Blueprint, jsonify, request
 
-from ..auth import auth_required, current_token, is_dev_bypass
-from ..cave import request_client
+from ..auth import auth_required
+from ._helpers import request_client_or_401
 from ..errors import ApiError
 from ..services.datastack_config import cached_datastack_info, latest_valid_mat_version
 from ..services.keys import is_live
@@ -69,20 +69,6 @@ _MAX_ROW_LIMIT = 200_000
 bp = Blueprint("table_rows", __name__, url_prefix="/datastacks")
 
 
-def _client_for(ds: str):
-    mat_version = request.args.get("mat_version") or None
-    try:
-        return request_client(
-            datastack_name=ds,
-            server_address=current_app.config["GLOBAL_SERVER_ADDRESS"],
-            auth_token=current_token(),
-            dev_bypass=is_dev_bypass(),
-            materialize_version=mat_version,
-        )
-    except ValueError as exc:
-        raise ApiError(401, "no_auth_token", str(exc)) from exc
-
-
 @bp.route("/<ds>/tables/<table>/rows", methods=["GET"])
 @auth_required
 def rows(ds: str, table: str):
@@ -101,7 +87,7 @@ def rows(ds: str, table: str):
 
     mat_version = args.get("mat_version") or None
 
-    client = _client_for(ds)
+    client = request_client_or_401(ds, mat_version)
     filters = parse_filters(args)
 
     # In live mode, pre-resolve the latest valid mat version and stamp it on

@@ -44,7 +44,6 @@ export function ExampleCard({ ds, example }: { ds: string; example: Example }) {
           hide: rest.hide ?? [],
           show: rest.show ?? [],
           coll: rest.coll ?? [],
-          ...(rest.scope !== undefined ? { scope: rest.scope } : {}),
         };
         const params = adapter.buildOpenParams(ds, recipe, mv);
         if (full.pinned.root) {
@@ -60,7 +59,6 @@ export function ExampleCard({ ds, example }: { ds: string; example: Example }) {
           kind: "explorer",
           title: full.title,
           explorer: rest.explorer,
-          ...(rest.scope !== undefined ? { scope: rest.scope } : {}),
         };
         const params = adapter.buildOpenParams(ds, recipe, mv);
         writePendingApplyExtras(ds, "explorer", { selection: full.explorer.selection ?? [] });

@@ -428,28 +428,6 @@ class TourPlot(BaseModel):
     unfiltered: bool = False
 
 
-class ScopePredicate(BaseModel):
-    """One scope-filter predicate. References a stable feature-table or
-    decoration-table column by name; the column must be expected to outlive
-    cell_id churn (no runtime check — operator/PR review enforces).
-
-    Operators:
-      - `in`         — value must be a list; matches column ∈ list
-      - `eq` / `ne`  — scalar equality / inequality
-      - `gt` / `gte` / `lt` / `lte` — numeric ordering
-    """
-    column: str
-    op: Literal["in", "eq", "ne", "gt", "gte", "lt", "lte"]
-    value: Any = None
-    values: list[Any] = Field(default_factory=list)
-
-
-class Scope(BaseModel):
-    """Filter Scope predicate group on a recipe. Common to connectivity
-    and explorer recipes."""
-    predicates: list[ScopePredicate] = Field(default_factory=list)
-
-
 class TourBase(BaseModel):
     """Fields common to Examples and connectivity Recipes. Kept as the
     parent for Example (still single-shape) and ConnectivityRecipe (the
@@ -472,7 +450,6 @@ class TourBase(BaseModel):
     hide: list[str] = Field(default_factory=list)
     show: list[str] = Field(default_factory=list)
     coll: list[str] = Field(default_factory=list)
-    scope: Scope | None = None
 
 
 class Example(TourBase):
@@ -558,7 +535,7 @@ class ExplorerState(BaseModel):
 class ExplorerRecipe(BaseModel):
     """Explorer-shaped recipe. The CTA is "Apply", which navigates the
     user to /explore (or merges state if already there) and restores
-    feature-table / embedding / scatter bindings / decorations / scope /
+    feature-table / embedding / scatter bindings / decorations /
     selection bag.
 
     Doesn't inherit from TourBase — explorer has its own field set with
@@ -569,7 +546,6 @@ class ExplorerRecipe(BaseModel):
     description: str | None = None
     kind: Literal["explorer"] = "explorer"
     explorer: ExplorerState = Field(default_factory=ExplorerState)
-    scope: Scope | None = None
 
 
 # Discriminated union. Pydantic picks the arm by the value of `kind`;

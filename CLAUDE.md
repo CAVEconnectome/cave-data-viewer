@@ -27,7 +27,111 @@ npm run build    # tsc -b && vite build
 
 `CDV_DEV_AUTH_BYPASS=1` skips middle-auth-client so a local dev environment doesn't need a CAVE token in cookies; production must run without it. Datastack and aligned-volume YAMLs live in the top-level `config/` directory (`config/datastacks/`, `config/aligned_volumes/`) — bundled into the wheel via hatchling `force-include`, with `CDV_DATASTACK_CONFIG_DIR` / `CDV_ALIGNED_VOLUME_CONFIG_DIR` for deployment overrides.
 
-There are no automated tests yet. The dev workflow is to start the API + SPA and exercise it in a browser against `minnie65_public`.
+## Testing
+
+```bash
+uv run pytest             # backend — pytest, tests/ directory
+cd frontend && npm test   # frontend — Vitest (test:watch for watch mode)
+```
+
+Both suites are pure unit tests — no CAVE, network, or GCS access (fake
+clients and monkeypatched primitives throughout) — so they run fast and
+offline. CI runs the same two commands via `.github/workflows/tests.yml`;
+there is intentionally no CI-only test behavior.
+
+Coverage is partial and concentrates on the layers where bugs are subtle
+and expensive: the caching / stale-while-revalidate machinery, per-datastack
+config loading, and the cell_id↔root_id resolver + recipe adapters that form
+the interface between the connectivity (`/neuron`) and feature-explorer
+(`/explore`) halves of the app. Feature-level verification is still a
+browser pass: start the API + SPA and exercise it against `minnie65_public`.
+
+## Design rules
+
+Project-level rules that aren't obvious from the code. Following them
+keeps future changes coherent.
+
+**Persistence.** URLs and saved recipes are the only mechanisms that
+carry cross-session continuity. **Never** add a localStorage auto-restore
+of view state — sessionStorage for within-tab cross-route handoffs is the
+only allowed extra. (`cdv:hidden_cols` / `cdv:shown_cols` are pre-existing
+exceptions for column-visibility preferences; don't add more.)
+
+**No wire-compat shims.** There are no deployed older-schema clients —
+remove vestigial fields, aliases, and "kept for older versions" comments
+outright. The reservation entries in `_KNOWN_FIELDS` are the one
+exception: a small forward-compat allowlist for fields a future client
+might write, not a back-compat shim for old ones.
+
+**Connectivity + feature explorer are co-equal.** The two halves aren't
+core-vs-secondary — feature-space identification of cells leads into
+connectivity inspection and vice versa. Design the shared bridge cleanly
+(seed linking, the cell_id↔root_id resolver, cross-nav), don't isolate
+the explorer.
+
+**Identity boundary.** Features are keyed by stable `cell_id`. `root_id`s
+appear only at cross-navigation boundaries via
+`services/embeddings/resolver.py`. Inside explorer data paths
+(`/points`, `/column`, `/distance_to_set`), cell_ids only.
+
+**`/neuron` stays minimal.** New modal / rich-interaction surfaces belong
+in `/explore`. `/neuron` gets cross-nav *links* to /explore, not embedded
+modes.
+
+**Filter Scope vs Selection.** Distinct concepts: Filter Scope defines
+the active set; Selection is a stable bag of cell_ids accumulated by the
+user (lasso, table checkboxes, Cell-ID Search). They intersect at render
+time. **Filter changes must never destroy the Selection bag.**
+
+**Connectivity metric conventions.** Expose directional in/out primitives
+plus the YAML-configured aggregation rules. "Net" is always a sum, never
+out-minus-in. Don't invent derived columns.
+
+**Seed-driven derivation.** For synthetic columns derivable from
+server-cached data, use a URL seed param + on-demand projection — never a
+client-posted value bag.
+
+**Intentional abstractions** (don't flag as premature in reviews):
+
+- The spatial provider protocol (`services/spatial/`) has one concrete
+  implementation (`cortex.py`) today, but it's deliberate runway for a
+  second, richer provider expected within months.
+- `frontend/src/plots/registry.ts`'s `plotRegistry` is intentionally
+  empty: every plot today is user-configured via "+ Add plot," but the
+  static / column-bound branches in `AnalyticsRail` are kept for future
+  "panels that should always mount" (e.g. a fixed cortical-depth plot for
+  cortex datastacks).
+
+## When modifying
+
+A grepable index from "I'm touching X" to "read Y first." Each pointer
+references a section in this file.
+
+- **`services/decoration.py` / `services/swr.py` / `services/object_store.py`**
+  → Caching strategy section. SWR ticket-readiness invariants and the
+  late-binding closure rule are easy to break;
+  `tests/test_revalidation_closure_binding.py` is the lint-style guard.
+- **`services/embeddings/resolver.py`, cell_id↔root_id at any cross-nav**
+  → Design rules: Identity boundary. Features stay in cell_id space; only
+  the resolver crosses.
+- **`frontend/src/tours/adapters/explorerAdapter.ts`, explorer URL state**
+  → The `EXPLORER_FIELDS` descriptor table is the source of truth. The
+  round-trip tests in `frontend/src/tours/adapters/adapters.test.ts` lock
+  the contract.
+- **Frontend URL state with 2+ keys**
+  → `hooks/useUrlState.ts::useSetUrlParams`. Chained `setSearchParams`
+  calls race because react-router v6 reads at call time.
+- **`services/neuron.py`, connectivity metric columns**
+  → Design rules: Connectivity metric conventions. In/out primitives;
+  "net" = sum.
+- **`config/datastacks/*.yaml`**
+  → Per-datastack YAML config section. `uv run cdv-check-config` validates.
+- **Recipe schema (any field on either kind)**
+  → `services/recipes.py` (backend storage + caps) and `tours/adapters/`
+  (frontend round-trip). Design rule: no wire-compat shims.
+- **Anything that looks like dead code in `services/spatial/` or
+  `plots/registry.ts`**
+  → Design rules: Intentional abstractions. Don't cut.
 
 ## Architecture
 

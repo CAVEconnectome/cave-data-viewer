@@ -51,22 +51,6 @@ function emitRecipe(recipe: ConnectivityRecipe, lines: string[], indent: number)
   if (recipe.cells) {
     lines.push(`${pad}cells: ${quoteIfNeeded(recipe.cells)}`);
   }
-  if (recipe.scope && recipe.scope.predicates.length > 0) {
-    lines.push(`${pad}scope:`);
-    lines.push(`${pad}  predicates:`);
-    for (const pred of recipe.scope.predicates) {
-      lines.push(`${pad}    - column: ${quoteIfNeeded(pred.column)}`);
-      lines.push(`${pad}      op: ${quoteIfNeeded(pred.op)}`);
-      if (pred.values !== undefined && (pred.values as unknown[]).length > 0) {
-        lines.push(`${pad}      values:`);
-        for (const v of pred.values as unknown[]) {
-          lines.push(`${pad}        - ${quoteIfNeeded(String(v))}`);
-        }
-      } else if (pred.value !== undefined) {
-        lines.push(`${pad}      value: ${quoteIfNeeded(String(pred.value))}`);
-      }
-    }
-  }
   for (const key of ["hide", "show", "coll"] as const) {
     const list = recipe[key];
     if (list && list.length > 0) {

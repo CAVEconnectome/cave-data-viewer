@@ -304,6 +304,48 @@ _KINDS: tuple[str, ...] = (
 _RETENTION_CLASSES: tuple[str, ...] = ("default", "longlived")
 
 
+# Per-kind L2 path version. Lives in the GCS prefix between `<kind>/`
+# and the key tuple, so bumping a version routes new writes to a fresh
+# subtree and leaves old entries to age out via the bucket lifecycle
+# rule. There is NO migration — old prefix simply becomes unreachable
+# to the new code, the cold reads fall through to L1-miss → CAVE
+# refetch → L2-rewrite under the new prefix, and the bucket lifecycle
+# sweeps the orphans.
+#
+# When to bump a kind's version:
+#   - A cached dataclass changes fields (e.g. CachedSpatialFeatures
+#     gains/loses/renames an attribute).
+#   - pandas major version changes (pickle format for DataFrames can
+#     drift in subtle ways across major versions).
+#   - The fetcher's output shape changes (e.g. a column type changes,
+#     a dict key is renamed, a value's dtype shifts).
+#   - You realize the cached value's semantics have changed even
+#     though the on-disk shape happens to match.
+#
+# When NOT to bump:
+#   - Adding a new column / dict key with backwards-compatible default
+#     handling at the reader.
+#   - Refactors that don't change the cached value's identity.
+#
+# The cross-version canary test in `tests/test_cache_pickle_compat.py`
+# is the bite-detector: when a structural change breaks fixture
+# unpickling, the test names the failing kind and tells the developer
+# exactly which constant to bump and how to regenerate the fixture.
+# See `tests/fixtures/cache/README.md`.
+#
+# Invariant: `set(_KINDS) == set(_CACHE_VERSIONS.keys())`. Enforced in
+# `build_l2_stores`.
+_CACHE_VERSIONS: dict[str, str] = {
+    "num_soma": "v1",
+    "table": "v1",
+    "synapse": "v1",
+    "spatial_features": "v1",
+    "unique_values": "v1",
+    "cell_id_universe": "v1",
+    "column_histograms": "v1",
+}
+
+
 def build_l2_stores(app) -> dict[str, dict[str, GcsObjectStore]]:
     """Return a 2-level dict of named GCS stores per (retention_class, kind),
     or ``{}`` if ``GCS_CACHE_BUCKET`` is unset.
@@ -316,17 +358,36 @@ def build_l2_stores(app) -> dict[str, dict[str, GcsObjectStore]]:
             "longlived": {"cell_type": Store, "num_soma": Store, ...},
         }
 
-    Each store's prefix is ``<GCS_CACHE_PREFIX><retention_class>/<kind>/``,
-    e.g. ``cache/default/cell_type/`` or ``cache/longlived/synapse/``.
-    Retention class as the **outermost** path component lets the bucket's
-    lifecycle rules scope to one prefix per class
-    (``matchesPrefix: ["cache/default/"]`` etc.).
+    Each store's prefix is
+    ``<GCS_CACHE_PREFIX><retention_class>/<kind>/<version>/``,
+    e.g. ``cache/default/cell_type/v1/`` or
+    ``cache/longlived/synapse/v1/``. Version segment is per-kind, sourced
+    from ``_CACHE_VERSIONS``; bumping a kind's version routes new writes
+    to a fresh subtree and leaves the prior subtree to age out via
+    bucket lifecycle. Retention class is the **outermost** content
+    component (after the configured prefix) so lifecycle rules can
+    scope to one class (``matchesPrefix: ["cache/default/"]`` etc.).
 
     `GCS_CACHE_PROJECT` (when set) flows into every store's `Client`
     constructor as the billing/quota project. Necessary for end-user
     ADC; ignored when not set (the client falls back to whatever the
     auth identity carries).
     """
+    # Parity assert: a new kind added to `_KINDS` without a matching
+    # `_CACHE_VERSIONS` entry would silently default to no versioning
+    # if we let it through. Failing the build at boot is the only safe
+    # alternative.
+    if set(_KINDS) != set(_CACHE_VERSIONS.keys()):
+        missing = set(_KINDS) - set(_CACHE_VERSIONS.keys())
+        extra = set(_CACHE_VERSIONS.keys()) - set(_KINDS)
+        raise RuntimeError(
+            "object_store._KINDS and _CACHE_VERSIONS keys must match. "
+            f"Missing from _CACHE_VERSIONS: {sorted(missing)}; "
+            f"extra in _CACHE_VERSIONS (not in _KINDS): {sorted(extra)}. "
+            "Update _CACHE_VERSIONS in cave_data_viewer/api/services/"
+            "object_store.py — see the module docstring for when to "
+            "bump vs add."
+        )
     bucket = app.config.get("GCS_CACHE_BUCKET")
     if not bucket:
         return {}
@@ -338,7 +399,7 @@ def build_l2_stores(app) -> dict[str, dict[str, GcsObjectStore]]:
         retention: {
             kind: GcsObjectStore(
                 bucket,
-                prefix=f"{prefix}{retention}/{kind}/",
+                prefix=f"{prefix}{retention}/{kind}/{_CACHE_VERSIONS[kind]}/",
                 project=project,
             )
             for kind in _KINDS

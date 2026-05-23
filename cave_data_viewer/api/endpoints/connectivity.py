@@ -1,8 +1,8 @@
-from flask import Blueprint, current_app, jsonify, request
+from flask import Blueprint, jsonify, request
 
-from ..auth import auth_required, current_token, is_dev_bypass
-from ..cave import request_client
+from ..auth import auth_required
 from ..errors import ApiError
+from ._helpers import make_request_client_factory
 from ..services.datastack_config import (
     aligned_volume_config_for,
     check_live_allowed,
@@ -14,20 +14,6 @@ from ..services.spatial import build_spatial_provider
 from ..services.timing import timer
 
 bp = Blueprint("connectivity", __name__, url_prefix="/datastacks")
-
-
-def _client_for(ds: str):
-    mat_version = request.args.get("mat_version") or None
-    try:
-        return request_client(
-            datastack_name=ds,
-            server_address=current_app.config["GLOBAL_SERVER_ADDRESS"],
-            auth_token=current_token(),
-            dev_bypass=is_dev_bypass(),
-            materialize_version=mat_version,
-        )
-    except ValueError as exc:
-        raise ApiError(401, "no_auth_token", str(exc)) from exc
 
 
 @bp.route("/<ds>/neuron/<int:root_id>/connectivity", methods=["POST"])
@@ -52,23 +38,11 @@ def connectivity(ds: str, root_id: int):
     with timer("endpoint_setup"):
         cfg = load_datastack_config(ds)
 
-        # Capture the user's auth token + dev_bypass flag in the request thread;
-        # the background revalidator runs after the request context is gone and
-        # needs both available via closure to dispatch the same hardened client
-        # builder (no silent cave-secret fallback in production).
-        token = current_token()
-        bypass = is_dev_bypass()
-        server_address = current_app.config["GLOBAL_SERVER_ADDRESS"]
-
-        def client_factory():
-            return request_client(
-                datastack_name=ds,
-                server_address=server_address,
-                auth_token=token,
-                dev_bypass=bypass,
-                materialize_version=mat_version,
-            )
-
+        # The background revalidator runs after the request context is gone
+        # and needs the client factory to outlive it; make_request_client_factory
+        # captures auth state at construction time so the closure stays usable
+        # (no silent cave-secret fallback in production).
+        client_factory = make_request_client_factory(ds, mat_version)
         try:
             client = client_factory()
         except ValueError as exc:

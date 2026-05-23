@@ -39,7 +39,6 @@ from .resolver import (
     Resolution,
     ResolutionStatus,
     resolve_cell_ids_to_root_ids,
-    resolve_pairs_to_root_ids,
     reverse_resolve_root_id_to_cell_id,
 )
 from .source import FeatureTableSource, ManifestFeatureTableSource, source_for
@@ -72,7 +71,6 @@ __all__ = [
     "Resolution",
     "ResolutionStatus",
     "resolve_cell_ids_to_root_ids",
-    "resolve_pairs_to_root_ids",
     "reverse_resolve_root_id_to_cell_id",
     # Decoration projection onto cell_id-positional order.
     "get_decoration_table_snapshot",
