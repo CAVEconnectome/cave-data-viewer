@@ -6,9 +6,9 @@ build-backend = "hatchling.build"
 packages = ["cave_data_viewer"]
 
 [project]
-name = "dash-connectivity-viewer"
+name = "cave-diver"
 version = "2.2.7"
-description = "Connectivity viewer for CAVE data — Flask API + React SPA"
+description = "CAVE Diver — a Flask API + React SPA for diving into CAVE connectomics data"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -57,8 +57,8 @@ cdv-check-config = "cave_data_viewer.tools.check_config:main"
 cdv-warm-cache = "cave_data_viewer.tools.warm_cache:main"
 
 [project.urls]
-Homepage = "https://github.com/ceesem/dash-connectivity-viewer"
-"Bug Tracker" = "https://github.com/ceesem/dash-connectivity-viewer/issues"
+Homepage = "https://github.com/CAVEconnectome/cave-diver"
+"Bug Tracker" = "https://github.com/CAVEconnectome/cave-diver/issues"
 
 [dependency-groups]
 dev = [

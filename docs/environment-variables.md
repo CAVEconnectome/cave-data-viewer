@@ -1,6 +1,6 @@
 # Environment Variables
 
-Every runtime knob exposed by the cave-data-viewer (CDV) backend. Every
+Every runtime knob exposed by the CAVE Diver (CDV) backend. Every
 variable in this document is read directly by the application; none are
 read by Vite/the frontend (frontend config is baked at `npm run build`
 time).

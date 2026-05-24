@@ -4,12 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A Flask API + React/TypeScript SPA for browsing CAVE (Connectome Annotation Versioning Engine) connectivity. The legacy three-Dash-app layout (`connectivity_table` / `cell_type_table` / `cell_type_connectivity`) was replaced by a single workspace SPA backed by one API service.
+**CAVE Diver** — a Flask API + React/TypeScript SPA for diving into CAVE (Connectome Annotation Versioning Engine) connectivity. The legacy three-Dash-app layout (`connectivity_table` / `cell_type_table` / `cell_type_connectivity`) was replaced by a single workspace SPA backed by one API service.
 
 - `cave_data_viewer/api/` — Flask backend.
 - `frontend/` — Vite + React + TypeScript SPA.
 
-The package name `cave_data_viewer` is historical; the runtime no longer depends on Dash.
+The Python package directory `cave_data_viewer/`, the `CDV_*` env var prefix, and the `cdv-*` script entry points are kept from the prior project name ("CAVE Data Viewer") — `cdv` still maps onto "CAVE Diver" without a rename. The runtime no longer depends on Dash.
 
 ## Running
 

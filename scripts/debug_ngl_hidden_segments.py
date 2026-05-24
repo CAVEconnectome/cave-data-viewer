@@ -2,7 +2,7 @@
 issue in nglui's `add_segments` dict form.
 
 Run:
-    cd /Users/caseysm/Work/Code/cave-data-viewer
+    cd /Users/caseysm/Work/Code/cave-diver
     uv run python scripts/debug_ngl_hidden_segments.py
 
 Each test prints the layer's segments dict + the rendered Neuroglancer
@@ -12,7 +12,7 @@ state JSON (the part that matters: `layers[1].segments` and
 visible, or all 3 hidden, or only the True ones present.
 
 Three paths:
-  1. nglui's `add_segments(dict)` form    — what cave-data-viewer uses
+  1. nglui's `add_segments(dict)` form    — what CAVE Diver uses
   2. nglui's `add_segments(list, visible)` form — alternate API
   3. Raw neuroglancer.StarredSegments      — bypasses nglui entirely
 """
@@ -47,7 +47,7 @@ def show_layer(label: str, layer) -> None:
 
 
 def test_dict_form() -> None:
-    """What cave-data-viewer does: pass a dict {id: bool} to add_segments."""
+    """What CAVE Diver does: pass a dict {id: bool} to add_segments."""
     layer = SegmentationLayer(name="seg", source="precomputed://dummy")
     layer.add_segments(segments=dict(VISIBILITY))
     show_layer("Test 1: nglui add_segments(dict)", layer)
@@ -82,7 +82,7 @@ def test_raw_neuroglancer() -> None:
 
 
 def test_end_to_end_viewer_json() -> None:
-    """Full viewer JSON via the path cave-data-viewer uses. Print the
+    """Full viewer JSON via the path CAVE Diver uses. Print the
     relevant chunk so we can see what would land in a shortened
     state-server entry."""
     viewer = ViewerState(infer_coordinates=False)

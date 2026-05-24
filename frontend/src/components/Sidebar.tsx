@@ -71,7 +71,7 @@ export function Sidebar({ navigateToView, collapsed, onToggleCollapsed }: Sideba
   return (
     <aside className="sidebar">
       {collapsed ? (
-        // Vertical "CAVE Data Viewer ›" label — uses the otherwise-
+        // Vertical "CAVE Diver ›" label — uses the otherwise-
         // wasted collapsed-strip space to brand the app and signal
         // that the strip is interactive. Click anywhere on the
         // button expands the sidebar.
@@ -81,13 +81,13 @@ export function Sidebar({ navigateToView, collapsed, onToggleCollapsed }: Sideba
           title="Expand sidebar"
           aria-label="Expand sidebar"
         >
-          <span className="vertical-label">CAVE Data Viewer</span>
+          <span className="vertical-label">CAVE Diver</span>
           <span className="vertical-chevron">›</span>
         </button>
       ) : (
         <>
           <div className="sidebar-header">
-            <h1>CAVE Data Viewer</h1>
+            <h1>CAVE Diver</h1>
             <button
               className="sidebar-toggle"
               onClick={onToggleCollapsed}

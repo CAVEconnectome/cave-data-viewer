@@ -1,12 +1,14 @@
-# CAVE Data Viewer
+# CAVE Diver
 
-A Flask API + React/TypeScript SPA for browsing CAVE (Connectome Annotation
-Versioning Engine) connectivity, decorations, and spatial features.
+A Flask API + React/TypeScript SPA for diving into CAVE (Connectome
+Annotation Versioning Engine) connectivity, decorations, and spatial
+features.
 
 Extracted from [ceesem/dash-connectivity-viewer](https://github.com/ceesem/dash-connectivity-viewer)
 after the legacy three-Dash-app layout was replaced with a unified
-workspace SPA. The package name `cave_data_viewer` reflects the new
-identity; the historical Dash dependency is gone.
+workspace SPA. The Python package directory `cave_data_viewer/` and the
+`CDV_*` env var prefix are kept from the prior name; the historical Dash
+dependency is gone.
 
 ## Components
 

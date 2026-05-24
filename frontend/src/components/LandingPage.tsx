@@ -130,7 +130,7 @@ export function LandingPage() {
   return (
     <div className="landing">
       <header className="landing-header">
-        <h2>CAVE Data Viewer</h2>
+        <h2>CAVE Diver</h2>
         <p>
           Browse curated views of CAVE connectome data.{" "}
           <strong>Recipes</strong> configure decoration tables and plots onto your current cell query.
